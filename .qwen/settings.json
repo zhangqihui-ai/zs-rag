@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python *)",
+      "Bash(pip install *)",
+      "Bash(docker compose up *)",
+      "Bash(sleep *)",
+      "Bash(curl *)",
+      "Bash(cd *)",
+      "Bash(pkill *)",
+      "Bash(nohup *)"
+    ]
+  },
+  "$version": 3
+}

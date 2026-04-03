@@ -1,0 +1,61 @@
+schema: spec-driven
+
+context: |
+  项目：企业级知识库 RAG 管理平台（从 0 到 1）
+
+  初版范围（V0，仅 3 个模块）：
+  1) 企业空间管理：企业空间（enterprise space）作为唯一租户标识，用于隔离知识库与模型配置；工程启动时初始化管理员账号，并默认创建企业空间 default；后续所有操作均基于该企业空间。
+  2) 模型管理：对接主流公有云/厂商模型服务（如阿里云百炼、DeepSeek、智谱、Kimi 等），以统一的 Provider 接口进行管理与调用。
+  3) 知识库管理：支持向量数据库（Milvus）与图数据库（Neo4j）；具体细分功能在后续规格中逐步补全。
+
+  技术栈与约束：
+  - 后端：Python 3.12+，FastAPI，SQLAlchemy，Pydantic，PostgreSQL（pgsql）
+  - 前端：Vue 3 + Vite；其它依赖优先选用主流生态（默认 TypeScript + Vue Router + Pinia）
+  - 存储：PostgreSQL（业务数据）；Milvus（向量）；Neo4j（图）
+  - 多租户：企业空间为唯一租户边界；任何与知识库/模型/配置相关的数据与 API 必须按 enterprise_space 进行隔离（默认走 default）
+
+  工程目录规范（必须遵守）：
+  - backend/  后端工程
+  - web/      前端工程（Vue 3 + Vite）
+  - docker/   Docker 镜像构建相关文件
+  - docs/     项目文档
+  - docker-compose.yml  开发环境编排启动
+  - Makefile            快捷指令集
+  - .env.template       环境变量模板
+
+rules:
+  proposal:
+    - 必须明确 V0 范围仅包含：企业空间管理、模型管理、知识库管理（Milvus + Neo4j）。
+    - 必须包含“多租户隔离策略（企业空间）”与“启动初始化（管理员 + default 企业空间）”章节。
+    - 必须明确后端/前端技术栈与工程目录规范，不得偏离既定约束。
+  design:
+    - 必须给出企业空间（租户）数据模型与隔离落点（数据库字段/外键/索引、API 鉴权与过滤策略）。
+    - 必须给出启动初始化流程（管理员账号创建、default 企业空间创建）与幂等策略。
+    - 必须给出模型 Provider 抽象与接入方式（配置项、鉴权方式、超时/重试、错误映射）。
+    - 必须说明 Milvus 与 Neo4j 的集成边界与最小可用能力（V0 只要求可连接、可读写的最小闭环）。
+  specs:
+    - API 规格必须以企业空间为上下文（路径/头/上下文注入其一），并保证所有资源均可按企业空间隔离与审计。
+    - 错误模型必须统一（HTTP 状态码 + 业务错误码 + message），并在规格中列出。
+    - 任何涉及密钥/Token 的字段必须标注为仅写入不回显（不在响应中返回明文）。
+  tasks:
+    - 任务必须按“基础骨架 → 多租户/初始化 → 模型管理 → 知识库管理（Milvus/Neo4j 最小闭环）→ 前端联调”顺序拆分。
+    - 每个任务必须包含可验证项（如何运行、如何验证接口/页面/数据隔离）。
+
+# Project context (optional)
+# This is shown to AI when creating artifacts.
+# Add your tech stack, conventions, style guides, domain knowledge, etc.
+# Example:
+#   context: |
+#     Tech stack: TypeScript, React, Node.js
+#     We use conventional commits
+#     Domain: e-commerce platform
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
