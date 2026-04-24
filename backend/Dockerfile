@@ -2,7 +2,7 @@
 # Multi-stage build for development and production
 
 # ============== Base Stage ==============
-FROM python:3.12-slim as base
+FROM python:3.12-slim AS base
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -30,7 +30,7 @@ EXPOSE 8000
 
 
 # ============== Development Stage ==============
-FROM base as development
+FROM base AS development
 
 # Install development dependencies
 RUN pip install --no-cache-dir \
@@ -45,7 +45,7 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload
 
 
 # ============== Production Stage ==============
-FROM base as production
+FROM base AS production
 
 # Create non-root user for security
 RUN useradd --create-home --shell /bin/bash appuser && \

@@ -89,19 +89,18 @@ const handleLogin = async () => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%);
+  background: var(--bg-primary);
   padding: 20px;
 }
 
 .login-card {
-  background: rgba(255, 255, 255, 0.05);
-  backdrop-filter: blur(10px);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
   border-radius: 16px;
   padding: 48px;
   width: 100%;
   max-width: 420px;
-  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--card-shadow);
 }
 
 .login-header {
@@ -110,14 +109,14 @@ const handleLogin = async () => {
 }
 
 .login-header h1 {
-  color: #7dd3fc;
+  color: var(--brand-primary);
   font-size: 2.5rem;
   margin: 0 0 8px;
   font-weight: 700;
 }
 
 .subtitle {
-  color: #94a3b8;
+  color: var(--text-secondary);
   margin: 0;
   font-size: 0.95rem;
 }
@@ -135,29 +134,29 @@ const handleLogin = async () => {
 }
 
 .form-group label {
-  color: #e2e8f0;
+  color: var(--text-primary);
   font-size: 0.9rem;
   font-weight: 500;
 }
 
 .form-group input {
   padding: 12px 16px;
-  border: 1px solid rgba(255, 255, 255, 0.2);
+  border: 1px solid var(--border-color);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.05);
-  color: #fff;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
   font-size: 1rem;
   transition: all 0.2s;
 }
 
 .form-group input:focus {
   outline: none;
-  border-color: #7dd3fc;
-  background: rgba(255, 255, 255, 0.1);
+  border-color: var(--brand-primary);
+  background: var(--bg-secondary);
 }
 
 .form-group input::placeholder {
-  color: #64748b;
+  color: var(--text-tertiary);
 }
 
 .error-message {
@@ -171,8 +170,8 @@ const handleLogin = async () => {
 
 .login-button {
   padding: 14px 24px;
-  background: linear-gradient(135deg, #7dd3fc 0%, #38bdf8 100%);
-  color: #0f172a;
+  background: var(--brand-primary);
+  color: #ffffff;
   border: none;
   border-radius: 8px;
   font-size: 1rem;
@@ -182,8 +181,9 @@ const handleLogin = async () => {
 }
 
 .login-button:hover:not(:disabled) {
+  background: var(--brand-primary-hover);
   transform: translateY(-2px);
-  box-shadow: 0 10px 20px -10px rgba(124, 211, 252, 0.5);
+  box-shadow: 0 10px 20px -10px var(--brand-primary-light);
 }
 
 .login-button:disabled {
@@ -194,7 +194,7 @@ const handleLogin = async () => {
 .login-footer {
   margin-top: 24px;
   text-align: center;
-  color: #64748b;
+  color: var(--text-tertiary);
   font-size: 0.85rem;
 }
 </style>

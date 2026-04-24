@@ -1,0 +1,51 @@
+# Backend Dockerfile — offline / air-gapped build
+# 预先将 wheel/sdist 放入 offline_deps/，构建时不再访问 PyPI。
+# 准备依赖：见 offline_deps/PIP_DOWNLOAD.txt
+#
+# 构建示例：
+#   docker build -f Dockerfile.local --target development -t zs-rag-backend:dev .
+#   docker build -f Dockerfile.local --target production -t zs-rag-backend:prod .
+
+FROM python:3.12-slim AS base
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# 离线安装：仅使用 offline_deps 目录，不访问外网索引
+COPY requirements.txt .
+COPY offline_deps ./offline_deps
+RUN pip install --no-index --find-links=offline_deps --no-cache-dir -r requirements.txt
+
+COPY . .
+
+
+FROM base AS development
+
+RUN pip install --no-index --find-links=/app/offline_deps --no-cache-dir -r /app/requirements-docker-local-extras.txt
+
+ENV APP_ENV=development
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+
+FROM base AS production
+
+RUN useradd --create-home --shell /bin/bash appuser && \
+    chown -R appuser:appuser /app
+USER appuser
+
+ENV APP_ENV=production
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import httpx; httpx.get('http://localhost:8000/health', timeout=5)" || exit 1
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,0 +1,92 @@
+# 建议文件名：provider_templates.yaml
+# 这是一版精简样例，只保留必需字段。
+# 适合后端作为“右侧可选厂商模板”的静态配置源。
+#
+# 必需字段说明：
+# - provider_code: 厂商唯一编码
+# - provider_name: 厂商名称
+# - deployment_type: public/private
+# - default_base_url: 默认接入地址
+# - supported_types: 支持的模型类型
+# - auth_type: 认证方式
+# - auth_fields: 前端要渲染的认证字段
+# - discovery_adapter: 后端用什么方式去拉该厂商的模型列表
+
+providers:
+  - provider_code: openai
+    provider_name: OpenAI
+    deployment_type: public
+    default_base_url: https://api.openai.com/v1
+    supported_types: [llm, embedding, tts, moderation]
+    auth_type: bearer
+    auth_fields:
+      - key: api_key
+        label: API Key
+        required: true
+        input_type: password
+    discovery_adapter: openai_compatible
+
+  - provider_code: anthropic
+    provider_name: Anthropic
+    deployment_type: public
+    default_base_url: https://api.anthropic.com
+    supported_types: [llm]
+    auth_type: api_key
+    auth_fields:
+      - key: api_key
+        label: API Key
+        required: true
+        input_type: password
+    discovery_adapter: anthropic_native
+
+  - provider_code: gemini
+    provider_name: Gemini
+    deployment_type: public
+    default_base_url: https://generativelanguage.googleapis.com
+    supported_types: [llm, embedding, vlm]
+    auth_type: api_key
+    auth_fields:
+      - key: api_key
+        label: API Key
+        required: true
+        input_type: password
+    discovery_adapter: gemini_native
+
+  - provider_code: deepseek
+    provider_name: DeepSeek
+    deployment_type: public
+    default_base_url: https://api.deepseek.com
+    supported_types: [llm, embedding]
+    auth_type: bearer
+    auth_fields:
+      - key: api_key
+        label: API Key
+        required: true
+        input_type: password
+    discovery_adapter: openai_compatible
+
+  - provider_code: qwen
+    provider_name: Tongyi Qwen
+    deployment_type: public
+    default_base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    supported_types: [llm, embedding, rerank, vlm, tts, asr]
+    auth_type: bearer
+    auth_fields:
+      - key: api_key
+        label: API Key
+        required: true
+        input_type: password
+    discovery_adapter: qwen_native
+
+  - provider_code: custom_openai
+    provider_name: 自定义 OpenAI 兼容服务
+    deployment_type: private
+    default_base_url: http://127.0.0.1:8000/v1
+    supported_types: [llm, embedding, rerank, vlm, tts, asr, moderation, ocr]
+    auth_type: bearer
+    auth_fields:
+      - key: api_key
+        label: API Key / Token
+        required: false
+        input_type: password
+    discovery_adapter: openai_compatible

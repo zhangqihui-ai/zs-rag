@@ -12,6 +12,11 @@ ruff_cache/
 .coverage
 htmlcov/
 backend/.venv/
+
+# 离线 Docker 构建用 wheel（体积大，见 backend/Dockerfile.local）
+backend/offline_deps/*.whl
+backend/offline_deps/*.tar.gz
+backend/offline_deps/*.zip
 backend/alembic/versions/__pycache__/
 node_modules/
 web/node_modules/

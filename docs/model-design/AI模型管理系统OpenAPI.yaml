@@ -1,0 +1,1104 @@
+openapi: 3.0.3
+info:
+  title: AI 模型管理系统 API
+  version: 1.0.0
+  description: |
+    面向企业空间隔离的 AI 模型管理接口。
+    - 所有接口均以当前登录用户所属企业空间为作用域
+    - `enterprise_id` 由登录态解析，不允许前端显式传入
+    - 支持公有云/私有化模型接入、模型同步、启用/禁用、默认模型设置
+servers:
+  - url: /
+security:
+  - bearerAuth: []
+tags:
+  - name: ProviderTemplates
+    description: 系统内置厂商模板
+  - name: Providers
+    description: 企业空间下已接入厂商配置
+  - name: Models
+    description: 模型列表与启用状态管理
+  - name: Defaults
+    description: 默认模型设置
+paths:
+  /api/v1/ai-models/provider-templates:
+    get:
+      tags: [ProviderTemplates]
+      summary: 获取可选厂商模板列表
+      description: 返回右侧“可选模型”区域所需的内置厂商模板，不落库。
+      operationId: listProviderTemplates
+      parameters:
+        - name: model_type
+          in: query
+          required: false
+          description: 按模型类型过滤
+          schema:
+            $ref: '#/components/schemas/ModelType'
+        - name: keyword
+          in: query
+          required: false
+          description: 按厂商名称关键字过滤
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderTemplateListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/ai-models/providers:
+    get:
+      tags: [Providers]
+      summary: 查询已接入厂商列表
+      description: 返回当前企业空间下已接入的厂商配置及模型数量统计。
+      operationId: listProviders
+      parameters:
+        - name: keyword
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: deployment_type
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/DeploymentType'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Providers]
+      summary: 新增厂商接入配置
+      description: 创建一个企业空间下的厂商接入记录，可选自动同步模型列表。
+      operationId: createProvider
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateProviderRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateProviderResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: 同企业空间下厂商名称 + base_url 已存在
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/ai-models/providers/{providerId}:
+    get:
+      tags: [Providers]
+      summary: 查看单个厂商详情
+      description: 返回厂商基础信息、脱敏后的认证配置、同步状态及支持类型。
+      operationId: getProviderDetail
+      parameters:
+        - $ref: '#/components/parameters/ProviderId'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderDetailResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Providers]
+      summary: 更新厂商接入配置
+      description: 更新 `base_url`、认证信息、备注等，可选重新同步模型列表。
+      operationId: updateProvider
+      parameters:
+        - $ref: '#/components/parameters/ProviderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProviderRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderDetailResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Providers]
+      summary: 删除厂商接入配置
+      description: 删除厂商配置及其下模型；若存在默认模型引用，应该返回冲突错误。
+      operationId: deleteProvider
+      parameters:
+        - $ref: '#/components/parameters/ProviderId'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BooleanResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 该厂商下有模型已被设为默认模型，禁止删除
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/ai-models/providers/{providerId}/sync:
+    post:
+      tags: [Providers]
+      summary: 手动同步厂商模型列表
+      description: 根据厂商配置访问远端地址，拉取模型列表并增量更新本地模型数据。
+      operationId: syncProviderModels
+      parameters:
+        - $ref: '#/components/parameters/ProviderId'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderSyncResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/ai-models/models:
+    get:
+      tags: [Models]
+      summary: 查询模型列表
+      description: |
+        查询当前企业空间下的模型列表。
+        - `view=grouped`：按厂商分组，适合图片中的“已添加的模型”区域
+        - `view=flat`：平铺列表，适合后台管理页或下拉选择
+      operationId: listModels
+      parameters:
+        - name: provider_id
+          in: query
+          required: false
+          description: 按厂商 ID 筛选
+          schema:
+            type: integer
+            format: int64
+        - name: model_type
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/ModelType'
+        - name: is_enabled
+          in: query
+          required: false
+          description: 按启用状态筛选
+          schema:
+            type: boolean
+        - name: keyword
+          in: query
+          required: false
+          description: 按模型名称关键字筛选
+          schema:
+            type: string
+        - name: view
+          in: query
+          required: false
+          description: 返回视图类型
+          schema:
+            type: string
+            enum: [grouped, flat]
+            default: grouped
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/GroupedModelListResponse'
+                  - $ref: '#/components/schemas/FlatModelListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/ai-models/models/{modelId}:
+    get:
+      tags: [Models]
+      summary: 查询单个模型详情
+      operationId: getModelDetail
+      parameters:
+        - $ref: '#/components/parameters/ModelId'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelDetailResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/ai-models/models/{modelId}/enabled:
+    patch:
+      tags: [Models]
+      summary: 启用或禁用单个模型
+      description: |
+        仅启用状态的模型允许被业务调用。
+        若模型已被设为默认模型，禁用时应返回冲突错误。
+      operationId: toggleModelEnabled
+      parameters:
+        - $ref: '#/components/parameters/ModelId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ToggleModelEnabledRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ToggleModelEnabledResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 模型已被设为默认模型，禁止禁用
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/ai-models/defaults:
+    get:
+      tags: [Defaults]
+      summary: 查询当前企业空间默认模型
+      operationId: getDefaults
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DefaultsResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    put:
+      tags: [Defaults]
+      summary: 批量保存默认模型
+      description: 按模型类型批量设置默认模型，值必须是当前企业空间下已启用且类型匹配的模型。
+      operationId: saveDefaults
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchDefaultsRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BooleanResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 传入模型未启用或类型不匹配
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/ai-models/defaults/{modelType}:
+    put:
+      tags: [Defaults]
+      summary: 设置单个类型默认模型
+      operationId: saveSingleDefault
+      parameters:
+        - $ref: '#/components/parameters/ModelTypePath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SingleDefaultRequest'
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SingleDefaultResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 模型未启用或模型类型与路径参数不匹配
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    ProviderId:
+      name: providerId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+      description: 厂商配置 ID
+    ModelId:
+      name: modelId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+      description: 模型 ID
+    ModelTypePath:
+      name: modelType
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/ModelType'
+      description: 模型类型
+
+  responses:
+    BadRequest:
+      description: 请求参数错误
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: 未登录或登录态失效
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: 资源不存在
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+    ModelType:
+      type: string
+      enum:
+        - llm
+        - embedding
+        - rerank
+        - tts
+        - asr
+        - vlm
+        - moderation
+        - ocr
+      example: llm
+
+    DeploymentType:
+      type: string
+      enum: [public, private]
+      example: public
+
+    AuthType:
+      type: string
+      enum: [api_key, bearer, basic, custom]
+      example: bearer
+
+    SyncStatus:
+      type: string
+      enum: [pending, success, failed]
+      example: success
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: integer
+          example: 40001
+        message:
+          type: string
+          example: 参数错误
+        data:
+          nullable: true
+          example: null
+
+    BooleanResponse:
+      type: object
+      required: [code, message, data]
+      properties:
+        code:
+          type: integer
+          example: 0
+        message:
+          type: string
+          example: ok
+        data:
+          type: boolean
+          example: true
+
+    AuthFieldDefinition:
+      type: object
+      required: [key, label, type, required]
+      properties:
+        key:
+          type: string
+          example: api_key
+        label:
+          type: string
+          example: API Key
+        type:
+          type: string
+          enum: [text, password, select]
+          example: password
+        required:
+          type: boolean
+          example: true
+        placeholder:
+          type: string
+          nullable: true
+          example: 请输入 API Key
+        options:
+          type: array
+          nullable: true
+          items:
+            type: string
+
+    ProviderTemplate:
+      type: object
+      required:
+        - provider_code
+        - provider_name
+        - deployment_type
+        - supported_types
+        - default_base_url
+        - auth_fields
+      properties:
+        provider_code:
+          type: string
+          example: openai
+        provider_name:
+          type: string
+          example: OpenAI
+        deployment_type:
+          $ref: '#/components/schemas/DeploymentType'
+        supported_types:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModelType'
+        default_base_url:
+          type: string
+          example: https://api.openai.com/v1
+        auth_fields:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuthFieldDefinition'
+
+    ProviderTemplateListResponse:
+      type: object
+      required: [code, message, data]
+      properties:
+        code:
+          type: integer
+          example: 0
+        message:
+          type: string
+          example: ok
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProviderTemplate'
+
+    ProviderAuthConfig:
+      type: object
+      description: 认证配置对象；返回详情时应为脱敏值
+      additionalProperties: true
+      example:
+        api_key: sk-****abcd
+
+    CreateProviderRequest:
+      type: object
+      required:
+        - provider_code
+        - provider_name
+        - deployment_type
+        - base_url
+        - auth_type
+        - auth_config
+      properties:
+        provider_code:
+          type: string
+          example: openai
+        provider_name:
+          type: string
+          example: OpenAI
+        deployment_type:
+          $ref: '#/components/schemas/DeploymentType'
+        base_url:
+          type: string
+          example: https://api.openai.com/v1
+        auth_type:
+          $ref: '#/components/schemas/AuthType'
+        auth_config:
+          $ref: '#/components/schemas/ProviderAuthConfig'
+        remark:
+          type: string
+          nullable: true
+          example: 默认公有云接入
+        auto_sync_models:
+          type: boolean
+          default: true
+          example: true
+
+    UpdateProviderRequest:
+      type: object
+      properties:
+        provider_name:
+          type: string
+          example: OpenAI-生产环境
+        deployment_type:
+          $ref: '#/components/schemas/DeploymentType'
+        base_url:
+          type: string
+          example: https://api.openai.com/v1
+        auth_type:
+          $ref: '#/components/schemas/AuthType'
+        auth_config:
+          $ref: '#/components/schemas/ProviderAuthConfig'
+        remark:
+          type: string
+          nullable: true
+          example: 更新后的接入说明
+        auto_sync_models:
+          type: boolean
+          default: false
+          example: true
+
+    ProviderSummary:
+      type: object
+      required:
+        - id
+        - provider_code
+        - provider_name
+        - deployment_type
+        - base_url
+        - supported_types
+        - sync_status
+        - model_total
+        - enabled_model_total
+      properties:
+        id:
+          type: integer
+          format: int64
+          example: 101
+        provider_code:
+          type: string
+          example: openai
+        provider_name:
+          type: string
+          example: OpenAI
+        deployment_type:
+          $ref: '#/components/schemas/DeploymentType'
+        base_url:
+          type: string
+          example: https://api.openai.com/v1
+        supported_types:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModelType'
+        sync_status:
+          $ref: '#/components/schemas/SyncStatus'
+        last_sync_at:
+          type: string
+          format: date-time
+          nullable: true
+        last_sync_error:
+          type: string
+          nullable: true
+        model_total:
+          type: integer
+          example: 12
+        enabled_model_total:
+          type: integer
+          example: 4
+
+    ProviderListResponse:
+      type: object
+      required: [code, message, data]
+      properties:
+        code:
+          type: integer
+          example: 0
+        message:
+          type: string
+          example: ok
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProviderSummary'
+
+    ProviderDetail:
+      allOf:
+        - $ref: '#/components/schemas/ProviderSummary'
+        - type: object
+          properties:
+            auth_type:
+              $ref: '#/components/schemas/AuthType'
+            auth_config:
+              $ref: '#/components/schemas/ProviderAuthConfig'
+            remark:
+              type: string
+              nullable: true
+            created_by:
+              type: integer
+              format: int64
+              nullable: true
+            created_at:
+              type: string
+              format: date-time
+            updated_at:
+              type: string
+              format: date-time
+
+    ProviderDetailResponse:
+      type: object
+      required: [code, message, data]
+      properties:
+        code:
+          type: integer
+          example: 0
+        message:
+          type: string
+          example: ok
+        data:
+          $ref: '#/components/schemas/ProviderDetail'
+
+    CreateProviderResult:
+      type: object
+      required: [provider_id, provider_name, sync_status, model_count]
+      properties:
+        provider_id:
+          type: integer
+          format: int64
+          example: 101
+        provider_name:
+          type: string
+          example: OpenAI
+        sync_status:
+          $ref: '#/components/schemas/SyncStatus'
+        model_count:
+          type: integer
+          example: 12
+
+    CreateProviderResponse:
+      type: object
+      required: [code, message, data]
+      properties:
+        code:
+          type: integer
+          example: 0
+        message:
+          type: string
+          example: ok
+        data:
+          $ref: '#/components/schemas/CreateProviderResult'
+
+    ProviderSyncResult:
+      type: object
+      required: [provider_id, added, updated, disabled, sync_status]
+      properties:
+        provider_id:
+          type: integer
+          format: int64
+          example: 101
+        added:
+          type: integer
+          example: 2
+        updated:
+          type: integer
+          example: 8
+        disabled:
+          type: integer
+          example: 1
+        sync_status:
+          $ref: '#/components/schemas/SyncStatus'
+        last_sync_error:
+          type: string
+          nullable: true
+
+    ProviderSyncResponse:
+      type: object
+      required: [code, message, data]
+      properties:
+        code:
+          type: integer
+          example: 0
+        message:
+          type: string
+          example: ok
+        data:
+          $ref: '#/components/schemas/ProviderSyncResult'
+
+    ModelSummary:
+      type: object
+      required:
+        - id
+        - model_code
+        - model_name
+        - model_type
+        - is_enabled
+      properties:
+        id:
+          type: integer
+          format: int64
+          example: 1001
+        model_code:
+          type: string
+          example: gpt-4o
+        model_name:
+          type: string
+          example: gpt-4o
+        model_type:
+          $ref: '#/components/schemas/ModelType'
+        is_enabled:
+          type: boolean
+          example: true
+        context_window:
+          type: integer
+          nullable: true
+          example: 128000
+        max_output_tokens:
+          type: integer
+          nullable: true
+          example: 4096
+        capabilities:
+          type: array
+          nullable: true
+          items:
+            type: string
+          example: [vision, function_call]
+
+    ProviderModelsGroup:
+      type: object
+      required:
+        - provider_id
+        - provider_name
+        - deployment_type
+        - supported_types
+        - models
+      properties:
+        provider_id:
+          type: integer
+          format: int64
+          example: 101
+        provider_name:
+          type: string
+          example: OpenAI
+        provider_code:
+          type: string
+          example: openai
+        deployment_type:
+          $ref: '#/components/schemas/DeploymentType'
+        supported_types:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModelType'
+        models:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModelSummary'
+
+    GroupedModelListResponse:
+      type: object
+      required: [code, message, data]
+      properties:
+        code:
+          type: integer
+          example: 0
+        message:
+          type: string
+          example: ok
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProviderModelsGroup'
+
+    FlatModelItem:
+      allOf:
+        - $ref: '#/components/schemas/ModelSummary'
+        - type: object
+          properties:
+            provider_id:
+              type: integer
+              format: int64
+              example: 101
+            provider_name:
+              type: string
+              example: OpenAI
+            provider_code:
+              type: string
+              example: openai
+            deployment_type:
+              $ref: '#/components/schemas/DeploymentType'
+
+    FlatModelListResponse:
+      type: object
+      required: [code, message, data]
+      properties:
+        code:
+          type: integer
+          example: 0
+        message:
+          type: string
+          example: ok
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/FlatModelItem'
+
+    ModelDetail:
+      allOf:
+        - $ref: '#/components/schemas/FlatModelItem'
+        - type: object
+          properties:
+            is_default:
+              type: boolean
+              example: true
+            raw_payload:
+              type: object
+              nullable: true
+              additionalProperties: true
+              example:
+                id: gpt-4o
+                object: model
+                owned_by: openai
+            created_at:
+              type: string
+              format: date-time
+            updated_at:
+              type: string
+              format: date-time
+
+    ModelDetailResponse:
+      type: object
+      required: [code, message, data]
+      properties:
+        code:
+          type: integer
+          example: 0
+        message:
+          type: string
+          example: ok
+        data:
+          $ref: '#/components/schemas/ModelDetail'
+
+    ToggleModelEnabledRequest:
+      type: object
+      required: [is_enabled]
+      properties:
+        is_enabled:
+          type: boolean
+          example: true
+
+    ToggleModelEnabledResult:
+      type: object
+      required: [id, is_enabled]
+      properties:
+        id:
+          type: integer
+          format: int64
+          example: 1001
+        is_enabled:
+          type: boolean
+          example: true
+
+    ToggleModelEnabledResponse:
+      type: object
+      required: [code, message, data]
+      properties:
+        code:
+          type: integer
+          example: 0
+        message:
+          type: string
+          example: ok
+        data:
+          $ref: '#/components/schemas/ToggleModelEnabledResult'
+
+    DefaultModelRef:
+      type: object
+      nullable: true
+      properties:
+        model_id:
+          type: integer
+          format: int64
+          example: 1001
+        model_name:
+          type: string
+          example: gpt-4o
+        provider_name:
+          type: string
+          example: OpenAI
+
+    DefaultsData:
+      type: object
+      properties:
+        llm:
+          $ref: '#/components/schemas/DefaultModelRef'
+        embedding:
+          $ref: '#/components/schemas/DefaultModelRef'
+        rerank:
+          $ref: '#/components/schemas/DefaultModelRef'
+        tts:
+          $ref: '#/components/schemas/DefaultModelRef'
+        asr:
+          $ref: '#/components/schemas/DefaultModelRef'
+        vlm:
+          $ref: '#/components/schemas/DefaultModelRef'
+        moderation:
+          $ref: '#/components/schemas/DefaultModelRef'
+        ocr:
+          $ref: '#/components/schemas/DefaultModelRef'
+
+    DefaultsResponse:
+      type: object
+      required: [code, message, data]
+      properties:
+        code:
+          type: integer
+          example: 0
+        message:
+          type: string
+          example: ok
+        data:
+          $ref: '#/components/schemas/DefaultsData'
+
+    BatchDefaultsRequest:
+      type: object
+      description: 值为模型 ID；传 null 表示清空该类型默认模型
+      properties:
+        llm:
+          type: integer
+          format: int64
+          nullable: true
+          example: 1001
+        embedding:
+          type: integer
+          format: int64
+          nullable: true
+          example: 1002
+        rerank:
+          type: integer
+          format: int64
+          nullable: true
+          example: 1003
+        tts:
+          type: integer
+          format: int64
+          nullable: true
+        asr:
+          type: integer
+          format: int64
+          nullable: true
+        vlm:
+          type: integer
+          format: int64
+          nullable: true
+        moderation:
+          type: integer
+          format: int64
+          nullable: true
+        ocr:
+          type: integer
+          format: int64
+          nullable: true
+
+    SingleDefaultRequest:
+      type: object
+      required: [model_id]
+      properties:
+        model_id:
+          type: integer
+          format: int64
+          nullable: true
+          description: 传 null 表示清空该类型默认模型
+          example: 1001
+
+    SingleDefaultResult:
+      type: object
+      required: [model_type, model_id]
+      properties:
+        model_type:
+          $ref: '#/components/schemas/ModelType'
+        model_id:
+          type: integer
+          format: int64
+          nullable: true
+          example: 1001
+
+    SingleDefaultResponse:
+      type: object
+      required: [code, message, data]
+      properties:
+        code:
+          type: integer
+          example: 0
+        message:
+          type: string
+          example: ok
+        data:
+          $ref: '#/components/schemas/SingleDefaultResult'

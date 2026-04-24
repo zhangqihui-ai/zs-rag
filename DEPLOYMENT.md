@@ -10,7 +10,7 @@
 # 编辑环境变量文件
 vi .env
 
-# 修改以下内容：
+# 修改以下内容,即前端访问后端的地址，以及前后端的IP，允许跨域请求：
 VITE_API_BASE_URL=http://192.168.11.19:8000
 CORS_ORIGINS=http://192.168.11.19,http://192.168.11.19:80,http://192.168.11.19:5173
 ```
@@ -145,3 +145,6 @@ docker compose up -d --build
 # 运行数据库迁移
 docker compose exec backend python -m alembic upgrade head
 ```
+# 本地运行数据库迁移
+cd backend
+alembic upgrade head

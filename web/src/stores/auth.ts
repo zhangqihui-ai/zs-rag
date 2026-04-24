@@ -1,4 +1,5 @@
 import { defineStore } from 'pinia'
+
 import { http } from '../lib/http'
 
 export interface User {
@@ -34,16 +35,19 @@ export const useAuthStore = defineStore('auth', {
   getters: {
     isAuthenticated: (state) => !!state.token,
     currentUser: (state) => state.user,
-    currentSpace: (state) =>
-      state.enterpriseSpaces.find((s) => s.slug === state.currentSpaceSlug) || null,
+    currentSpace: (state) => state.enterpriseSpaces.find((space) => space.slug === state.currentSpaceSlug) || null,
   },
 
   actions: {
     async init() {
-      // 如果有 token，初始化用户信息和企业空间
-      if (this.token) {
-        await this.fetchUserInfo()
-        await this.fetchEnterpriseSpaces()
+      if (!this.token) {
+        return
+      }
+      try {
+        await Promise.all([this.fetchUserInfo(), this.fetchEnterpriseSpaces()])
+      } catch (error) {
+        console.error('Failed to initialize auth state:', error)
+        this.logout()
       }
     },
 
@@ -54,22 +58,7 @@ export const useAuthStore = defineStore('auth', {
         const { data } = await http.post<{ access_token: string; token_type: string }>('/auth/login', params)
         this.token = data.access_token
         localStorage.setItem('auth_token', data.access_token)
-
-        // 获取企业空间列表
-        await this.fetchEnterpriseSpaces()
-
-        // 设置用户信息（从 token 解析或手动设置）
-        this.user = {
-          id: 1,
-          username: params.username,
-          email: params.username + '@example.com',
-          is_active: true,
-          is_admin: true,
-        }
-
-        // 保存用户信息到本地存储
-        localStorage.setItem('current_user', JSON.stringify(this.user))
-
+        await Promise.all([this.fetchUserInfo(), this.fetchEnterpriseSpaces()])
         return data
       } catch (error) {
         this.error = error instanceof Error ? error.message : '登录失败'
@@ -80,33 +69,20 @@ export const useAuthStore = defineStore('auth', {
     },
 
     async fetchUserInfo() {
-      // 从 token 解析用户信息或从本地存储恢复
-      const storedUser = localStorage.getItem('current_user')
-      if (storedUser) {
-        try {
-          this.user = JSON.parse(storedUser)
-        } catch (e) {
-          console.error('Failed to parse stored user:', e)
-        }
-      }
+      const { data } = await http.get<User>('/auth/me')
+      this.user = data
+      localStorage.setItem('current_user', JSON.stringify(data))
     },
 
     async fetchEnterpriseSpaces() {
-      try {
-        const { data } = await http.get<EnterpriseSpace[]>('/enterprise-spaces')
-        this.enterpriseSpaces = data
-
-        // 如果当前空间不在列表中，切换到第一个可用的空间
-        if (data.length > 0) {
-          const currentSpaceExists = data.some((s) => s.slug === this.currentSpaceSlug)
-          if (!currentSpaceExists) {
-            this.currentSpaceSlug = data[0].slug
-            localStorage.setItem('current_enterprise_space', data[0].slug)
-          }
+      const { data } = await http.get<EnterpriseSpace[]>('/enterprise-spaces')
+      this.enterpriseSpaces = data
+      if (data.length > 0) {
+        const currentSpaceExists = data.some((space) => space.slug === this.currentSpaceSlug)
+        if (!currentSpaceExists) {
+          this.currentSpaceSlug = data[0].slug
+          localStorage.setItem('current_enterprise_space', data[0].slug)
         }
-      } catch (error) {
-        console.error('Failed to fetch enterprise spaces:', error)
-        throw error
       }
     },
 

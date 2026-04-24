@@ -1,0 +1,3 @@
+# Dockerfile.local 的 development 阶段额外依赖（热重载）
+# requirements.txt 已含 uvicorn[standard]，此处仅补 watchfiles
+watchfiles

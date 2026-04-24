@@ -2,9 +2,18 @@ import axios from 'axios'
 
 const baseURL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
+/** 普通 API 请求（默认 30s） */
+const defaultTimeoutMs = Number(import.meta.env.VITE_HTTP_TIMEOUT_MS) || 30_000
+
+/**
+ * 文档上传 / 重建索引等长耗时请求（后端同步完成解析、分块、向量与 Milvus 写入）
+ * 可通过 VITE_LONG_REQUEST_TIMEOUT_MS 覆盖，默认 15 分钟
+ */
+export const longRequestTimeoutMs = Number(import.meta.env.VITE_LONG_REQUEST_TIMEOUT_MS) || 900_000
+
 export const http = axios.create({
   baseURL,
-  timeout: 30000,
+  timeout: defaultTimeoutMs,
 })
 
 // 请求拦截器 - 添加认证 Token 和企业空间上下文

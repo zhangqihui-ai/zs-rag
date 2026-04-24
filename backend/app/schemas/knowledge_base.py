@@ -1,5 +1,13 @@
+from __future__ import annotations
+
 from datetime import datetime
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+RetrievalMode = Literal["hybrid", "vector", "keyword"]
+KnowledgeBaseStatus = Literal["active", "inactive", "deleted"]
 
 
 class KnowledgeBaseBase(BaseModel):
@@ -7,7 +15,19 @@ class KnowledgeBaseBase(BaseModel):
     description: str | None = Field(None, max_length=2000, description="知识库描述")
     vector_db_enabled: bool = Field(default=True, description="是否启用向量数据库")
     graph_db_enabled: bool = Field(default=False, description="是否启用图数据库")
+    embedding_model_id: int | None = Field(default=None, description="知识库级别 embedding 模型")
+    default_chunk_size: int = Field(default=512, ge=100, le=5000, description="默认分块大小（字符）")
+    default_chunk_overlap: int = Field(default=50, ge=0, le=1000, description="默认重叠大小（字符）")
+    default_retrieval_mode: RetrievalMode = Field(default="hybrid", description="默认检索模式")
+    default_top_k: int = Field(default=5, ge=1, le=50, description="默认返回条数")
+    default_score_threshold: float | None = Field(default=None, ge=0, le=1, description="默认分数阈值")
     config: dict | None = None
+
+    @model_validator(mode="after")
+    def validate_chunking(self) -> "KnowledgeBaseBase":
+        if self.default_chunk_overlap >= self.default_chunk_size:
+            raise ValueError("default_chunk_overlap 必须小于 default_chunk_size")
+        return self
 
 
 class KnowledgeBaseCreate(KnowledgeBaseBase):
@@ -17,10 +37,26 @@ class KnowledgeBaseCreate(KnowledgeBaseBase):
 class KnowledgeBaseUpdate(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=200)
     description: str | None = Field(None, max_length=2000)
-    status: str | None = Field(None, pattern="^(active|inactive|deleted)$")
+    status: KnowledgeBaseStatus | None = None
     vector_db_enabled: bool | None = None
     graph_db_enabled: bool | None = None
+    embedding_model_id: int | None = None
+    default_chunk_size: int | None = Field(None, ge=100, le=5000)
+    default_chunk_overlap: int | None = Field(None, ge=0, le=1000)
+    default_retrieval_mode: RetrievalMode | None = None
+    default_top_k: int | None = Field(None, ge=1, le=50)
+    default_score_threshold: float | None = Field(None, ge=0, le=1)
     config: dict | None = None
+
+    @model_validator(mode="after")
+    def validate_chunking(self) -> "KnowledgeBaseUpdate":
+        if (
+            self.default_chunk_size is not None
+            and self.default_chunk_overlap is not None
+            and self.default_chunk_overlap >= self.default_chunk_size
+        ):
+            raise ValueError("default_chunk_overlap 必须小于 default_chunk_size")
+        return self
 
 
 class KnowledgeBaseResponse(KnowledgeBaseBase):
@@ -33,39 +69,19 @@ class KnowledgeBaseResponse(KnowledgeBaseBase):
     updated_at: datetime
 
 
-class MilvusConnectionBase(BaseModel):
-    host: str = Field(..., min_length=1, max_length=200, description="Milvus 主机地址")
-    port: int = Field(default=19530, ge=1, le=65535, description="Milvus 端口")
-    username: str | None = Field(None, max_length=100, description="用户名")
-    dimension: int = Field(default=1536, ge=1, description="向量维度")
-    metric_type: str = Field(default="COSINE", description="距离度量类型")
-    config: dict | None = None
-
-
-class MilvusConnectionCreate(MilvusConnectionBase):
-    password: str | None = Field(None, description="密码")
-
-
-class MilvusConnectionUpdate(BaseModel):
-    host: str | None = Field(None, min_length=1, max_length=200)
-    port: int | None = Field(None, ge=1, le=65535)
-    password: str | None = Field(None, description="密码")
-    username: str | None = Field(None, max_length=100)
-    dimension: int | None = Field(None, ge=1)
-    metric_type: str | None = Field(None)
-    is_active: bool | None = None
-    config: dict | None = None
-
-
-class MilvusConnectionResponse(MilvusConnectionBase):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
+class KnowledgeBaseStatsResponse(BaseModel):
     knowledge_base_id: int
-    collection_name: str | None
-    is_active: bool
-    created_at: datetime
-    updated_at: datetime
+    document_total: int
+    indexed_document_total: int
+    chunk_total: int
+    failed_document_total: int
+
+
+class KnowledgeBasePurgeRequest(BaseModel):
+    """彻底删除知识库：需要二次确认（输入名称）。"""
+
+    confirm_name: str = Field(..., min_length=1, max_length=200, description="输入知识库名称以确认")
+    confirm: bool = Field(default=False, description="必须为 true 才会执行彻底删除")
 
 
 class Neo4jConnectionBase(BaseModel):

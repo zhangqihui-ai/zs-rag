@@ -1,6 +1,6 @@
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -149,12 +149,12 @@ def update_enterprise_space(
     return space
 
 
-@router.delete("/{space_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{space_id}", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
 def delete_enterprise_space(
     space_id: int,
     current_user: CurrentUser,
     db: Any = Depends(_get_db),
-) -> None:
+) -> Response:
     """删除企业空间（仅管理员，不允许删除 default）"""
     if not current_user.is_admin:
         raise HTTPException(
@@ -177,6 +177,7 @@ def delete_enterprise_space(
 
     db.delete(space)
     db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/{space_id}/members", response_model=list[MembershipResponse])

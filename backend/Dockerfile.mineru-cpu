@@ -1,0 +1,56 @@
+# ==========================================================================
+# MinerU (CPU pipeline) sidecar
+# --------------------------------------------------------------------------
+# - 仅用于 PDF / 图片 解析（OCR + 版面分析，CPU 模式）。
+# - 通过 `mineru-api --host 0.0.0.0 --port 8000` 暴露 HTTP API，
+#   主要调用 POST /file_parse。
+# - 首次启动会下载模型（~数 GB）到 /models，建议挂载 `mineru_models` 卷复用。
+# - 如需 GPU VLM 模式，请使用官方镜像 `mineru:latest` 并将 compose 的
+#   MINERU_BACKEND 改为 `vlm-vllm-engine`，此 Dockerfile 仅针对 CPU pipeline。
+# ==========================================================================
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    MINERU_MODEL_SOURCE=modelscope \
+    HF_HOME=/models \
+    MODELSCOPE_CACHE=/models \
+    MINERU_TOOLS_CONFIG_JSON=/models/mineru.json
+
+# 切换为阿里云 Debian Bookworm 镜像，避免访问 deb.debian.org 超时
+RUN set -eux; \
+    rm -f /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list; \
+    echo "deb https://mirrors.aliyun.com/debian bookworm main contrib non-free non-free-firmware"          >  /etc/apt/sources.list; \
+    echo "deb https://mirrors.aliyun.com/debian bookworm-updates main contrib non-free non-free-firmware"  >> /etc/apt/sources.list; \
+    echo "deb https://mirrors.aliyun.com/debian-security bookworm-security main contrib non-free non-free-firmware" >> /etc/apt/sources.list
+
+# OCR/版面分析常见系统依赖：OpenCV / libGL / libmagic / 字体
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgl1 \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        libxrender1 \
+        libgomp1 \
+        libmagic1 \
+        poppler-utils \
+        fonts-noto-cjk \
+        curl \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# 安装 MinerU（最新版，CPU pipeline 依赖）。PyPI 切到清华镜像，避免 torch/paddle 超大 wheel 超时
+ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+    PIP_DEFAULT_TIMEOUT=600
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir "mineru[core]"
+
+RUN mkdir -p /models /workdir
+
+WORKDIR /workdir
+
+EXPOSE 8000
+
+# --host 0.0.0.0 让同 compose 网络里的 backend 可访问
+CMD ["mineru-api", "--host", "0.0.0.0", "--port", "8000"]

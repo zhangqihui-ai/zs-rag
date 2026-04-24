@@ -208,9 +208,12 @@ make clean
 - `GET /knowledge-bases/{id}` - 获取详情
 - `PATCH /knowledge-bases/{id}` - 更新
 - `DELETE /knowledge-bases/{id}` - 删除
-- `POST /knowledge-bases/{id}/milvus-connection` - 配置 Milvus
+- `POST /knowledge-bases/{id}/milvus-config` - 创建 Milvus 配置
+- `GET /knowledge-bases/{id}/milvus-config` - 获取 Milvus 配置
+- `PATCH /knowledge-bases/{id}/milvus-config` - 更新 Milvus 配置
+- `DELETE /knowledge-bases/{id}/milvus-config` - 删除 Milvus 配置
 - `POST /knowledge-bases/{id}/neo4j-connection` - 配置 Neo4j
-- `POST /knowledge-bases/{id}/milvus-connection/test` - 测试 Milvus
+- `POST /knowledge-bases/{id}/milvus-config/test` - 测试 Milvus
 - `POST /knowledge-bases/{id}/neo4j-connection/test` - 测试 Neo4j
 
 ## 快捷命令
@@ -291,6 +294,8 @@ docker compose exec backend python -m alembic upgrade head
 ```bash
 # 构建并启动生产环境
 docker compose -f docker-compose.prod.yml up -d --build
+##离线构建
+BACKEND_DOCKERFILE=Dockerfile.local docker compose -f docker-compose.yml up -d --build
 
 # 查看日志
 docker compose -f docker-compose.prod.yml logs -f

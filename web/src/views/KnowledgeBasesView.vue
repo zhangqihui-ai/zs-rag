@@ -1,817 +1,733 @@
 <template>
   <Layout>
-    <div class="page-header">
-      <h1>知识库管理</h1>
-      <button @click="showCreateModal = true" class="btn-primary">
-        + 新建知识库
-      </button>
-    </div>
+    <div class="page-shell knowledge-view">
+      <div v-if="notice" :class="['notice-bar', noticeType]">
+        <AppIcon :name="noticeType === 'success' ? 'check' : 'status'" :size="16" />
+        <p>{{ notice }}</p>
+      </div>
 
-    <div v-if="loading" class="loading">加载中...</div>
-    <div v-else-if="error" class="error">{{ error }}</div>
-    <div v-else class="kb-grid">
-      <div v-for="kb in knowledgeBases" :key="kb.id" class="kb-card">
-        <div class="kb-header">
-          <h3>{{ kb.name }}</h3>
-          <span :class="['status-badge', kb.status]">
-            {{ kb.status === 'active' ? '活跃' : '未激活' }}
-          </span>
+      <Transition name="toast-fade">
+        <div v-if="toastVisible" :class="['center-toast', toastType]">
+          <AppIcon :name="toastType === 'success' ? 'check' : 'status'" :size="16" />
+          <span>{{ toastMessage }}</span>
         </div>
+      </Transition>
 
-        <div v-if="kb.description" class="kb-description">{{ kb.description }}</div>
-
-        <div class="kb-badges">
-          <span v-if="kb.vector_db_enabled" class="badge">向量数据库</span>
-          <span v-if="kb.graph_db_enabled" class="badge">图数据库</span>
+      <section class="surface-card toolbar-panel">
+        <div>
+          <h3>知识库管理</h3>
         </div>
-
-        <div class="kb-section">
-          <div class="kb-section-title">
-            <span>Milvus 连接</span>
-            <button
-              v-if="!kb.vector_db_enabled"
-              @click="showMilvusModal(kb)"
-              class="btn-link"
-            >
-              配置
-            </button>
-            <button
-              v-else-if="!milvusConnections[kb.id]"
-              @click="showMilvusModal(kb)"
-              class="btn-link"
-            >
-              配置
-            </button>
-          </div>
-          <div v-if="milvusConnections[kb.id]" class="connection-info">
-            <div class="info-row">
-              <span class="label">主机:</span>
-              <span>{{ milvusConnections[kb.id].host }}:{{ milvusConnections[kb.id].port }}</span>
-            </div>
-            <div class="connection-actions">
-              <button @click="testMilvus(kb.id)" class="btn-sm" :disabled="testing">
-                {{ testing ? '测试中...' : '测试' }}
-              </button>
-              <button @click="deleteMilvusConnection(kb.id)" class="btn-sm btn-danger">删除</button>
-            </div>
-            <div v-if="testResults[kb.id]" :class="['test-result', testResults[kb.id].success ? 'success' : 'error']">
-              {{ testResults[kb.id].message }}
-            </div>
-          </div>
+        <div class="toolbar-row">
+          <button class="btn btn-secondary" type="button" :disabled="loading" @click="refreshKnowledgeBases">
+            <AppIcon name="refresh" :size="16" />
+            刷新
+          </button>
+          <button class="btn btn-primary" type="button" @click="openCreateModal">
+            <AppIcon name="plus" :size="16" />
+            创建知识库
+          </button>
         </div>
+      </section>
 
-        <div class="kb-section">
-          <div class="kb-section-title">
-            <span>Neo4j 连接</span>
-            <button
-              v-if="!kb.graph_db_enabled"
-              @click="showNeo4jModal(kb)"
-              class="btn-link"
-            >
-              配置
-            </button>
-            <button
-              v-else-if="!neo4jConnections[kb.id]"
-              @click="showNeo4jModal(kb)"
-              class="btn-link"
-            >
-              配置
-            </button>
-          </div>
-          <div v-if="neo4jConnections[kb.id]" class="connection-info">
-            <div class="info-row">
-              <span class="label">URI:</span>
-              <span>{{ neo4jConnections[kb.id].uri }}</span>
-            </div>
-            <div class="connection-actions">
-              <button @click="testNeo4j(kb.id)" class="btn-sm" :disabled="testing">
-                {{ testing ? '测试中...' : '测试' }}
-              </button>
-              <button @click="deleteNeo4jConnection(kb.id)" class="btn-sm btn-danger">删除</button>
-            </div>
-            <div v-if="testResults[kb.id + '-neo4j']" :class="['test-result', testResults[kb.id + '-neo4j'].success ? 'success' : 'error']">
-              {{ testResults[kb.id + '-neo4j'].message }}
-            </div>
-          </div>
-        </div>
+      <div v-if="loading" class="surface-card loading-skeleton panel-skeleton"></div>
 
-        <div class="kb-actions">
-          <button @click="deleteKnowledgeBase(kb.id)" class="btn-danger">删除</button>
+      <div v-else-if="error" class="surface-card error-panel">
+        <div>
+          <h3>知识库数据加载失败</h3>
+          <p>{{ error }}</p>
         </div>
       </div>
 
-      <div v-if="knowledgeBases.length === 0" class="empty-state">
-        <p>暂无知识库，点击右上角创建</p>
-      </div>
-    </div>
+      <EmptyState
+        v-else-if="knowledgeBases.length === 0"
+        title="当前没有可展示的知识库"
+        description="请先创建知识库。"
+      >
+        <template #icon>
+          <AppIcon name="folder" :size="20" />
+        </template>
+        <button class="btn btn-primary" type="button" @click="openCreateModal">
+          <AppIcon name="plus" :size="16" />
+          创建知识库
+        </button>
+      </EmptyState>
 
-    <!-- Create KB Modal -->
-    <div v-if="showCreateModal" class="modal-overlay" @click="showCreateModal = false">
-      <div class="modal" @click.stop>
-        <div class="modal-header">
-          <h2>新建知识库</h2>
-          <button @click="showCreateModal = false" class="close-btn">×</button>
+      <section v-else class="kb-grid-panel">
+        <div class="kb-grid">
+          <article
+            v-for="kb in knowledgeBases"
+            :key="kb.id"
+            class="kb-tile"
+            role="button"
+            tabindex="0"
+            @click="goDetail(kb.id)"
+            @keydown.enter.prevent="goDetail(kb.id)"
+            @keydown.space.prevent="goDetail(kb.id)"
+          >
+            <div class="kb-tile-top">
+              <div class="kb-tile-avatar">{{ kb.name.slice(0, 1).toUpperCase() }}</div>
+              <button class="tile-menu-trigger" type="button" @click.stop="toggleMenu(kb.id)">⋯</button>
+              <div v-if="openMenuId === kb.id" class="tile-menu" @click.stop>
+                <button class="tile-menu-item" type="button" @click="handleEditFromMenu(kb)">修改</button>
+                <button class="tile-menu-item danger" type="button" :disabled="purgingId === kb.id" @click="openPurgeModal(kb)">
+                  {{ purgingId === kb.id ? '删除中...' : '删除…' }}
+                </button>
+              </div>
+            </div>
+
+            <h4>{{ kb.name }}</h4>
+            <p class="kb-tile-desc">{{ kb.description || '该知识库暂无描述。' }}</p>
+            <div class="kb-tile-meta-row">
+              <span :class="['status-pill', kb.status === 'active' ? 'success' : 'warning']">{{ statusLabelMap[kb.status] || kb.status }}</span>
+              <span class="kb-tile-date">{{ formatDate(kb.created_at) }}</span>
+            </div>
+          </article>
         </div>
+      </section>
 
-        <form @submit.prevent="createKnowledgeBase" class="modal-body">
-          <div class="form-group">
-            <label>名称</label>
-            <input v-model="formData.name" type="text" required placeholder="知识库名称" />
-          </div>
+      <div v-if="modalOpen" class="modal-overlay" @click.self="closeModal">
+        <section class="modal-card kb-modal">
+          <header class="kb-modal-header">
+            <div>
+              <h3>{{ modalMode === 'create' ? '创建知识库' : '修改知识库' }}</h3>
+              <p>{{ modalMode === 'create' ? '新建知识库基础信息。' : '更新知识库基础信息。' }}</p>
+            </div>
+            <button class="icon-button" type="button" @click="closeModal">
+              <AppIcon name="close" :size="16" />
+            </button>
+          </header>
 
-          <div class="form-group">
-            <label>描述</label>
-            <textarea v-model="formData.description" rows="3" placeholder="可选描述"></textarea>
-          </div>
-
-          <div class="form-group">
-            <label class="checkbox-label">
-              <input v-model="formData.vector_db_enabled" type="checkbox" />
-              启用向量数据库 (Milvus)
+          <form class="form-grid" @submit.prevent="submitModal">
+            <label class="field">
+              <span class="field-label">知识库名称</span>
+              <input v-model.trim="form.name" class="input" type="text" maxlength="200" placeholder="请输入知识库名称" required />
             </label>
-          </div>
 
-          <div class="form-group">
-            <label class="checkbox-label">
-              <input v-model="formData.graph_db_enabled" type="checkbox" />
-              启用图数据库 (Neo4j)
+            <label class="field">
+              <span class="field-label">知识库描述</span>
+              <textarea v-model.trim="form.description" class="textarea" maxlength="2000" placeholder="可选，描述用途与范围"></textarea>
             </label>
-          </div>
 
-          <div v-if="createError" class="error-message">{{ createError }}</div>
+            <div class="form-grid two">
+              <label class="field inline-field">
+                <span class="field-label">启用向量数据库</span>
+                <label class="switch">
+                  <input v-model="form.vector_db_enabled" type="checkbox" />
+                </label>
+              </label>
 
-          <div class="modal-footer">
-            <button type="button" @click="showCreateModal = false" class="btn-secondary">取消</button>
-            <button type="submit" class="btn-primary" :disabled="creating">
-              {{ creating ? '创建中...' : '创建' }}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-
-    <!-- Milvus Config Modal -->
-    <div v-if="showMilvusModalFlag" class="modal-overlay" @click="closeMilvusModal">
-      <div class="modal" @click.stop>
-        <div class="modal-header">
-          <h2>配置 Milvus 连接</h2>
-          <button @click="closeMilvusModal" class="close-btn">×</button>
-        </div>
-
-        <form @submit.prevent="saveMilvusConnection" class="modal-body">
-          <div class="form-group">
-            <label>主机地址</label>
-            <input v-model="milvusFormData.host" type="text" required placeholder="localhost" />
-          </div>
-
-          <div class="form-group">
-            <label>端口</label>
-            <input v-model.number="milvusFormData.port" type="number" value="19530" />
-          </div>
-
-          <div class="form-group">
-            <label>用户名 (可选)</label>
-            <input v-model="milvusFormData.username" type="text" placeholder="可选" />
-          </div>
-
-          <div class="form-group">
-            <label>密码 (可选)</label>
-            <input v-model="milvusFormData.password" type="password" placeholder="可选" />
-          </div>
-
-          <div class="form-row">
-            <div class="form-group">
-              <label>向量维度</label>
-              <input v-model.number="milvusFormData.dimension" type="number" value="1536" />
+              <label class="field inline-field">
+                <span class="field-label">启用图数据库</span>
+                <label class="switch">
+                  <input v-model="form.graph_db_enabled" type="checkbox" />
+                </label>
+              </label>
             </div>
 
-            <div class="form-group">
-              <label>距离度量</label>
-              <select v-model="milvusFormData.metric_type">
-                <option value="COSINE">COSINE</option>
-                <option value="L2">L2</option>
-                <option value="IP">IP</option>
+            <label v-if="modalMode === 'edit'" class="field">
+              <span class="field-label">状态</span>
+              <select v-model="form.status" class="select">
+                <option value="active">运行中</option>
+                <option value="inactive">未激活</option>
               </select>
-            </div>
-          </div>
+            </label>
 
-          <div v-if="milvusError" class="error-message">{{ milvusError }}</div>
+            <p v-if="modalError" class="modal-error">{{ modalError }}</p>
 
-          <div class="modal-footer">
-            <button type="button" @click="closeMilvusModal" class="btn-secondary">取消</button>
-            <button type="submit" class="btn-primary" :disabled="saving">
-              {{ saving ? '保存中...' : '保存' }}
-            </button>
-          </div>
-        </form>
+            <footer class="kb-modal-actions">
+              <button class="btn btn-ghost" type="button" :disabled="submitting" @click="closeModal">取消</button>
+              <button class="btn btn-primary" type="submit" :disabled="submitting || !form.name">
+                {{ submitting ? '提交中...' : modalMode === 'create' ? '创建' : '保存' }}
+              </button>
+            </footer>
+          </form>
+        </section>
       </div>
-    </div>
 
-    <!-- Neo4j Config Modal -->
-    <div v-if="showNeo4jModalFlag" class="modal-overlay" @click="closeNeo4jModal">
-      <div class="modal" @click.stop>
-        <div class="modal-header">
-          <h2>配置 Neo4j 连接</h2>
-          <button @click="closeNeo4jModal" class="close-btn">×</button>
-        </div>
-
-        <form @submit.prevent="saveNeo4jConnection" class="modal-body">
-          <div class="form-group">
-            <label>URI</label>
-            <input v-model="neo4jFormData.uri" type="text" required placeholder="bolt://localhost:7687" />
-          </div>
-
-          <div class="form-group">
-            <label>用户名</label>
-            <input v-model="neo4jFormData.username" type="text" required placeholder="neo4j" />
-          </div>
-
-          <div class="form-group">
-            <label>密码</label>
-            <input v-model="neo4jFormData.password" type="password" placeholder="密码" />
-          </div>
-
-          <div class="form-group">
-            <label>数据库名 (可选)</label>
-            <input v-model="neo4jFormData.database" type="text" placeholder="neo4j" />
-          </div>
-
-          <div v-if="neo4jError" class="error-message">{{ neo4jError }}</div>
-
-          <div class="modal-footer">
-            <button type="button" @click="closeNeo4jModal" class="btn-secondary">取消</button>
-            <button type="submit" class="btn-primary" :disabled="saving">
-              {{ saving ? '保存中...' : '保存' }}
+      <div v-if="purgeOpen && purgeTarget" class="modal-overlay" @click.self="closePurgeModal">
+        <section class="modal-card kb-modal kb-purge-modal">
+          <header class="kb-modal-header">
+            <div>
+              <h3>删除知识库</h3>
+              <p>该操作不可恢复，将清空该知识库下的所有文档和向量化数据。</p>
+            </div>
+            <button class="icon-button" type="button" @click="closePurgeModal">
+              <AppIcon name="close" :size="16" />
             </button>
+          </header>
+
+          <div class="kb-purge-body">
+            <p class="kb-purge-warn">
+              请输入知识库名称 <strong>「{{ purgeTarget.name }}」</strong> 以确认。
+            </p>
+            <input
+              v-model.trim="purgeConfirmName"
+              class="input"
+              type="text"
+              :placeholder="purgeTarget.name"
+              autocomplete="off"
+            />
+            <p v-if="purgeConfirmName && !canSubmitPurge" class="kb-purge-tip">名称不匹配，无法提交。</p>
+            <div v-if="purgeError" class="status-box error">{{ purgeError }}</div>
           </div>
-        </form>
+
+          <footer class="kb-modal-actions">
+            <button class="btn btn-ghost" type="button" :disabled="purgeSubmitting" @click="closePurgeModal">取消</button>
+            <button
+              class="btn btn-danger"
+              type="button"
+              :disabled="purgeSubmitting || !canSubmitPurge"
+              @click="submitPurge"
+            >
+              {{ purgeSubmitting ? '删除中...' : '确认删除' }}
+            </button>
+          </footer>
+        </section>
       </div>
     </div>
   </Layout>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import { http } from '../lib/http'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
+
+import { getKnowledgeBaseErrorMessage, knowledgeBaseApi, type KnowledgeBase, type KnowledgeBasePayload } from '../api/knowledge-base'
+import AppIcon from '../components/AppIcon.vue'
+import EmptyState from '../components/EmptyState.vue'
 import Layout from '../components/Layout.vue'
 
-interface KnowledgeBase {
-  id: number
-  name: string
-  description?: string
-  status: string
-  vector_db_enabled: boolean
-  graph_db_enabled: boolean
+const statusLabelMap: Record<string, string> = {
+  active: '运行中',
+  inactive: '未激活',
+  deleted: '已删除',
 }
 
-interface MilvusConnection {
-  id: number
-  host: string
-  port: number
-  username?: string
-  collection_name?: string
-}
-
-interface Neo4jConnection {
-  id: number
-  uri: string
-  username: string
-  database?: string
-}
-
-interface TestResult {
-  success: boolean
-  message: string
-}
+const router = useRouter()
 
 const knowledgeBases = ref<KnowledgeBase[]>([])
-const milvusConnections = ref<Record<number, MilvusConnection>>({})
-const neo4jConnections = ref<Record<number, Neo4jConnection>>({})
 const loading = ref(true)
 const error = ref('')
-const showCreateModal = ref(false)
-const creating = ref(false)
-const createError = ref('')
-const testing = ref(false)
-const saving = ref(false)
-const testResults = ref<Record<string, TestResult>>({})
 
-const formData = ref({
+const notice = ref('')
+const noticeType = ref<'success' | 'error'>('success')
+let noticeTimer: number | undefined
+
+const toastVisible = ref(false)
+const toastMessage = ref('')
+const toastType = ref<'success' | 'error'>('success')
+let toastTimer: number | undefined
+
+const showToast = (text: string, type: 'success' | 'error' = 'success') => {
+  toastMessage.value = text
+  toastType.value = type
+  toastVisible.value = true
+  if (toastTimer) {
+    window.clearTimeout(toastTimer)
+  }
+  toastTimer = window.setTimeout(() => {
+    toastVisible.value = false
+  }, 2000)
+}
+
+const modalOpen = ref(false)
+const modalMode = ref<'create' | 'edit'>('create')
+const editingId = ref<number | null>(null)
+const submitting = ref(false)
+const modalError = ref('')
+const openMenuId = ref<number | null>(null)
+
+const form = reactive({
   name: '',
   description: '',
   vector_db_enabled: true,
   graph_db_enabled: false,
+  status: 'active' as 'active' | 'inactive',
 })
 
-const milvusFormData = ref({
-  host: 'localhost',
-  port: 19530,
-  username: '',
-  password: '',
-  dimension: 1536,
-  metric_type: 'COSINE',
-})
+const createDefaults: Omit<KnowledgeBasePayload, 'name' | 'description' | 'vector_db_enabled' | 'graph_db_enabled'> = {
+  embedding_model_id: null,
+  default_chunk_size: 1024,
+  default_chunk_overlap: 50,
+  default_retrieval_mode: 'hybrid',
+  default_top_k: 5,
+  default_score_threshold: null,
+  config: null,
+}
 
-const neo4jFormData = ref({
-  uri: 'bolt://localhost:7687',
-  username: 'neo4j',
-  password: '',
-  database: 'neo4j',
-})
+const showNotice = (text: string, type: 'success' | 'error' = 'success') => {
+  notice.value = text
+  noticeType.value = type
+  if (noticeTimer) {
+    window.clearTimeout(noticeTimer)
+  }
+  noticeTimer = window.setTimeout(() => {
+    notice.value = ''
+  }, 3200)
+}
 
-const showMilvusModalFlag = ref(false)
-const showNeo4jModalFlag = ref(false)
-const currentKbId = ref<number | null>(null)
-const milvusError = ref('')
-const neo4jError = ref('')
+const resetForm = () => {
+  form.name = ''
+  form.description = ''
+  form.vector_db_enabled = true
+  form.graph_db_enabled = false
+  form.status = 'active'
+  modalError.value = ''
+}
 
-const fetchKnowledgeBases = async () => {
+const refreshKnowledgeBases = async () => {
   loading.value = true
   error.value = ''
   try {
-    const { data } = await http.get<KnowledgeBase[]>('/knowledge-bases')
-    knowledgeBases.value = data
-    data.forEach((kb) => {
-      fetchMilvusConnection(kb.id)
-      fetchNeo4jConnection(kb.id)
-    })
-  } catch (err) {
-    error.value = '加载知识库列表失败'
+    knowledgeBases.value = await knowledgeBaseApi.list()
+  } catch (value) {
+    error.value = getKnowledgeBaseErrorMessage(value, '加载知识库失败')
   } finally {
     loading.value = false
   }
 }
 
-const fetchMilvusConnection = async (kbId: number) => {
-  try {
-    const { data } = await http.get<MilvusConnection>(`/knowledge-bases/${kbId}/milvus-connection`)
-    milvusConnections.value[kbId] = data
-  } catch (err) {
-    // 404 means no connection configured, ignore
+const formatDate = (value: string) => {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return '--'
   }
+  return date.toLocaleString('zh-CN', { hour12: false })
 }
 
-const fetchNeo4jConnection = async (kbId: number) => {
-  try {
-    const { data } = await http.get<Neo4jConnection>(`/knowledge-bases/${kbId}/neo4j-connection`)
-    neo4jConnections.value[kbId] = data
-  } catch (err) {
-    // 404 means no connection configured, ignore
+const goDetail = (kbId: number) => {
+  router.push(`/knowledge-bases/${kbId}`)
+}
+
+const toggleMenu = (kbId: number) => {
+  openMenuId.value = openMenuId.value === kbId ? null : kbId
+}
+
+const handleEditFromMenu = (kb: KnowledgeBase) => {
+  openMenuId.value = null
+  openEditModal(kb)
+}
+
+const closeMenu = () => {
+  openMenuId.value = null
+}
+
+const openCreateModal = () => {
+  closeMenu()
+  modalMode.value = 'create'
+  editingId.value = null
+  resetForm()
+  modalOpen.value = true
+}
+
+const openEditModal = (kb: KnowledgeBase) => {
+  modalMode.value = 'edit'
+  editingId.value = kb.id
+  form.name = kb.name
+  form.description = kb.description || ''
+  form.vector_db_enabled = kb.vector_db_enabled
+  form.graph_db_enabled = kb.graph_db_enabled
+  form.status = kb.status === 'inactive' ? 'inactive' : 'active'
+  modalError.value = ''
+  modalOpen.value = true
+}
+
+const closeModal = () => {
+  if (submitting.value) {
+    return
   }
+  modalOpen.value = false
+  editingId.value = null
+  modalError.value = ''
 }
 
-const createKnowledgeBase = async () => {
-  creating.value = true
-  createError.value = ''
+const submitModal = async () => {
+  submitting.value = true
+  modalError.value = ''
+
+  const description = form.description.trim() ? form.description.trim() : null
   try {
-    const { data } = await http.post<KnowledgeBase>('/knowledge-bases', formData.value)
-    showCreateModal.value = false
-    formData.value = { name: '', description: '', vector_db_enabled: true, graph_db_enabled: false }
-    knowledgeBases.value.push(data)
-  } catch (err: any) {
-    createError.value = err.response?.data?.detail || '创建失败'
-  } finally {
-    creating.value = false
-  }
-}
-
-const deleteKnowledgeBase = async (kbId: number) => {
-  if (!confirm('确定要删除此知识库吗？')) return
-  try {
-    await http.delete(`/knowledge-bases/${kbId}`)
-    await fetchKnowledgeBases()
-  } catch (err) {
-    alert('删除失败')
-  }
-}
-
-const showMilvusModal = (kb: KnowledgeBase) => {
-  currentKbId.value = kb.id
-  showMilvusModalFlag.value = true
-  milvusError.value = ''
-}
-
-const closeMilvusModal = () => {
-  showMilvusModalFlag.value = false
-  currentKbId.value = null
-  milvusFormData.value = {
-    host: 'localhost',
-    port: 19530,
-    username: '',
-    password: '',
-    dimension: 1536,
-    metric_type: 'COSINE',
-  }
-}
-
-const saveMilvusConnection = async () => {
-  saving.value = true
-  milvusError.value = ''
-  try {
-    if (!currentKbId.value) return
-    const { data } = await http.post<MilvusConnection>(
-      `/knowledge-bases/${currentKbId.value}/milvus-connection`,
-      milvusFormData.value
-    )
-    milvusConnections.value[currentKbId.value] = data
-    closeMilvusModal()
-  } catch (err: any) {
-    milvusError.value = err.response?.data?.detail || '保存失败'
-  } finally {
-    saving.value = false
-  }
-}
-
-const deleteMilvusConnection = async (kbId: number) => {
-  if (!confirm('确定要删除 Milvus 连接配置吗？')) return
-  try {
-    await http.delete(`/knowledge-bases/${kbId}/milvus-connection`)
-    delete milvusConnections.value[kbId]
-  } catch (err) {
-    alert('删除失败')
-  }
-}
-
-const testMilvus = async (kbId: number) => {
-  testing.value = true
-  try {
-    const { data } = await http.post<TestResult>(`/knowledge-bases/${kbId}/milvus-connection/test`)
-    testResults.value[kbId] = data
-  } catch (err: any) {
-    testResults.value[kbId] = {
-      success: false,
-      message: err.response?.data?.detail || '测试失败',
+    if (modalMode.value === 'create') {
+      await knowledgeBaseApi.create({
+        ...createDefaults,
+        name: form.name.trim(),
+        description,
+        vector_db_enabled: form.vector_db_enabled,
+        graph_db_enabled: form.graph_db_enabled,
+      })
+      modalOpen.value = false
+      editingId.value = null
+      modalError.value = ''
+      await refreshKnowledgeBases()
+      showToast('知识库创建成功', 'success')
+    } else if (editingId.value !== null) {
+      await knowledgeBaseApi.update(editingId.value, {
+        name: form.name.trim(),
+        description,
+        vector_db_enabled: form.vector_db_enabled,
+        graph_db_enabled: form.graph_db_enabled,
+        status: form.status,
+      })
+      modalOpen.value = false
+      editingId.value = null
+      modalError.value = ''
+      await refreshKnowledgeBases()
+      showToast('知识库修改成功', 'success')
     }
+  } catch (value) {
+    modalError.value = getKnowledgeBaseErrorMessage(value, modalMode.value === 'create' ? '创建知识库失败' : '修改知识库失败')
   } finally {
-    testing.value = false
+    submitting.value = false
   }
 }
 
-const showNeo4jModal = (kb: KnowledgeBase) => {
-  currentKbId.value = kb.id
-  showNeo4jModalFlag.value = true
-  neo4jError.value = ''
-}
+const purgeOpen = ref(false)
+const purgeTarget = ref<KnowledgeBase | null>(null)
+const purgeConfirmName = ref('')
+const purgeError = ref('')
+const purgeSubmitting = ref(false)
+const purgingId = ref<number | null>(null)
 
-const closeNeo4jModal = () => {
-  showNeo4jModalFlag.value = false
-  currentKbId.value = null
-  neo4jFormData.value = {
-    uri: 'bolt://localhost:7687',
-    username: 'neo4j',
-    password: '',
-    database: 'neo4j',
+const canSubmitPurge = computed(() => {
+  if (!purgeTarget.value) {
+    return false
   }
+  return purgeConfirmName.value.trim() === purgeTarget.value.name.trim()
+})
+
+const openPurgeModal = (kb: KnowledgeBase) => {
+  closeMenu()
+  purgeTarget.value = kb
+  purgeConfirmName.value = ''
+  purgeError.value = ''
+  purgeSubmitting.value = false
+  purgeOpen.value = true
 }
 
-const saveNeo4jConnection = async () => {
-  saving.value = true
-  neo4jError.value = ''
+const closePurgeModal = () => {
+  if (purgeSubmitting.value) {
+    return
+  }
+  purgeOpen.value = false
+  purgeTarget.value = null
+  purgeConfirmName.value = ''
+  purgeError.value = ''
+}
+
+const submitPurge = async () => {
+  if (!purgeTarget.value) {
+    return
+  }
+  purgeSubmitting.value = true
+  purgeError.value = ''
+  purgingId.value = purgeTarget.value.id
   try {
-    if (!currentKbId.value) return
-    const { data } = await http.post<Neo4jConnection>(
-      `/knowledge-bases/${currentKbId.value}/neo4j-connection`,
-      neo4jFormData.value
-    )
-    neo4jConnections.value[currentKbId.value] = data
-    closeNeo4jModal()
-  } catch (err: any) {
-    neo4jError.value = err.response?.data?.detail || '保存失败'
+    await knowledgeBaseApi.purge(purgeTarget.value.id, { confirm_name: purgeConfirmName.value.trim(), confirm: true })
+    purgeOpen.value = false
+    purgeTarget.value = null
+    purgeConfirmName.value = ''
+    purgeError.value = ''
+    await refreshKnowledgeBases()
+    showToast('知识库已删除', 'success')
+  } catch (value) {
+    purgeError.value = getKnowledgeBaseErrorMessage(value, '彻底删除失败')
   } finally {
-    saving.value = false
+    purgeSubmitting.value = false
+    purgingId.value = null
   }
 }
 
-const deleteNeo4jConnection = async (kbId: number) => {
-  if (!confirm('确定要删除 Neo4j 连接配置吗？')) return
-  try {
-    await http.delete(`/knowledge-bases/${kbId}/neo4j-connection`)
-    delete neo4jConnections.value[kbId]
-  } catch (err) {
-    alert('删除失败')
-  }
-}
+onMounted(async () => {
+  window.addEventListener('click', closeMenu)
+  await refreshKnowledgeBases()
+})
 
-const testNeo4j = async (kbId: number) => {
-  testing.value = true
-  try {
-    const { data } = await http.post<TestResult>(`/knowledge-bases/${kbId}/neo4j-connection/test`)
-    testResults.value[kbId + '-neo4j'] = data
-  } catch (err: any) {
-    testResults.value[kbId + '-neo4j'] = {
-      success: false,
-      message: err.response?.data?.detail || '测试失败',
-    }
-  } finally {
-    testing.value = false
+onBeforeUnmount(() => {
+  window.removeEventListener('click', closeMenu)
+  if (noticeTimer) {
+    window.clearTimeout(noticeTimer)
   }
-}
-
-onMounted(fetchKnowledgeBases)
+  if (toastTimer) {
+    window.clearTimeout(toastTimer)
+  }
+})
 </script>
 
 <style scoped>
-/* Reuse similar styles from ProvidersView */
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 24px;
+.knowledge-view {
+  gap: 24px;
 }
 
-.page-header h1 {
+.toolbar-panel,
+.error-panel,
+.kb-card-header,
+.kb-card-actions,
+.kb-modal-header,
+.kb-modal-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.kb-purge-body {
+  display: grid;
+  gap: 10px;
+  padding: 0 2px;
+}
+
+.kb-purge-warn {
   margin: 0;
-  font-size: 1.5rem;
-  color: #e2e8f0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border-color);
+  background: var(--warning-soft);
+  color: var(--warning-color);
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+.kb-purge-tip {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--text-tertiary);
+}
+
+.toolbar-panel {
+  align-items: center;
+  padding: 10px 14px;
+  min-height: 56px;
+}
+
+.toolbar-panel h3 {
+  font-size: 1rem;
+  line-height: 1.2;
+}
+
+.toolbar-panel .btn {
+  min-height: 36px;
+  padding: 0 12px;
+  border-radius: 12px;
+}
+
+.toolbar-panel h3,
+.error-panel h3,
+.kb-card h4,
+.kb-modal-header h3 {
+  margin: 0;
+  color: var(--text-primary);
+}
+
+.toolbar-panel p,
+.error-panel p,
+.kb-card p,
+.kb-modal-header p {
+  margin: 8px 0 0;
+  color: var(--text-secondary);
+  line-height: 1.65;
+}
+
+.panel-skeleton {
+  min-height: 360px;
+}
+
+.kb-grid-panel {
+  display: grid;
 }
 
 .kb-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
-  gap: 20px;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 16px;
 }
 
-.kb-card {
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 12px;
-  padding: 20px;
+.kb-tile {
+  position: relative;
+  border: 1px solid var(--border-color);
+  border-radius: 18px;
+  background: var(--bg-tertiary);
+  padding: 16px;
+  box-shadow: var(--card-shadow-xs);
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  min-height: 176px;
+  cursor: pointer;
+  transition: border-color 0.2s ease, transform 0.2s ease, background 0.2s ease;
 }
 
-.kb-header {
+.kb-tile:hover {
+  border-color: var(--brand-primary);
+  background: var(--bg-secondary);
+  transform: translateY(-1px);
+}
+
+.kb-tile:focus-visible {
+  box-shadow: 0 0 0 4px var(--brand-primary-light);
+}
+
+.kb-tile-top {
+  position: relative;
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  margin-bottom: 12px;
-}
-
-.kb-header h3 {
-  margin: 0;
-  color: #e2e8f0;
-}
-
-.status-badge {
-  font-size: 0.75rem;
-  padding: 2px 8px;
-  border-radius: 4px;
-}
-
-.status-badge.active {
-  background: rgba(34, 197, 94, 0.2);
-  color: #4ade80;
-}
-
-.kb-description {
-  color: #94a3b8;
-  font-size: 0.9rem;
-  margin-bottom: 12px;
-}
-
-.kb-badges {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 16px;
-}
-
-.badge {
-  background: rgba(124, 211, 252, 0.1);
-  color: #7dd3fc;
-  font-size: 0.75rem;
-  padding: 2px 8px;
-  border-radius: 4px;
-}
-
-.kb-section {
-  background: rgba(255, 255, 255, 0.02);
-  border-radius: 8px;
-  padding: 12px;
-  margin-bottom: 12px;
-}
-
-.kb-section-title {
-  display: flex;
   justify-content: space-between;
-  align-items: center;
-  color: #cbd5e1;
-  font-size: 0.9rem;
-  margin-bottom: 8px;
 }
 
-.btn-link {
-  background: none;
-  border: none;
-  color: #7dd3fc;
-  cursor: pointer;
-  font-size: 0.85rem;
-}
-
-.connection-info {
-  font-size: 0.85rem;
-}
-
-.info-row {
-  display: flex;
-  gap: 8px;
-  color: #94a3b8;
-  margin-bottom: 8px;
-}
-
-.info-row .label {
-  min-width: 50px;
-}
-
-.connection-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.btn-sm {
-  padding: 4px 10px;
-  font-size: 0.8rem;
-  border-radius: 4px;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  background: rgba(255, 255, 255, 0.05);
-  color: #e2e8f0;
-  cursor: pointer;
-}
-
-.btn-sm.btn-danger {
-  background: rgba(248, 113, 113, 0.1);
-  color: #f87171;
-  border-color: rgba(248, 113, 113, 0.3);
-}
-
-.test-result {
-  margin-top: 8px;
-  padding: 6px 10px;
-  border-radius: 4px;
-  font-size: 0.8rem;
-}
-
-.test-result.success {
-  background: rgba(34, 197, 94, 0.1);
-  color: #4ade80;
-}
-
-.test-result.error {
-  background: rgba(248, 113, 113, 0.1);
-  color: #f87171;
-}
-
-.kb-actions {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
-}
-
-.btn-primary,
-.btn-secondary,
-.btn-danger {
-  padding: 8px 16px;
-  border-radius: 6px;
-  font-size: 0.9rem;
-  cursor: pointer;
-  border: none;
-}
-
-.btn-primary {
-  background: linear-gradient(135deg, #7dd3fc 0%, #38bdf8 100%);
-  color: #0f172a;
-}
-
-.btn-secondary {
-  background: rgba(255, 255, 255, 0.1);
-  color: #e2e8f0;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-}
-
-.btn-danger {
-  background: rgba(248, 113, 113, 0.1);
-  color: #f87171;
-  border: 1px solid rgba(248, 113, 113, 0.3);
-}
-
-.empty-state,
-.loading,
-.error {
-  text-align: center;
-  padding: 48px;
-  color: #64748b;
-}
-
-.error {
-  color: #f87171;
-}
-
-.modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.7);
-  display: flex;
+.kb-tile-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  z-index: 1000;
+  background: linear-gradient(135deg, #ea580c 0%, #f97316 100%);
+  color: #fff;
+  font-weight: 700;
+  font-size: 1rem;
 }
 
-.modal {
-  background: #1e293b;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+.tile-menu-trigger {
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.tile-menu {
+  position: absolute;
+  top: 34px;
+  right: 0;
+  z-index: 5;
+  min-width: 120px;
+  border: 1px solid var(--border-color);
   border-radius: 12px;
-  width: 100%;
-  max-width: 500px;
-  max-height: 90vh;
-  overflow-y: auto;
-}
-
-.modal-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 20px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-}
-
-.modal-header h2 {
-  margin: 0;
-  color: #e2e8f0;
-}
-
-.close-btn {
-  background: none;
-  border: none;
-  color: #94a3b8;
-  font-size: 1.5rem;
-  cursor: pointer;
-}
-
-.modal-body {
-  padding: 20px;
-}
-
-.form-group {
-  margin-bottom: 16px;
-}
-
-.form-group label {
-  display: block;
-  color: #e2e8f0;
-  font-size: 0.9rem;
-  margin-bottom: 6px;
-}
-
-.form-group input,
-.form-group select,
-.form-group textarea {
-  width: 100%;
-  padding: 10px 12px;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.05);
-  color: #e2e8f0;
-  font-size: 0.9rem;
-}
-
-.form-group input:focus,
-.form-group select:focus,
-.form-group textarea:focus {
-  outline: none;
-  border-color: #7dd3fc;
-}
-
-.checkbox-label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-}
-
-.checkbox-label input[type="checkbox"] {
-  width: auto;
-}
-
-.form-row {
+  background: var(--bg-secondary);
+  box-shadow: var(--card-shadow-sm);
+  padding: 6px;
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
+  gap: 4px;
 }
 
-.error-message {
-  color: #f87171;
-  background: rgba(248, 113, 113, 0.1);
-  padding: 12px;
-  border-radius: 6px;
-  font-size: 0.85rem;
-  margin-bottom: 16px;
+.tile-menu-item {
+  border: none;
+  background: transparent;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 8px;
+  color: var(--text-primary);
+  cursor: pointer;
 }
 
-.modal-footer {
+.tile-menu-item:hover:not(:disabled) {
+  background: var(--bg-tertiary);
+}
+
+.tile-menu-item.danger {
+  color: var(--danger-color);
+}
+
+.kb-tile h4 {
+  margin: 0;
+}
+
+.kb-tile-desc {
+  margin: 0;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  font-size: 0.92rem;
+}
+
+.kb-tile-meta-row {
+  margin-top: auto;
   display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.kb-tile-date {
+  color: var(--text-tertiary);
+  font-size: 0.82rem;
+}
+
+.kb-modal {
+  width: min(680px, 100%);
+  padding: 22px;
+  display: grid;
+  gap: 18px;
+}
+
+.inline-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.modal-error {
+  margin: 0;
+  color: var(--danger-color);
+  font-size: 0.9rem;
+}
+
+.kb-modal-actions {
   justify-content: flex-end;
+}
+
+.center-toast {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
   gap: 8px;
-  padding-top: 16px;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 12px 24px;
+  border-radius: 12px;
+  font-size: 0.95rem;
+  font-weight: 500;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.center-toast.success {
+  background: rgba(16, 185, 129, 0.92);
+  color: #fff;
+  box-shadow: 0 4px 20px rgba(16, 185, 129, 0.35);
+}
+
+.center-toast.error {
+  background: rgba(239, 68, 68, 0.92);
+  color: #fff;
+  box-shadow: 0 4px 20px rgba(239, 68, 68, 0.35);
+}
+
+.toast-fade-enter-active {
+  transition: opacity 0.25s ease;
+}
+
+.toast-fade-leave-active {
+  transition: opacity 0.4s ease;
+}
+
+.toast-fade-enter-from,
+.toast-fade-leave-to {
+  opacity: 0;
+}
+
+@media (max-width: 900px) {
+  .toolbar-panel,
+  .error-panel,
+  .kb-card-header,
+  .kb-card-actions,
+  .kb-modal-header,
+  .kb-modal-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
 }
 </style>

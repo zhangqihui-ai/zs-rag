@@ -1,348 +1,361 @@
+from __future__ import annotations
+
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, Query, status
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.core.enterprise_space_context import CurrentSpace, RequireMembership
+from app.core.errors import AppError
 from app.core.provider_adapter import test_provider_connection
+from app.core.provider_templates import MODEL_TYPE_SET, get_provider_template
 from app.db.session import get_db
-from app.models.enterprise_space import EnterpriseSpace
-from app.models.model_management import ModelRef, ProviderConfig
+from app.models.model_management import AIModelProvider
 from app.schemas.model_management import (
-    ModelRefCreate,
-    ModelRefResponse,
-    ModelRefUpdate,
-    ProviderConfigCreate,
-    ProviderConfigResponse,
-    ProviderConfigUpdate,
-    ProviderTestResponse,
+    BatchDefaultsUpdateRequest,
+    ModelEnabledUpdateRequest,
+    ProviderConnectionTestRequest,
+    ProviderCreateRequest,
+    ProviderUpdateRequest,
+    SingleDefaultUpdateRequest,
+)
+from app.services.model_management import (
+    available_provider_templates,
+    compact_auth_config,
+    ensure_provider_unique,
+    get_defaults,
+    get_model_detail,
+    get_provider_or_error,
+    list_models,
+    list_provider_summaries,
+    save_defaults,
+    save_single_default,
+    serialize_provider_detail,
+    set_model_enabled,
+    sync_provider_models,
 )
 
-router = APIRouter(prefix="/providers", tags=["model-management"])
+router = APIRouter(prefix="/api/v1/ai-models", tags=["model-management"])
 
 
-def _get_db() -> Session:
-    """获取数据库会话"""
-    db = next(get_db())
-    try:
-        return db
-    finally:
-        pass
+def ok_response(data: Any, *, message: str = "ok", status_code: int = status.HTTP_200_OK) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content={"code": 0, "message": message, "data": jsonable_encoder(data)},
+    )
 
 
-@router.get("", response_model=list[ProviderConfigResponse])
+@router.get("/provider-templates")
+def list_provider_templates(
+    model_type: str | None = Query(default=None),
+    keyword: str | None = Query(default=None),
+) -> JSONResponse:
+    if model_type and model_type not in MODEL_TYPE_SET:
+        raise AppError(status_code=400, code="VALIDATION_ERROR", message="不支持的 model_type")
+    return ok_response(available_provider_templates(model_type=model_type, keyword=keyword))
+
+
+@router.get("/providers")
 def list_providers(
     current_space: CurrentSpace,
     membership: RequireMembership,
-    db: Any = Depends(_get_db),
-) -> list[ProviderConfigResponse]:
-    """列出当前企业空间下的所有 Provider 配置"""
-    providers = db.execute(
-        select(ProviderConfig)
-        .where(ProviderConfig.enterprise_space_id == current_space.id)
-        .order_by(ProviderConfig.created_at.desc())
-    ).scalars().all()
+    db: Session = Depends(get_db),
+    keyword: str | None = Query(default=None),
+    deployment_type: str | None = Query(default=None),
+) -> JSONResponse:
+    if deployment_type and deployment_type not in {"public", "private"}:
+        raise AppError(status_code=400, code="VALIDATION_ERROR", message="deployment_type 仅支持 public 或 private")
+    providers = list_provider_summaries(
+        db,
+        space_id=current_space.id,
+        keyword=keyword,
+        deployment_type=deployment_type,
+    )
+    return ok_response(providers)
 
-    return providers
 
-
-@router.post("", response_model=ProviderConfigResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/providers")
 def create_provider(
-    provider_data: ProviderConfigCreate,
+    payload: ProviderCreateRequest,
     current_space: CurrentSpace,
     membership: RequireMembership,
-    db: Any = Depends(_get_db),
-) -> ProviderConfigResponse:
-    """创建新的 Provider 配置"""
-    # 检查名称是否已存在
-    existing = db.execute(
-        select(ProviderConfig).where(
-            ProviderConfig.name == provider_data.name,
-            ProviderConfig.enterprise_space_id == current_space.id,
-        )
-    ).scalar_one_or_none()
-
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Provider '{provider_data.name}' 已存在",
-        )
-
-    provider = ProviderConfig(
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    ensure_provider_unique(
+        db,
+        space_id=current_space.id,
+        provider_name=payload.provider_name,
+        base_url=payload.base_url,
+    )
+    template = get_provider_template(payload.provider_code) or {}
+    provider = AIModelProvider(
         enterprise_space_id=current_space.id,
-        name=provider_data.name,
-        provider_type=provider_data.provider_type,
-        base_url=provider_data.base_url,
-        api_key=provider_data.api_key,
-        is_active=True,
-        timeout_seconds=provider_data.timeout_seconds,
-        max_retries=provider_data.max_retries,
-        config=provider_data.config,
-        description=provider_data.description,
+        provider_name=payload.provider_name,
+        provider_code=payload.provider_code,
+        deployment_type=payload.deployment_type,
+        base_url=payload.base_url,
+        auth_type=payload.auth_type or template.get("auth_type", "bearer"),
+        auth_config=compact_auth_config(payload.auth_config),
+        remark=payload.remark,
+        sync_status="pending",
     )
     db.add(provider)
+    db.flush()
+
+    sync_result = {
+        "provider_id": provider.id,
+        "added": 0,
+        "updated": 0,
+        "disabled": 0,
+        "sync_status": provider.sync_status,
+        "model_count": 0,
+    }
+    if payload.auto_sync_models:
+        sync_result = sync_provider_models(db, provider=provider, raise_on_error=False)
+
     db.commit()
-    db.refresh(provider)
+    return ok_response(
+        {
+            "provider_id": provider.id,
+            "provider_name": provider.provider_name,
+            "sync_status": sync_result["sync_status"],
+            "model_count": sync_result["model_count"],
+        },
+        status_code=status.HTTP_201_CREATED,
+    )
 
-    return provider
+
+@router.post("/providers/test-connection")
+def test_provider_connection_draft(
+    payload: ProviderConnectionTestRequest,
+    current_space: CurrentSpace,
+    membership: RequireMembership,
+) -> JSONResponse:
+    template = get_provider_template(payload.provider_code) or {}
+    provider = AIModelProvider(
+        enterprise_space_id=current_space.id,
+        provider_name=payload.provider_name,
+        provider_code=payload.provider_code,
+        deployment_type=payload.deployment_type or template.get("deployment_type", "public"),
+        base_url=payload.base_url,
+        auth_type=payload.auth_type or template.get("auth_type", "bearer"),
+        auth_config=compact_auth_config(payload.auth_config),
+        remark=payload.remark,
+        sync_status="pending",
+    )
+    result = test_provider_connection(provider)
+    return ok_response(
+        {
+            "success": result.success,
+            "message": result.message,
+            "response_time_ms": result.response_time_ms,
+            "model_name": result.model_name,
+            "model_count": (result.data or {}).get("model_count"),
+        }
+    )
 
 
-@router.get("/{provider_id}", response_model=ProviderConfigResponse)
-def get_provider(
+@router.get("/providers/{provider_id}")
+def get_provider_detail(
     provider_id: int,
     current_space: CurrentSpace,
     membership: RequireMembership,
-    db: Any = Depends(_get_db),
-) -> ProviderConfigResponse:
-    """获取指定 Provider 配置详情"""
-    provider = db.execute(
-        select(ProviderConfig).where(
-            ProviderConfig.id == provider_id,
-            ProviderConfig.enterprise_space_id == current_space.id,
-        )
-    ).scalar_one_or_none()
-
-    if provider is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Provider 不存在或不属于当前企业空间",
-        )
-
-    return provider
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    provider = get_provider_or_error(db, space_id=current_space.id, provider_id=provider_id)
+    return ok_response(serialize_provider_detail(provider))
 
 
-@router.patch("/{provider_id}", response_model=ProviderConfigResponse)
+@router.put("/providers/{provider_id}")
 def update_provider(
     provider_id: int,
-    provider_data: ProviderConfigUpdate,
+    payload: ProviderUpdateRequest,
     current_space: CurrentSpace,
     membership: RequireMembership,
-    db: Any = Depends(_get_db),
-) -> ProviderConfigResponse:
-    """更新 Provider 配置"""
-    provider = db.execute(
-        select(ProviderConfig).where(
-            ProviderConfig.id == provider_id,
-            ProviderConfig.enterprise_space_id == current_space.id,
-        )
-    ).scalar_one_or_none()
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    provider = get_provider_or_error(db, space_id=current_space.id, provider_id=provider_id)
 
-    if provider is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Provider 不存在或不属于当前企业空间",
-        )
+    next_name = payload.provider_name or provider.provider_name
+    next_base_url = payload.base_url or provider.base_url
+    ensure_provider_unique(
+        db,
+        space_id=current_space.id,
+        provider_name=next_name,
+        base_url=next_base_url,
+        exclude_provider_id=provider.id,
+    )
 
-    update_data = provider_data.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(provider, field, value)
+    if payload.provider_code is not None:
+        provider.provider_code = payload.provider_code
+        template = get_provider_template(payload.provider_code) or {}
+        if payload.deployment_type is None:
+            provider.deployment_type = template.get("deployment_type", provider.deployment_type)
+        if payload.auth_type is None:
+            provider.auth_type = template.get("auth_type", provider.auth_type)
+    if payload.provider_name is not None:
+        provider.provider_name = payload.provider_name
+    if payload.deployment_type is not None:
+        provider.deployment_type = payload.deployment_type
+    if payload.base_url is not None:
+        provider.base_url = payload.base_url
+    if payload.auth_type is not None:
+        provider.auth_type = payload.auth_type
+    if payload.auth_config is not None:
+        merged_auth_config = compact_auth_config(provider.auth_config)
+        merged_auth_config.update(compact_auth_config(payload.auth_config))
+        provider.auth_config = merged_auth_config
+    if payload.remark is not None:
+        provider.remark = payload.remark
+
+    if payload.auto_sync_models:
+        sync_provider_models(db, provider=provider, raise_on_error=False)
 
     db.commit()
-    db.refresh(provider)
+    refreshed = get_provider_or_error(db, space_id=current_space.id, provider_id=provider.id)
+    return ok_response(serialize_provider_detail(refreshed))
 
-    return provider
 
-
-@router.delete("/{provider_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/providers/{provider_id}")
 def delete_provider(
     provider_id: int,
     current_space: CurrentSpace,
     membership: RequireMembership,
-    db: Any = Depends(_get_db),
-) -> None:
-    """删除 Provider 配置"""
-    provider = db.execute(
-        select(ProviderConfig).where(
-            ProviderConfig.id == provider_id,
-            ProviderConfig.enterprise_space_id == current_space.id,
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    provider = get_provider_or_error(db, space_id=current_space.id, provider_id=provider_id)
+    default_model = next((model for model in provider.models if model.defaults), None)
+    if default_model is not None:
+        raise AppError(
+            status_code=409,
+            code="PROVIDER_HAS_DEFAULT_MODEL",
+            message="该厂商下仍有模型被设为默认模型，请先修改默认模型",
         )
-    ).scalar_one_or_none()
-
-    if provider is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Provider 不存在或不属于当前企业空间",
-        )
-
     db.delete(provider)
     db.commit()
+    return ok_response(True, message="deleted")
 
 
-# Model Ref CRUD endpoints
-
-@router.get("/{provider_id}/models", response_model=list[ModelRefResponse])
-def list_models(
+@router.post("/providers/{provider_id}/sync")
+def sync_provider(
     provider_id: int,
     current_space: CurrentSpace,
     membership: RequireMembership,
-    db: Any = Depends(_get_db),
-) -> list[ModelRefResponse]:
-    """列出指定 Provider 下的所有模型"""
-    # 验证 Provider 属于当前企业空间
-    provider = db.execute(
-        select(ProviderConfig).where(
-            ProviderConfig.id == provider_id,
-            ProviderConfig.enterprise_space_id == current_space.id,
-        )
-    ).scalar_one_or_none()
-
-    if provider is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Provider 不存在或不属于当前企业空间",
-        )
-
-    models = db.execute(
-        select(ModelRef)
-        .where(ModelRef.provider_id == provider_id)
-        .order_by(ModelRef.created_at.desc())
-    ).scalars().all()
-
-    return models
-
-
-@router.post("/{provider_id}/models", response_model=ModelRefResponse, status_code=status.HTTP_201_CREATED)
-def create_model(
-    provider_id: int,
-    model_data: ModelRefCreate,
-    current_space: CurrentSpace,
-    membership: RequireMembership,
-    db: Any = Depends(_get_db),
-) -> ModelRefResponse:
-    """创建新的模型引用"""
-    # 验证 Provider 属于当前企业空间
-    provider = db.execute(
-        select(ProviderConfig).where(
-            ProviderConfig.id == provider_id,
-            ProviderConfig.enterprise_space_id == current_space.id,
-        )
-    ).scalar_one_or_none()
-
-    if provider is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Provider 不存在或不属于当前企业空间",
-        )
-
-    # 检查模型名称是否已存在
-    existing = db.execute(
-        select(ModelRef).where(
-            ModelRef.model_name == model_data.model_name,
-            ModelRef.provider_id == provider_id,
-        )
-    ).scalar_one_or_none()
-
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"模型 '{model_data.model_name}' 已存在于该 Provider",
-        )
-
-    model = ModelRef(
-        enterprise_space_id=current_space.id,
-        provider_id=provider_id,
-        model_name=model_data.model_name,
-        display_name=model_data.display_name,
-        capabilities=model_data.capabilities,
-        is_active=True,
-        default_params=model_data.default_params,
-        description=model_data.description,
-    )
-    db.add(model)
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    provider = get_provider_or_error(db, space_id=current_space.id, provider_id=provider_id)
+    try:
+        result = sync_provider_models(db, provider=provider, raise_on_error=True)
+    except AppError:
+        db.commit()
+        raise
     db.commit()
-    db.refresh(model)
-
-    return model
+    return ok_response(result)
 
 
-@router.patch("/{provider_id}/models/{model_id}", response_model=ModelRefResponse)
-def update_model(
-    provider_id: int,
-    model_id: int,
-    model_data: ModelRefUpdate,
-    current_space: CurrentSpace,
-    membership: RequireMembership,
-    db: Any = Depends(_get_db),
-) -> ModelRefResponse:
-    """更新模型配置"""
-    model = db.execute(
-        select(ModelRef).where(
-            ModelRef.id == model_id,
-            ModelRef.provider_id == provider_id,
-            ModelRef.enterprise_space_id == current_space.id,
-        )
-    ).scalar_one_or_none()
-
-    if model is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="模型不存在或不属于当前企业空间",
-        )
-
-    update_data = model_data.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(model, field, value)
-
-    db.commit()
-    db.refresh(model)
-
-    return model
-
-
-@router.delete("/{provider_id}/models/{model_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_model(
-    provider_id: int,
-    model_id: int,
-    current_space: CurrentSpace,
-    membership: RequireMembership,
-    db: Any = Depends(_get_db),
-) -> None:
-    """删除模型引用"""
-    model = db.execute(
-        select(ModelRef).where(
-            ModelRef.id == model_id,
-            ModelRef.provider_id == provider_id,
-            ModelRef.enterprise_space_id == current_space.id,
-        )
-    ).scalar_one_or_none()
-
-    if model is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="模型不存在或不属于当前企业空间",
-        )
-
-    db.delete(model)
-    db.commit()
-
-
-@router.post("/test", response_model=ProviderTestResponse)
+@router.post("/providers/{provider_id}/test")
 def test_provider(
     provider_id: int,
     current_space: CurrentSpace,
     membership: RequireMembership,
-    db: Any = Depends(_get_db),
-) -> ProviderTestResponse:
-    """测试 Provider 连接"""
-    provider = db.execute(
-        select(ProviderConfig).where(
-            ProviderConfig.id == provider_id,
-            ProviderConfig.enterprise_space_id == current_space.id,
-        )
-    ).scalar_one_or_none()
-
-    if provider is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Provider 不存在或不属于当前企业空间",
-        )
-
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    provider = get_provider_or_error(db, space_id=current_space.id, provider_id=provider_id)
     result = test_provider_connection(provider)
-
-    return ProviderTestResponse(
-        success=result.success,
-        message=result.message,
-        response_time_ms=result.response_time_ms,
-        model_name=result.model_name,
+    return ok_response(
+        {
+            "success": result.success,
+            "message": result.message,
+            "response_time_ms": result.response_time_ms,
+            "model_name": result.model_name,
+            "model_count": (result.data or {}).get("model_count"),
+        }
     )
+
+
+@router.get("/models")
+def query_models(
+    current_space: CurrentSpace,
+    membership: RequireMembership,
+    db: Session = Depends(get_db),
+    provider_id: int | None = Query(default=None),
+    model_type: str | None = Query(default=None),
+    is_enabled: bool | None = Query(default=None),
+    keyword: str | None = Query(default=None),
+    view: str = Query(default="grouped"),
+) -> JSONResponse:
+    if view not in {"grouped", "flat"}:
+        raise AppError(status_code=400, code="VALIDATION_ERROR", message="view 仅支持 grouped 或 flat")
+    if model_type and model_type not in MODEL_TYPE_SET:
+        raise AppError(status_code=400, code="VALIDATION_ERROR", message="不支持的 model_type")
+    data = list_models(
+        db,
+        space_id=current_space.id,
+        view=view,
+        provider_id=provider_id,
+        model_type=model_type,
+        is_enabled=is_enabled,
+        keyword=keyword,
+    )
+    return ok_response(data)
+
+
+@router.get("/models/{model_id}")
+def get_model(
+    model_id: int,
+    current_space: CurrentSpace,
+    membership: RequireMembership,
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    return ok_response(get_model_detail(db, space_id=current_space.id, model_id=model_id))
+
+
+@router.patch("/models/{model_id}/enabled")
+def update_model_enabled(
+    model_id: int,
+    payload: ModelEnabledUpdateRequest,
+    current_space: CurrentSpace,
+    membership: RequireMembership,
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    result = set_model_enabled(db, space_id=current_space.id, model_id=model_id, is_enabled=payload.is_enabled)
+    db.commit()
+    return ok_response(result)
+
+
+@router.get("/defaults")
+def get_default_models(
+    current_space: CurrentSpace,
+    membership: RequireMembership,
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    return ok_response(get_defaults(db, space_id=current_space.id))
+
+
+@router.put("/defaults")
+def update_defaults(
+    payload: BatchDefaultsUpdateRequest,
+    current_space: CurrentSpace,
+    membership: RequireMembership,
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    save_defaults(db, space_id=current_space.id, payload=payload.to_mapping())
+    db.commit()
+    return ok_response(True, message="saved")
+
+
+@router.put("/defaults/{model_type}")
+def update_single_default(
+    model_type: str,
+    payload: SingleDefaultUpdateRequest,
+    current_space: CurrentSpace,
+    membership: RequireMembership,
+    db: Session = Depends(get_db),
+) -> JSONResponse:
+    if model_type not in MODEL_TYPE_SET:
+        raise AppError(status_code=400, code="VALIDATION_ERROR", message="不支持的 model_type")
+    result = save_single_default(db, space_id=current_space.id, model_type=model_type, model_id=payload.model_id)
+    db.commit()
+    return ok_response(result)
