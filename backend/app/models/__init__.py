@@ -2,6 +2,7 @@ from app.db.base import Base
 from app.models.enterprise_space import EnterpriseSpace, Membership, User
 from app.models.knowledge_base import KnowledgeBase, KnowledgeChunk, KnowledgeDocument, Neo4jConnection
 from app.models.model_management import AIModel, AIModelDefault, AIModelProvider
+from app.models.chat import ChatConversation, ChatSession, ChatMessage
 
 __all__ = [
     "Base",
@@ -15,4 +16,7 @@ __all__ = [
     "Neo4jConnection",
     "KnowledgeDocument",
     "KnowledgeChunk",
+    "ChatConversation",
+    "ChatSession",
+    "ChatMessage",
 ]

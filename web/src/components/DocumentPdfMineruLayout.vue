@@ -1,0 +1,656 @@
+<template>
+  <div class="pdf-mineru-layout">
+    <div v-if="loading" class="pdf-mineru-loading">正在加载 PDF…</div>
+    <div v-else-if="error" class="status-box error">{{ error }}</div>
+    <template v-else>
+      <div class="pdf-mineru-toolbar">
+        <button type="button" class="btn btn-ghost btn-row-compact" :disabled="pageNum <= 1" @click="goPage(pageNum - 1)">
+          上一页
+        </button>
+        <span class="pdf-mineru-page-label">{{ pageNum }}–{{ displayedEnd }} / {{ numPages }}</span>
+        <button
+          type="button"
+          class="btn btn-ghost btn-row-compact"
+          :disabled="pageNum >= numPages"
+          @click="goPage(pageNum + 1)"
+        >
+          下一页
+        </button>
+        <span class="pdf-mineru-hint">多页连续预览；点击色块联动右侧；滚轮滑到区域底/顶翻页</span>
+      </div>
+      <ScrollRowWithVSlider
+        ref="scrollRowSliderRef"
+        scroll-class="pdf-mineru-scroll-wrap"
+        @scroll="onPdfScrollAreaScroll"
+      >
+        <div class="pdf-mineru-pages">
+          <section
+            v-for="p in displayedPageRange"
+            :key="'slab-' + p"
+            class="pdf-mineru-page-slab"
+            :data-pdf-page="p"
+          >
+            <div class="pdf-mineru-page-badge">第 {{ p }} 页</div>
+            <div class="pdf-mineru-slab-stack">
+              <canvas :data-pdf-canvas-page="p" class="pdf-mineru-canvas" />
+              <div
+                class="pdf-mineru-overlay"
+                :style="{
+                  width: (pageViewport[p]?.w || 0) + 'px',
+                  height: (pageViewport[p]?.h || 0) + 'px',
+                }"
+              >
+                <button
+                  v-for="box in boxesForPage(p)"
+                  :key="'box-' + p + '-' + box.index"
+                  type="button"
+                  class="pdf-mineru-box"
+                  :class="{ active: modelValue === box.index }"
+                  :style="box.style"
+                  :title="'块 #' + (box.index + 1)"
+                  @click="onBoxClick(box.index)"
+                />
+              </div>
+            </div>
+          </section>
+        </div>
+      </ScrollRowWithVSlider>
+    </template>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
+import * as pdfjs from 'pdfjs-dist'
+import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
+
+import { getKnowledgeBaseErrorMessage, knowledgeBaseApi } from '../api/knowledge-base'
+import ScrollRowWithVSlider from './ScrollRowWithVSlider.vue'
+import { pageScaleFromItems, shouldShowMineruBlock, type MineruContentItem } from '../lib/mineruContentDisplay'
+
+pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc
+
+/** 单次连续渲染的页数（从当前「起始页」向下） */
+const PAGE_STACK = 5
+
+const props = defineProps<{
+  kbId: number
+  documentId: number
+  items: MineruContentItem[]
+  modelValue: number | null
+}>()
+
+const emit = defineEmits<{
+  'update:modelValue': [value: number | null]
+  'page-change': [page: number]
+}>()
+
+const loading = ref(true)
+const error = ref('')
+const numPages = ref(0)
+const pageNum = ref(1)
+const pdfDoc = shallowRef<pdfjs.PDFDocumentProxy | null>(null)
+const scrollRowSliderRef = ref<{
+  getScrollEl: () => HTMLElement | null
+  getRowEl: () => HTMLElement | null
+  syncThumb: () => void
+} | null>(null)
+
+const pageViewport = ref<Record<number, { w: number; h: number }>>({})
+
+let resizeObserver: ResizeObserver | null = null
+let resizeDebounceTimer: ReturnType<typeof setTimeout> | null = null
+
+let stackWheelTarget: HTMLElement | null = null
+let stackWheelHandler: ((e: WheelEvent) => void) | null = null
+
+let lastEmittedPdfPage = 1
+/** 避免快速切换文档时旧请求先结束把 loading 置 false 或覆盖新文档状态 */
+let loadGeneration = 0
+
+function getStackEl(): HTMLElement | null {
+  return scrollRowSliderRef.value?.getScrollEl() ?? null
+}
+
+function queryCanvasForPage(root: HTMLElement, p: number): HTMLCanvasElement | null {
+  return root.querySelector(`canvas[data-pdf-canvas-page="${p}"]`)
+}
+
+const displayedPageRange = computed(() => {
+  const n = numPages.value
+  if (n < 1) {
+    return [] as number[]
+  }
+  const start = pageNum.value
+  const end = Math.min(n, start + PAGE_STACK - 1)
+  const r: number[] = []
+  for (let p = start; p <= end; p++) {
+    r.push(p)
+  }
+  return r
+})
+
+const displayedEnd = computed(() => {
+  const r = displayedPageRange.value
+  return r.length ? r[r.length - 1] : pageNum.value
+})
+
+function boxesForPage(p: number): { index: number; style: Record<string, string> }[] {
+  if (!pdfDoc.value || !props.items.length) {
+    return []
+  }
+  const p0 = p - 1
+  const dim = pageViewport.value[p]
+  if (!dim || dim.w <= 0 || dim.h <= 0) {
+    return []
+  }
+  const { mx, my } = pageScaleFromItems(props.items, p0)
+  const vw = dim.w
+  const vh = dim.h
+  const out: { index: number; style: Record<string, string> }[] = []
+  props.items.forEach((it, index) => {
+    if (!shouldShowMineruBlock(it as MineruContentItem)) {
+      return
+    }
+    if (Number(it.page_idx) !== p0) {
+      return
+    }
+    const b = it.bbox
+    if (!Array.isArray(b) || b.length < 4) {
+      return
+    }
+    const x0 = Number(b[0])
+    const y0 = Number(b[1])
+    const x1 = Number(b[2])
+    const y1 = Number(b[3])
+    if (![x0, y0, x1, y1].every(Number.isFinite)) {
+      return
+    }
+    const left = (x0 / mx) * vw
+    const top = (y0 / my) * vh
+    const w = ((x1 - x0) / mx) * vw
+    const h = ((y1 - y0) / my) * vh
+    if (w < 2 || h < 2) {
+      return
+    }
+    out.push({
+      index,
+      style: {
+        left: `${left}px`,
+        top: `${top}px`,
+        width: `${w}px`,
+        height: `${h}px`,
+      },
+    })
+  })
+  return out
+}
+
+function onBoxClick(index: number) {
+  emit('update:modelValue', props.modelValue === index ? null : index)
+}
+
+function detectDominantPdfPage(scrollRoot: HTMLElement): number | null {
+  const cr = scrollRoot.getBoundingClientRect()
+  const anchorY = cr.top + Math.min(120, cr.height * 0.22)
+  let bestPage: number | null = null
+  let bestDist = Number.POSITIVE_INFINITY
+  scrollRoot.querySelectorAll<HTMLElement>('.pdf-mineru-page-slab[data-pdf-page]').forEach((node) => {
+    const r = node.getBoundingClientRect()
+    if (r.bottom <= cr.top + 2 || r.top >= cr.bottom - 2) {
+      return
+    }
+    const raw = node.dataset.pdfPage
+    const page = raw != null ? Number(raw) : NaN
+    if (!Number.isFinite(page) || page < 1) {
+      return
+    }
+    const mid = (r.top + r.bottom) / 2
+    const dist = Math.abs(mid - anchorY)
+    if (dist < bestDist) {
+      bestDist = dist
+      bestPage = page
+    }
+  })
+  return bestPage
+}
+
+function onPdfScrollAreaScroll() {
+  const el = getStackEl()
+  if (!el) {
+    return
+  }
+  const p = detectDominantPdfPage(el)
+  if (p != null && p !== lastEmittedPdfPage) {
+    lastEmittedPdfPage = p
+    emit('page-change', p)
+  }
+}
+
+async function scrollStackToTop() {
+  await nextTick()
+  const el = getStackEl()
+  if (el) {
+    el.scrollTop = 0
+    scrollRowSliderRef.value?.syncThumb()
+  }
+}
+
+async function scrollStackToBottom() {
+  await nextTick()
+  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+  const el = getStackEl()
+  if (el) {
+    el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight)
+    scrollRowSliderRef.value?.syncThumb()
+  }
+}
+
+const WHEEL_EDGE_PX = 6
+
+async function handleStackWheel(e: WheelEvent) {
+  const el = getStackEl()
+  if (!el || numPages.value <= 1) {
+    return
+  }
+  if (Math.abs(e.deltaY) < 1 && Math.abs(e.deltaX) >= Math.abs(e.deltaY)) {
+    return
+  }
+  const { scrollTop, scrollHeight, clientHeight } = el
+  const atBottom = scrollTop + clientHeight >= scrollHeight - WHEEL_EDGE_PX
+  const atTop = scrollTop <= WHEEL_EDGE_PX
+  const noOverflow = scrollHeight <= clientHeight + WHEEL_EDGE_PX
+
+  if (e.deltaY > 0) {
+    if ((noOverflow || atBottom) && pageNum.value < numPages.value) {
+      e.preventDefault()
+      pageNum.value = pageNum.value + 1
+      await renderVisiblePages()
+      await scrollStackToTop()
+    }
+  } else if (e.deltaY < 0) {
+    if ((noOverflow || atTop) && pageNum.value > 1) {
+      e.preventDefault()
+      pageNum.value = pageNum.value - 1
+      await renderVisiblePages()
+      await scrollStackToBottom()
+    }
+  }
+}
+
+function teardownStackWheel() {
+  if (stackWheelTarget && stackWheelHandler) {
+    stackWheelTarget.removeEventListener('wheel', stackWheelHandler)
+  }
+  stackWheelTarget = null
+  stackWheelHandler = null
+}
+
+function setupStackWheel() {
+  teardownStackWheel()
+  const el = getStackEl()
+  if (!el) {
+    return
+  }
+  stackWheelTarget = el
+  stackWheelHandler = (e: WheelEvent) => {
+    void handleStackWheel(e)
+  }
+  el.addEventListener('wheel', stackWheelHandler, { passive: false })
+}
+
+function teardownResizeObserver() {
+  if (resizeDebounceTimer != null) {
+    clearTimeout(resizeDebounceTimer)
+    resizeDebounceTimer = null
+  }
+  resizeObserver?.disconnect()
+  resizeObserver = null
+  teardownStackWheel()
+}
+
+function setupResizeObserver() {
+  teardownResizeObserver()
+  const el = getStackEl()
+  if (!el || typeof ResizeObserver === 'undefined') {
+    return
+  }
+  resizeObserver = new ResizeObserver(() => {
+    if (!pdfDoc.value) {
+      return
+    }
+    if (resizeDebounceTimer != null) {
+      clearTimeout(resizeDebounceTimer)
+    }
+    resizeDebounceTimer = setTimeout(() => {
+      resizeDebounceTimer = null
+      void (async () => {
+        await renderVisiblePages()
+      })()
+    }, 120)
+  })
+  resizeObserver.observe(el)
+}
+
+async function goPage(n: number) {
+  if (n < 1 || n > numPages.value) {
+    return
+  }
+  pageNum.value = n
+  await renderVisiblePages()
+  await scrollStackToTop()
+}
+
+const FIT_PADDING_PX = 20
+const SCALE_MIN = 0.15
+const SCALE_MAX = 2.5
+
+function computePageScale(page: pdfjs.PDFPageProxy, canvas: HTMLCanvasElement): number {
+  const base = page.getViewport({ scale: 1 })
+  const bw = Math.max(base.width || 1, 1)
+  let cw = getStackEl()?.clientWidth ?? 0
+  if (cw < 64) {
+    cw = scrollRowSliderRef.value?.getRowEl()?.clientWidth ?? 0
+  }
+  if (cw < 64) {
+    cw = canvas.closest('.pdf-mineru-pages')?.clientWidth ?? 0
+  }
+  if (cw < 64) {
+    cw = canvas.parentElement?.clientWidth ?? 0
+  }
+  if (cw < 64) {
+    cw = 720
+  }
+  const targetW = Math.max(64, cw - FIT_PADDING_PX * 2)
+  const s = targetW / bw
+  return Math.min(SCALE_MAX, Math.max(SCALE_MIN, s))
+}
+
+async function renderVisiblePages() {
+  const doc = pdfDoc.value
+  if (!doc) {
+    return
+  }
+  const pages = displayedPageRange.value
+  if (pages.length === 0) {
+    return
+  }
+  for (let attempt = 0; attempt < 24; attempt++) {
+    await nextTick()
+    const root = getStackEl()
+    if (!root) {
+      continue
+    }
+    let all = true
+    for (const p of pages) {
+      if (!queryCanvasForPage(root, p)) {
+        all = false
+        break
+      }
+    }
+    if (all) {
+      break
+    }
+  }
+  const root = getStackEl()
+  if (!root) {
+    return
+  }
+  for (const p of pages) {
+    const canvas = queryCanvasForPage(root, p)
+    if (!canvas) {
+      continue
+    }
+    const page = await doc.getPage(p)
+    const scale = computePageScale(page, canvas)
+    const viewport = page.getViewport({ scale })
+    const ctx = canvas.getContext('2d')
+    if (!ctx) {
+      continue
+    }
+    canvas.width = viewport.width
+    canvas.height = viewport.height
+    pageViewport.value = {
+      ...pageViewport.value,
+      [p]: { w: viewport.width, h: viewport.height },
+    }
+    await page.render({ canvasContext: ctx, viewport }).promise
+  }
+  await nextTick()
+  scrollRowSliderRef.value?.syncThumb()
+}
+
+async function loadPdf() {
+  const gen = ++loadGeneration
+  teardownResizeObserver()
+  loading.value = true
+  error.value = ''
+  pdfDoc.value = null
+  numPages.value = 0
+  pageViewport.value = {}
+  try {
+    const blob = await knowledgeBaseApi.fetchDocumentFileBlob(props.kbId, props.documentId)
+    if (gen !== loadGeneration) {
+      return
+    }
+    const buf = await blob.arrayBuffer()
+    if (gen !== loadGeneration) {
+      return
+    }
+    const pdfParseMs = Number(import.meta.env.VITE_PDF_PARSE_TIMEOUT_MS) || 120_000
+    const task = pdfjs.getDocument({ data: buf })
+    const doc = await Promise.race([
+      task.promise,
+      new Promise<pdfjs.PDFDocumentProxy>((_, reject) => {
+        setTimeout(() => {
+          reject(new Error(`PDF 解析超时（>${Math.round(pdfParseMs / 1000)}s），请尝试重新打开或下载原文排查`))
+        }, pdfParseMs)
+      }),
+    ])
+    if (gen !== loadGeneration) {
+      void doc.destroy()
+      return
+    }
+    pdfDoc.value = doc
+    numPages.value = doc.numPages
+    pageNum.value = 1
+    lastEmittedPdfPage = 1
+  } catch (e) {
+    if (gen === loadGeneration) {
+      error.value = getKnowledgeBaseErrorMessage(e, '加载 PDF 失败')
+    }
+  } finally {
+    if (gen === loadGeneration) {
+      loading.value = false
+    }
+  }
+  if (gen !== loadGeneration) {
+    return
+  }
+  if (pdfDoc.value) {
+    await nextTick()
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    await nextTick()
+    await renderVisiblePages()
+    setupResizeObserver()
+    setupStackWheel()
+    const el = getStackEl()
+    const p = el ? detectDominantPdfPage(el) : null
+    if (p != null) {
+      lastEmittedPdfPage = p
+      emit('page-change', p)
+    }
+  }
+}
+
+watch(
+  () => [props.kbId, props.documentId],
+  () => {
+    void loadPdf()
+  },
+)
+
+watch(
+  () => props.modelValue,
+  async (idx) => {
+    if (idx == null || !props.items.length) {
+      return
+    }
+    const it = props.items[idx]
+    if (!it || typeof it.page_idx !== 'number') {
+      return
+    }
+    const want = it.page_idx + 1
+    if (want !== pageNum.value && want >= 1 && want <= numPages.value) {
+      pageNum.value = want
+      await renderVisiblePages()
+      await scrollStackToTop()
+    }
+  },
+)
+
+watch(pageNum, (n) => {
+  lastEmittedPdfPage = n
+  emit('page-change', n)
+})
+
+onMounted(() => {
+  void loadPdf()
+})
+
+defineExpose({
+  async goToPage(n: number) {
+    await goPage(n)
+  },
+  getPageNum: () => pageNum.value,
+})
+
+onUnmounted(() => {
+  loadGeneration += 1
+  teardownResizeObserver()
+  void pdfDoc.value?.destroy()
+  pdfDoc.value = null
+})
+</script>
+
+<style scoped>
+.pdf-mineru-layout {
+  width: 100%;
+  min-width: 0;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-radius: 14px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  overflow: hidden;
+}
+
+.pdf-mineru-scroll-wrap {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  width: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.pdf-mineru-loading {
+  padding: 48px 16px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
+.pdf-mineru-toolbar {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+}
+
+.pdf-mineru-page-label {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  min-width: 120px;
+  text-align: center;
+}
+
+.pdf-mineru-hint {
+  margin-left: auto;
+  font-size: 0.78rem;
+  color: var(--text-tertiary);
+}
+
+.pdf-mineru-pages {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 10px 4px 14px 2px;
+}
+
+.pdf-mineru-page-slab {
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  background: var(--bg-tertiary);
+  padding: 8px 8px 10px;
+}
+
+.pdf-mineru-page-badge {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  margin-bottom: 8px;
+}
+
+.pdf-mineru-slab-stack {
+  position: relative;
+  display: block;
+  width: 100%;
+  max-width: 100%;
+}
+
+.pdf-mineru-canvas {
+  display: block;
+  vertical-align: top;
+}
+
+.pdf-mineru-overlay {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+}
+
+.pdf-mineru-box {
+  position: absolute;
+  pointer-events: auto;
+  margin: 0;
+  padding: 0;
+  border: 2px solid rgba(37, 99, 235, 0.55);
+  border-radius: 4px;
+  background: rgba(59, 130, 246, 0.12);
+  cursor: pointer;
+  box-sizing: border-box;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.pdf-mineru-box:hover {
+  background: rgba(59, 130, 246, 0.22);
+  border-color: rgba(37, 99, 235, 0.85);
+}
+
+.pdf-mineru-box.active {
+  background: rgba(59, 130, 246, 0.32);
+  border-color: #1d4ed8;
+  box-shadow: 0 0 0 2px rgba(29, 78, 216, 0.25);
+}
+</style>

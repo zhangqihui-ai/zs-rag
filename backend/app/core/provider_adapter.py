@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlencode
@@ -131,6 +133,43 @@ class BaseProvider(ABC):
                 message=f"聊天请求失败：{exc}",
                 response_time_ms=(time.time() - start_time) * 1000,
             )
+
+    def chat_stream_chunks(
+        self, model_name: str, messages: list[dict[str, Any]]
+    ) -> Iterator[str]:
+        """OpenAI-compatible SSE stream; yields text deltas from choices[].delta.content."""
+        url = f"{self.config.base_url.rstrip('/')}/chat/completions"
+        payload = {"model": model_name, "messages": messages, "stream": True}
+        stream_timeout = httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)
+        with self.client.stream(
+            "POST",
+            url,
+            headers={**self.request_headers(), "Content-Type": "application/json"},
+            json=payload,
+            timeout=stream_timeout,
+        ) as response:
+            response.raise_for_status()
+            for line in response.iter_lines():
+                if not line:
+                    continue
+                if not line.startswith("data:"):
+                    continue
+                data_part = line[5:].strip()
+                if data_part == "[DONE]":
+                    break
+                try:
+                    chunk_obj = json.loads(data_part)
+                except json.JSONDecodeError:
+                    continue
+                choices = chunk_obj.get("choices") or []
+                if not choices or not isinstance(choices, list):
+                    continue
+                delta = (choices[0] or {}).get("delta") or {}
+                if not isinstance(delta, dict):
+                    continue
+                piece = delta.get("content")
+                if piece:
+                    yield str(piece)
 
     def embed(self, model_name: str, inputs: list[str]) -> ProviderResponse:
         start_time = time.time()

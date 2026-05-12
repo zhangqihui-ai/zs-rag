@@ -4,7 +4,7 @@ import vue from '@vitejs/plugin-vue'
 export default defineConfig({
   plugins: [vue()],
   optimizeDeps: {
-    include: ['mammoth', 'xlsx'],
+    include: ['mammoth', 'xlsx', 'pdfjs-dist'],
   },
   server: {
     port: 5173,

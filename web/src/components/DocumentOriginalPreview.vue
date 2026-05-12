@@ -86,11 +86,14 @@ onUnmounted(() => {
 
 <style scoped>
 .document-original-preview {
-  min-height: 200px;
+  flex: 1;
+  min-height: 0;
   border-radius: 14px;
   border: 1px solid var(--border-color);
   background: var(--bg-secondary);
-  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
 }
 
 .document-original-preview-loading {
@@ -101,17 +104,18 @@ onUnmounted(() => {
 }
 
 .document-original-iframe {
+  flex: 1;
+  min-height: 0;
   width: 100%;
-  min-height: min(72vh, 720px);
-  height: 72vh;
   border: none;
   display: block;
   background: var(--bg-secondary);
 }
 
 .document-original-html {
+  flex: 1;
+  min-height: 0;
   padding: 16px 18px;
-  max-height: min(72vh, 720px);
   overflow: auto;
   font-size: 0.88rem;
   line-height: 1.55;
@@ -130,9 +134,10 @@ onUnmounted(() => {
 }
 
 .document-original-text {
+  flex: 1;
+  min-height: 0;
   margin: 0;
   padding: 16px 18px;
-  max-height: min(72vh, 720px);
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;

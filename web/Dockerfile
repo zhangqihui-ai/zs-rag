@@ -9,8 +9,8 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
-RUN npm install
+# Install dependencies（与 lockfile 一致，避免漏装 pdfjs-dist 等）
+RUN npm ci
 
 # Copy source code
 COPY . .
@@ -31,7 +31,7 @@ WORKDIR /app
 COPY package*.json ./
 
 # Install dependencies
-RUN npm install
+RUN npm ci
 
 # Copy source code
 COPY . .

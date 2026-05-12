@@ -39,6 +39,16 @@ class Settings(BaseSettings):
     milvus_username: str | None = Field(default=None, description="Milvus 用户名")
     milvus_password: str | None = Field(default=None, description="Milvus 密码")
 
+    # OpenSearch：BM25 全文索引（单节点；compose 中编排，检索接入可读取此配置）
+    opensearch_url: str | None = Field(
+        default=None,
+        description="OpenSearch REST 基址，如 http://opensearch:9200；未设置则保持仅用 PG 全文",
+    )
+    opensearch_index_chunks: str = Field(
+        default="zs_rag_chunks",
+        description="知识库切片全文索引名称（接入同步时使用）",
+    )
+
     # MinerU 文档解析（仅用于 PDF + 图片；DOCX/XLSX 仍走本地解析器）
     mineru_enabled: bool = Field(default=False, description="是否启用 MinerU 解析 PDF/图片")
     mineru_base_url: str = Field(default="http://mineru:8000", description="MinerU HTTP API base URL")

@@ -188,8 +188,14 @@ def _parse_pdf(
             try:
                 if log:
                     log(f"使用 MinerU 解析 PDF（backend={gw.backend}, lang={gw.lang}）…")
-                result = gw.parse(file_bytes, file_name or "doc.pdf")
+                result = gw.parse(file_bytes, file_name or "doc.pdf", log=log)
+                if log:
+                    log("MinerU：正在映射为内部分段结构（标题路径、表格等）…")
                 doc = result.to_parsed_document()
+                m = dict(doc.metadata or {})
+                m["_mineru_markdown"] = result.markdown if result.markdown is not None else ""
+                m["_mineru_content_list"] = list(result.content_list)
+                doc.metadata = m
                 if log:
                     log(
                         f"MinerU：字符数 {doc.char_count}，分段 {len(doc.segments)}，"
@@ -268,6 +274,60 @@ def _parse_pdf(
     )
 
 
+# MinerU 接管的图片后缀；没有本地降级路径（没有轻量级 OCR 备份），未启用 MinerU 时拒收
+_IMAGE_SUFFIXES = {"png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp"}
+
+
+def _parse_image(
+    file_bytes: bytes,
+    *,
+    suffix: str,
+    file_name: str | None = None,
+    log: Callable[[str], None] | None = None,
+) -> ParsedDocument:
+    """
+    图片解析完全依赖 MinerU OCR + 版面分析。未启用或不可达时直接抛 UnsupportedDocumentError，
+    由上层返回用户友好的错误而不是产出一个空 ParsedDocument。
+    """
+    try:
+        from app.core.mineru_gateway import MineruUnavailableError, get_mineru_gateway
+    except Exception as e:  # pragma: no cover
+        raise UnsupportedDocumentError(f"MinerU 依赖不可用，无法解析图片：{e}") from e
+
+    gw = get_mineru_gateway()
+    if not gw.is_enabled():
+        raise UnsupportedDocumentError(
+            "未启用 MinerU，无法解析图片文件。请在部署中打开 MINERU_ENABLED 并拉起 mineru 服务。"
+        )
+    if not gw.should_handle(suffix):
+        raise UnsupportedDocumentError(
+            f"MinerU 未配置接管 .{suffix} 后缀。请在 MINERU_FORMATS 中加入。"
+        )
+
+    if log:
+        log(f"使用 MinerU 解析图片（.{suffix}, backend={gw.backend}, lang={gw.lang}）…")
+    try:
+        result = gw.parse(file_bytes, file_name or f"image.{suffix}", log=log)
+    except MineruUnavailableError as e:
+        raise UnsupportedDocumentError(f"MinerU 不可达，图片解析失败：{e}") from e
+
+    if log:
+        log("MinerU：正在映射为内部分段结构（标题路径、表格等）…")
+    doc = result.to_parsed_document()
+    doc.parser_type = f"image.{suffix}"
+    meta = dict(doc.metadata or {})
+    meta["image_suffix"] = suffix
+    meta["_mineru_markdown"] = result.markdown if result.markdown is not None else ""
+    meta["_mineru_content_list"] = list(result.content_list)
+    doc.metadata = meta
+    if log:
+        log(
+            f"图片 MinerU：字符数 {doc.char_count}，分段 {len(doc.segments)}，"
+            f"标题 {doc.metadata.get('heading_count')}，表格 {doc.metadata.get('table_count')}"
+        )
+    return doc
+
+
 # 章节标题识别（启发式）：优先依赖 Word Heading 样式；无样式回退到中文/数字特征。
 # 用"等级类（class）"而非绝对级别，避免章/节/条混杂时栈层级错乱。
 _CN_NUM = r"[一二三四五六七八九十百千]+"
@@ -335,14 +395,66 @@ def _update_heading_path(stack: list[tuple[str, str]], heading_class: str, text:
     return " / ".join(t for _, t in new_stack)
 
 
+def _docx_ancestor_skips_content(el: Any, paragraph_el: Any) -> bool:
+    """修订 / 移动删除区内的节点不纳入终稿文本（与 Word 修订「最终状态」常见展示一致）。"""
+    if docx_qn is None:
+        return False
+    del_tag = docx_qn("w:del")
+    move_from_tag = docx_qn("w:moveFrom")
+    parent = el.getparent()
+    while parent is not None:
+        if parent == paragraph_el:
+            return False
+        if parent.tag in (del_tag, move_from_tag):
+            return True
+        parent = parent.getparent()
+    return False
+
+
+def _docx_paragraph_plain_text(paragraph: Any) -> str:
+    """
+    从段落 w:p 的 OOXML 子树抽取可见文本：
+    汇总 w:t、w:tab、w:br（及 w:cr），覆盖超链接/内容控件等路径下 python-docx 的 paragraph.text 易漏字的情况。
+    """
+    if docx_qn is None:
+        return str(getattr(paragraph, "text", "") or "")
+    p_el = paragraph._element  # type: ignore[attr-defined]
+    w_t = docx_qn("w:t")
+    w_tab = docx_qn("w:tab")
+    w_br = docx_qn("w:br")
+    w_cr = docx_qn("w:cr")
+    parts: list[str] = []
+    for el in p_el.iter():
+        if el.tag == w_t:
+            if _docx_ancestor_skips_content(el, p_el):
+                continue
+            if el.text:
+                parts.append(el.text)
+        elif el.tag == w_tab:
+            if _docx_ancestor_skips_content(el, p_el):
+                continue
+            parts.append("\t")
+        elif el.tag in (w_br, w_cr):
+            if _docx_ancestor_skips_content(el, p_el):
+                continue
+            parts.append("\n")
+    return "".join(parts)
+
+
 def _docx_table_cell_text(cell: "DocxCell") -> str:
-    """把单元格内所有段落拼成一行文本（去换行，保留空格）。"""
+    """把单元格内所有段落拼成一行文本（去换行，保留空格）；抽字走 OOXML 与正文段落一致。"""
     try:
         paragraphs = cell.paragraphs  # type: ignore[attr-defined]
     except Exception:
         return (cell.text or "").strip().replace("\n", " ")
-    pieces = [p.text.strip() for p in paragraphs if (p.text or "").strip()]
-    return " ".join(pieces) if pieces else (cell.text or "").strip().replace("\n", " ")
+    pieces: list[str] = []
+    for p in paragraphs:
+        raw = _docx_paragraph_plain_text(p).strip()
+        if raw:
+            pieces.append(raw)
+    if pieces:
+        return " ".join(pieces)
+    return (cell.text or "").strip().replace("\n", " ")
 
 
 def _is_plausible_header_row(cells: list[str]) -> bool:
@@ -487,7 +599,9 @@ def _parse_docx(file_bytes: bytes) -> ParsedDocument:
 
     for kind, node in _iter_docx_body_blocks(doc):
         if kind == "paragraph":
-            t = (node.text or "").strip()
+            t = _docx_paragraph_plain_text(node).strip()
+            if not t:
+                t = (node.text or "").strip()
             if not t:
                 continue
             style_name = None
@@ -746,6 +860,9 @@ def parse_document(
         doc = _parse_pdf(file_bytes, file_name=file_name, log=log)
         _log(f"PDF：字符数 {doc.char_count}，分段 {len(doc.segments)}，元数据 {doc.metadata}")
         return doc
+
+    if suffix in _IMAGE_SUFFIXES:
+        return _parse_image(file_bytes, suffix=suffix, file_name=file_name, log=log)
 
     text = _decode_text_content(file_bytes).strip()
     if not text:

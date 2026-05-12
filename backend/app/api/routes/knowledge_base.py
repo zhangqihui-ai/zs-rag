@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import mimetypes
 import shutil
 from pathlib import Path
@@ -29,6 +30,7 @@ from app.schemas.knowledge_base import (
 )
 from app.schemas.knowledge_document import (
     KnowledgeChunkListResponse,
+    KnowledgeChunkResponse,
     KnowledgeDocumentListResponse,
     KnowledgeDocumentParseLogResponse,
     KnowledgeDocumentChunkingConfigUpdate,
@@ -36,7 +38,12 @@ from app.schemas.knowledge_document import (
     KnowledgeDocumentChunkingPreviewResponse,
     KnowledgeDocumentResponse,
 )
-from app.schemas.retrieval import KnowledgeSearchRequest, KnowledgeSearchResponse
+from app.schemas.retrieval import (
+    KnowledgeSearchRequest,
+    KnowledgeSearchResponse,
+    MultiKnowledgeSearchRequest,
+    MultiKnowledgeSearchResponse,
+)
 from app.services.knowledge_base_service import (
     build_deleted_knowledge_base_name,
     build_collection_name,
@@ -46,23 +53,30 @@ from app.services.knowledge_base_service import (
     get_neo4j_connection_or_error,
 )
 from app.services.knowledge_document_service import (
+    MINERU_VIEW_CL_FILENAME,
+    MINERU_VIEW_MD_FILENAME,
     delete_document_asset,
     get_document_detail,
     get_document_or_error,
     get_document_parse_log,
-    update_document_chunking_config,
-    preview_document_chunking,
+    get_knowledge_chunk_serialized,
     iter_document_process_sse_events,
     list_document_chunks,
     list_documents,
+    preview_document_chunking,
     process_document,
     reindex_document,
+    resolve_original_file_path,
+    update_document_chunking_config,
     upload_document,
 )
-from app.services.retrieval_service import search_knowledge_base
+from app.services import opensearch_chunk_service
+from app.services.retrieval_service import search_knowledge_base, search_knowledge_bases_multi
+
+settings = get_settings()
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/knowledge-bases", tags=["knowledge-base-management"])
-settings = get_settings()
 
 
 @router.get("", response_model=list[KnowledgeBaseResponse])
@@ -101,6 +115,22 @@ def create_knowledge_base(
     db.commit()
     db.refresh(knowledge_base)
     return knowledge_base
+
+
+@router.post("/multi-search", response_model=MultiKnowledgeSearchResponse)
+def search_documents_multi(
+    payload: MultiKnowledgeSearchRequest,
+    current_space: CurrentSpace,
+    membership: RequireMembership,
+    db: Session = Depends(get_db),
+) -> dict:
+    """跨多个知识库检索，结果按分数合并排序（与首页「知识检索」多选一致）。"""
+    return search_knowledge_bases_multi(
+        db,
+        space_id=current_space.id,
+        knowledge_base_ids=payload.knowledge_base_ids,
+        payload=payload,
+    )
 
 
 @router.get("/{kb_id}", response_model=KnowledgeBaseResponse)
@@ -194,6 +224,8 @@ def purge_knowledge_base(
     except Exception:
         # 文件系统清理失败不应阻塞 DB 删除（避免“删不掉”卡死）；保留为垃圾数据后续可人工清理
         pass
+
+    opensearch_chunk_service.delete_by_knowledge_base_id(kb_id)
 
     # 3) DB：先删子表，再删 KB
     db.execute(delete(KnowledgeChunk).where(KnowledgeChunk.knowledge_base_id == kb_id))
@@ -444,16 +476,81 @@ def get_document_original_file(
     document = get_document_or_error(db, space_id=current_space.id, kb_id=kb_id, document_id=document_id)
     if document.status == KnowledgeDocumentStatus.DELETED.value:
         raise AppError(status_code=404, code="DOCUMENT_NOT_FOUND", message="文档不存在")
-    if not document.storage_path:
-        raise AppError(status_code=404, code="DOCUMENT_FILE_NOT_FOUND", message="原始文件不存在")
-    path = Path(document.storage_path)
-    if not path.is_file():
+    path = resolve_original_file_path(document)
+    if not path:
+        logger.warning(
+            "原始文件不可用 doc_id=%s kb_id=%s space_id=%s storage_path=%r",
+            document.id,
+            kb_id,
+            current_space.id,
+            document.storage_path,
+        )
         raise AppError(status_code=404, code="DOCUMENT_FILE_NOT_FOUND", message="原始文件不存在")
     media_type = document.mime_type or mimetypes.guess_type(document.file_name)[0] or "application/octet-stream"
     return FileResponse(
         path,
         media_type=media_type,
         filename=document.file_name,
+        content_disposition_type="inline",
+    )
+
+
+@router.get("/{kb_id}/documents/{document_id}/mineru-markdown")
+def get_document_mineru_markdown(
+    kb_id: int,
+    document_id: int,
+    current_space: CurrentSpace,
+    membership: RequireMembership,
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    """解析时由 MinerU 生成的 Markdown 侧车文件（与商业 MinerU 右侧 Markdown 视图同源）。"""
+    document = get_document_or_error(db, space_id=current_space.id, kb_id=kb_id, document_id=document_id)
+    if document.status == KnowledgeDocumentStatus.DELETED.value:
+        raise AppError(status_code=404, code="DOCUMENT_NOT_FOUND", message="文档不存在")
+    orig = resolve_original_file_path(document)
+    if not orig:
+        raise AppError(status_code=404, code="DOCUMENT_FILE_NOT_FOUND", message="原始文件不存在")
+    path = orig.parent / MINERU_VIEW_MD_FILENAME
+    if not path.is_file():
+        raise AppError(
+            status_code=404,
+            code="MINERU_MARKDOWN_NOT_FOUND",
+            message="暂无 MinerU Markdown：请使用当前版本重新解析或重建索引（仅 MinerU 解析的 PDF/图片会生成）",
+        )
+    return FileResponse(
+        path,
+        media_type="text/markdown; charset=utf-8",
+        filename="mineru.md",
+        content_disposition_type="inline",
+    )
+
+
+@router.get("/{kb_id}/documents/{document_id}/mineru-content-list")
+def get_document_mineru_content_list(
+    kb_id: int,
+    document_id: int,
+    current_space: CurrentSpace,
+    membership: RequireMembership,
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    """MinerU content_list JSON（与商业 MinerU JSON 视图同源）。"""
+    document = get_document_or_error(db, space_id=current_space.id, kb_id=kb_id, document_id=document_id)
+    if document.status == KnowledgeDocumentStatus.DELETED.value:
+        raise AppError(status_code=404, code="DOCUMENT_NOT_FOUND", message="文档不存在")
+    orig = resolve_original_file_path(document)
+    if not orig:
+        raise AppError(status_code=404, code="DOCUMENT_FILE_NOT_FOUND", message="原始文件不存在")
+    path = orig.parent / MINERU_VIEW_CL_FILENAME
+    if not path.is_file():
+        raise AppError(
+            status_code=404,
+            code="MINERU_CONTENT_LIST_NOT_FOUND",
+            message="暂无 MinerU JSON：请使用当前版本重新解析或重建索引（仅 MinerU 解析的 PDF/图片会生成）",
+        )
+    return FileResponse(
+        path,
+        media_type="application/json; charset=utf-8",
+        filename="mineru_content_list.json",
         content_disposition_type="inline",
     )
 
@@ -534,6 +631,18 @@ def get_document_chunks(
         page_size=page_size,
         keyword=keyword,
     )
+
+
+@router.get("/{kb_id}/chunks/{chunk_id}", response_model=KnowledgeChunkResponse)
+def get_knowledge_chunk_endpoint(
+    kb_id: int,
+    chunk_id: int,
+    current_space: CurrentSpace,
+    membership: RequireMembership,
+    db: Session = Depends(get_db),
+) -> dict:
+    """按 ID 获取切片正文（对话引文点击查看等）。"""
+    return get_knowledge_chunk_serialized(db, space_id=current_space.id, kb_id=kb_id, chunk_id=chunk_id)
 
 
 @router.post("/{kb_id}/search", response_model=KnowledgeSearchResponse)

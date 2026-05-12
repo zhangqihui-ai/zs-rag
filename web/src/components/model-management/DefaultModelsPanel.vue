@@ -11,7 +11,12 @@
 
     <div v-if="loading" class="panel-placeholder">正在加载默认模型...</div>
     <div v-else class="default-card">
-      <label v-for="modelType in DEFAULT_MODEL_TYPES" :key="modelType" class="default-item">
+      <label
+        v-for="modelType in DEFAULT_MODEL_TYPES"
+        :key="modelType"
+        class="default-item"
+        :class="{ 'default-item--picker-open': openPickerType === modelType }"
+      >
         <span class="default-label-block">
           <span class="default-label">
             <span v-if="modelType === 'llm'" class="required-mark">*</span>
@@ -24,19 +29,69 @@
         </span>
 
         <div class="select-shell">
-          <select v-model="draftSelections[modelType]" class="default-select">
-            <option :value="null">请选择模型</option>
-            <optgroup
-              v-for="group in groupedEnabledOptionsMap[modelType] || []"
-              :key="`${modelType}-${group.providerName}`"
-              :label="group.providerName"
+          <div
+            class="defaults-model-picker"
+            :class="{ 'defaults-model-picker--open': openPickerType === modelType }"
+          >
+            <button
+              type="button"
+              class="defaults-model-trigger"
+              :disabled="loading"
+              :aria-expanded="openPickerType === modelType"
+              aria-haspopup="listbox"
+              :aria-label="`${MODEL_TYPE_LABEL_MAP[modelType]} 默认模型`"
+              @click.stop="togglePicker(modelType)"
             >
-              <option v-for="option in group.options" :key="option.value" :value="option.value">
-                {{ option.label }}
-              </option>
-            </optgroup>
-          </select>
-          <AppIcon name="chevron-down" class="select-arrow" :size="16" />
+              <span class="defaults-model-trigger-label" :title="triggerTitle(modelType)">{{
+                triggerLabel(modelType)
+              }}</span>
+              <AppIcon
+                name="chevron-down"
+                :size="14"
+                class="defaults-model-chevron"
+                :class="{ 'is-open': openPickerType === modelType }"
+              />
+            </button>
+            <div
+              v-if="openPickerType === modelType"
+              class="defaults-model-dropdown"
+              role="presentation"
+              @click.stop
+            >
+              <div class="defaults-model-list scrollbar-pill" role="listbox" :aria-label="`${MODEL_TYPE_LABEL_MAP[modelType]} 列表`">
+                <button
+                  type="button"
+                  role="option"
+                  class="defaults-model-option"
+                  :class="{ 'is-current': draftSelections[modelType] === null }"
+                  @click="selectOption(modelType, null)"
+                >
+                  <span class="defaults-model-option-name defaults-model-option-name--muted">请选择模型</span>
+                </button>
+                <template v-if="sortedGroupedEnabledOptionsMap[modelType]?.length">
+                  <div
+                    v-for="group in sortedGroupedEnabledOptionsMap[modelType]"
+                    :key="`${modelType}-${group.providerName}`"
+                    class="defaults-model-group"
+                  >
+                    <div class="defaults-model-group-title">{{ group.providerName }}</div>
+                    <button
+                      v-for="option in group.options"
+                      :key="option.value"
+                      type="button"
+                      role="option"
+                      class="defaults-model-option"
+                      :class="{ 'is-current': draftSelections[modelType] === option.value }"
+                      @click="selectOption(modelType, option.value)"
+                    >
+                      <span class="defaults-model-option-name">{{ option.label }}</span>
+                    </button>
+                  </div>
+                </template>
+                <div v-else class="defaults-model-empty">暂无已启用的该类型模型</div>
+              </div>
+            </div>
+          </div>
         </div>
       </label>
     </div>
@@ -44,7 +99,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { MODEL_TYPE_LABEL_MAP, type DefaultsData, type ModelType } from '../../api/model-management'
 import AppIcon from '../AppIcon.vue'
@@ -97,6 +152,8 @@ const createSelections = (defaults: DefaultsData): Record<ModelType, number | nu
 
 const draftSelections = ref<Record<ModelType, number | null>>(createSelections(props.defaults))
 
+const openPickerType = ref<ModelType | null>(null)
+
 const groupedEnabledOptionsMap = computed(() => {
   const result = {
     llm: [],
@@ -127,6 +184,21 @@ const groupedEnabledOptionsMap = computed(() => {
   return result
 })
 
+const sortedGroupedEnabledOptionsMap = computed(() => {
+  const raw = groupedEnabledOptionsMap.value
+  const out = {} as Record<ModelType, ModelOptionGroup[]>
+  DEFAULT_MODEL_TYPES.forEach((modelType) => {
+    const groups = [...(raw[modelType] || [])].sort((a, b) =>
+      a.providerName.localeCompare(b.providerName, 'zh-CN'),
+    )
+    out[modelType] = groups.map((g) => ({
+      ...g,
+      options: [...g.options].sort((a, b) => a.label.localeCompare(b.label, 'zh-CN')),
+    }))
+  })
+  return out
+})
+
 const selectedOptionMap = computed(() => {
   const result = {
     llm: null,
@@ -141,19 +213,55 @@ const selectedOptionMap = computed(() => {
 
   ;(Object.keys(props.enabledOptionsMap) as ModelType[]).forEach((modelType) => {
     const selectedValue = draftSelections.value[modelType]
-    result[modelType] = (props.enabledOptionsMap[modelType] || []).find((option) => option.value === selectedValue) || null
+    result[modelType] =
+      (props.enabledOptionsMap[modelType] || []).find((option) => option.value === selectedValue) || null
   })
 
   return result
 })
 
+function triggerLabel(modelType: ModelType): string {
+  const opt = selectedOptionMap.value[modelType]
+  return opt?.label ?? '请选择模型'
+}
+
+function triggerTitle(modelType: ModelType): string {
+  const opt = selectedOptionMap.value[modelType]
+  return opt ? `${opt.label} · ${opt.providerName}` : ''
+}
+
+function togglePicker(modelType: ModelType) {
+  if (props.loading) {
+    return
+  }
+  openPickerType.value = openPickerType.value === modelType ? null : modelType
+}
+
+function selectOption(modelType: ModelType, value: number | null) {
+  draftSelections.value[modelType] = value
+  openPickerType.value = null
+}
+
+function onDocumentClick() {
+  openPickerType.value = null
+}
+
 watch(
   () => props.defaults,
   (value) => {
     draftSelections.value = createSelections(value)
+    openPickerType.value = null
   },
   { deep: true },
 )
+
+onMounted(() => {
+  window.addEventListener('click', onDocumentClick)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('click', onDocumentClick)
+})
 
 const handleSave = () => {
   emit('save', { ...draftSelections.value, moderation: null, ocr: null })
@@ -304,7 +412,9 @@ const handleSave = () => {
   opacity: 0;
   pointer-events: none;
   transform: translateX(-8px) translateY(-50%);
-  transition: opacity 0.18s ease, transform 0.18s ease;
+  transition:
+    opacity 0.18s ease,
+    transform 0.18s ease;
 }
 
 .hint-tooltip::before {
@@ -330,48 +440,152 @@ const handleSave = () => {
   transform: translateX(0) translateY(-50%);
 }
 
-.select-stack {
-  display: grid;
-  gap: 8px;
-}
-
 .select-shell {
   position: relative;
+  z-index: 1;
 }
 
-.default-select {
+.default-item--picker-open {
+  z-index: 4;
+}
+
+.defaults-model-picker {
+  position: relative;
   width: 100%;
-  min-height: 48px;
-  border-radius: 12px;
+}
+
+.defaults-model-picker--open {
+  z-index: 30;
+}
+
+.defaults-model-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  max-width: 100%;
+  padding: 8px 12px;
+  margin: 0;
+  border-radius: 999px;
   border: 1px solid var(--border-color);
   background: var(--bg-primary);
   color: var(--text-primary);
-  padding: 0 42px 0 14px;
-  font-size: var(--model-font-body, 12px);
+  font: inherit;
+  font-size: 0.875rem;
   font-weight: 600;
-  appearance: none;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+  cursor: pointer;
+  text-align: left;
+  box-sizing: border-box;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease;
 }
 
-.default-select:hover {
-  border-color: var(--border-strong);
+.defaults-model-trigger:hover:not(:disabled) {
+  border-color: rgba(100, 116, 139, 0.45);
+  background: var(--bg-secondary);
 }
 
-.default-select:focus {
-  outline: none;
-  border-color: var(--brand-primary);
-  box-shadow: 0 0 0 3px var(--brand-primary-light);
+.defaults-model-trigger:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
-.select-arrow {
-  position: absolute;
-  top: 50%;
-  right: 14px;
+.defaults-model-trigger-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.defaults-model-chevron {
+  flex-shrink: 0;
   color: var(--text-tertiary);
-  pointer-events: none;
-  transform: translateY(-50%);
+  transition: transform 0.15s ease;
 }
 
+.defaults-model-chevron.is-open {
+  transform: rotate(180deg);
+}
+
+.defaults-model-dropdown {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 50;
+}
+
+.defaults-model-list {
+  width: 100%;
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 8px;
+  border-radius: 12px;
+  border: 1px solid var(--border-color);
+  background-color: var(--bg-primary);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.6),
+    0 10px 28px rgba(15, 23, 42, 0.14);
+}
+
+.defaults-model-group + .defaults-model-group {
+  margin-top: 8px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(148, 163, 184, 0.35);
+}
+
+.defaults-model-group-title {
+  padding: 4px 10px 8px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.defaults-model-option {
+  display: flex;
+  width: 100%;
+  padding: 10px 12px;
+  margin-bottom: 2px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  transition: background 0.12s ease;
+}
+
+.defaults-model-option-name {
+  font-size: 0.9rem;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.defaults-model-option-name--muted {
+  font-weight: 600;
+  color: var(--text-tertiary);
+}
+
+.defaults-model-option:hover:not(.is-current) {
+  background: var(--bg-tertiary);
+}
+
+.defaults-model-option.is-current {
+  background: var(--brand-primary-light);
+  box-shadow: inset 0 0 0 1px rgba(37, 99, 235, 0.2);
+}
+
+.defaults-model-empty {
+  padding: 12px;
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
 
 .panel-placeholder {
   padding: 32px 0;

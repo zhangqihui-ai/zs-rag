@@ -1,7 +1,5 @@
 # ZS-RAG 部署说明
 
-## 服务器部署配置
-
 ### 1. 修改服务器 IP
 
 编辑 `.env` 文件，将所有 `localhost` 替换为你的服务器 IP 地址：
@@ -34,6 +32,33 @@ docker compose logs -f
 - **后端 API**: http://192.168.11.19:8000
 - **API 文档**: http://192.168.11.19:8000/docs
 
+### OpenSearch（BM25 全文检索）
+
+`docker-compose.yml` / `docker-compose.prod.yml` 已编排 **OpenSearch 3.6.0** 单节点：
+
+| 项 | 说明 |
+|----|------|
+| 镜像 | `opensearchproject/opensearch:3.6.0` |
+| REST | 默认映射宿主机 `9200` → 容器 `9200`；集群内因服务名访问：`http://opensearch:9200` |
+| 环境变量 | 后端可配 `OPENSEARCH_URL`、`OPENSEARCH_INDEX_CHUNKS`（默认 `zs_rag_chunks`），与 `app/core/config.py` 一致 |
+| 数据 | 命名卷 `opensearch_data` |
+| 开发态 | 已关闭安全插件（`DISABLE_SECURITY_PLUGIN`），仅限内网联调。**对外或生产必须**自行改为开启认证与 TLS |
+
+验证节点（拉起后）：
+
+```bash
+docker compose up -d opensearch
+curl -s "http://127.0.0.1:9200/_cluster/health?pretty"
+```
+
+后端已支持：若设置 `OPENSEARCH_URL`（Compose 默认同网络 `http://opensearch:9200`），**全文检索 / 混合检索中的关键词支路**会走 OpenSearch BM25；失败时自动回退 PostgreSQL。新解析/重建索引的文档会自动 upsert；删除文档或彻底删除知识库会同步删索引。
+
+**已有历史文档时**可全量同步：
+
+```bash
+docker compose exec backend python scripts/reindex_opensearch_chunks.py
+```
+
 ### 4. 默认账号
 
 - 用户名：`admin`
@@ -41,18 +66,6 @@ docker compose logs -f
 
 **⚠️ 重要：首次登录后请立即修改密码！**
 
-## 防火墙配置
-
-如果启用了防火墙，需要开放以下端口：
-
-```bash
-# 开放端口
-sudo ufw allow 80/tcp      # 前端
-sudo ufw allow 8000/tcp    # 后端 API
-sudo ufw allow 5432/tcp    # PostgreSQL (可选)
-sudo ufw allow 19530/tcp   # Milvus (可选)
-sudo ufw allow 7474/tcp    # Neo4j Browser (可选)
-```
 
 ## 常见问题排查
 
@@ -84,13 +97,6 @@ docker compose restart backend
 # 重新创建后端容器
 docker compose up -d --force-recreate backend
 ```
-
-### 前端页面空白
-
-1. 打开浏览器开发者工具 (F12)
-2. 查看 Console 中的错误信息
-3. 检查 Network 标签中的 API 请求是否成功
-4. 确认 `VITE_API_BASE_URL` 配置正确
 
 ## 生产环境部署
 

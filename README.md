@@ -301,14 +301,6 @@ BACKEND_DOCKERFILE=Dockerfile.local docker compose -f docker-compose.yml up -d -
 docker compose -f docker-compose.prod.yml logs -f
 ```
 
-## 下一步 (V1 规划)
-
-- [ ] 文档上传和向量化
-- [ ] RAG 检索和问答
-- [ ] 用户权限管理（多角色）
-- [ ] 知识库内容管理
-- [ ] 操作审计日志
-- [ ] 密钥加密存储
 
 ## License
 

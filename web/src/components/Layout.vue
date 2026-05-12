@@ -42,7 +42,7 @@
       </div>
     </aside>
 
-    <div class="app-main">
+    <div class="app-main" :class="{ 'app-main--chat': isChatRoute }">
       <header class="app-header">
         <div class="app-header-main">
           <div class="app-breadcrumb">
@@ -87,8 +87,8 @@
         </div>
       </header>
 
-      <main class="app-content">
-        <div class="app-content-inner">
+      <main class="app-content" :class="{ 'app-content--chat': isChatRoute }">
+        <div class="app-content-inner" :class="{ 'app-content-inner--chat': isChatRoute }">
           <slot />
         </div>
       </main>
@@ -143,6 +143,7 @@ const breadcrumbs = computed(() => {
 })
 
 const userInitial = computed(() => (authStore.currentUser?.username || 'U').charAt(0).toUpperCase())
+const isChatRoute = computed(() => route.name === 'chat')
 const spaceWatchReady = ref(false)
 
 watch(
@@ -178,8 +179,8 @@ const handleLogout = () => {
   width: var(--sidebar-width);
   display: flex;
   flex-direction: column;
-  gap: 24px;
-  padding: 18px 16px 16px;
+  gap: 20px;
+  padding: 16px 12px;
   background: var(--sidebar-bg);
   border-right: 1px solid var(--sidebar-border);
   backdrop-filter: blur(24px);
@@ -191,13 +192,13 @@ const handleLogout = () => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 14px;
+  gap: 8px;
 }
 
 .brand-content {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   min-width: 0;
 }
 
@@ -205,9 +206,9 @@ const handleLogout = () => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 44px;
-  height: 44px;
-  border-radius: 16px;
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
   background: linear-gradient(135deg, var(--brand-primary) 0%, var(--brand-secondary) 100%);
   color: #ffffff;
   box-shadow: 0 14px 30px rgba(37, 99, 235, 0.25);
@@ -217,17 +218,17 @@ const handleLogout = () => {
 .brand-copy {
   display: grid;
   min-width: 0;
-  gap: 3px;
+  gap: 2px;
 }
 
 .brand-copy strong {
-  font-size: 1rem;
+  font-size: 1.05rem;
   color: var(--text-primary);
 }
 
 .brand-copy span {
   color: var(--text-tertiary);
-  font-size: 0.74rem;
+  font-size: 0.78rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -237,10 +238,10 @@ const handleLogout = () => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 38px;
-  height: 38px;
+  width: 32px;
+  height: 32px;
   border: 1px solid var(--border-color);
-  border-radius: 12px;
+  border-radius: 10px;
   background: var(--bg-secondary);
   color: var(--text-secondary);
   cursor: pointer;
@@ -254,15 +255,15 @@ const handleLogout = () => {
 
 .sidebar-section {
   display: grid;
-  gap: 14px;
+  gap: 10px;
   min-height: 0;
 }
 
 .sidebar-caption {
   margin: 0;
-  padding: 0 8px;
+  padding: 0 6px;
   color: var(--text-tertiary);
-  font-size: 0.72rem;
+  font-size: 0.78rem;
   font-weight: 700;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -270,17 +271,17 @@ const handleLogout = () => {
 
 .sidebar-nav {
   display: grid;
-  gap: 8px;
+  gap: 4px;
 }
 
 .nav-link {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 14px 14px 14px 12px;
+  gap: 10px;
+  padding: 10px 10px 10px 8px;
   border: 1px solid transparent;
-  border-radius: 18px;
+  border-radius: 14px;
   color: var(--sidebar-text);
   transition: transform 0.2s ease, background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
 }
@@ -289,8 +290,8 @@ const handleLogout = () => {
   content: '';
   position: absolute;
   left: 0;
-  top: 14px;
-  bottom: 14px;
+  top: 10px;
+  bottom: 10px;
   width: 3px;
   border-radius: 999px;
   background: transparent;
@@ -318,9 +319,9 @@ const handleLogout = () => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 40px;
-  height: 40px;
-  border-radius: 14px;
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
   background: rgba(255, 255, 255, 0.04);
   flex-shrink: 0;
 }
@@ -332,13 +333,13 @@ const handleLogout = () => {
 }
 
 .nav-copy strong {
-  font-size: 0.92rem;
+  font-size: 0.95rem;
   color: currentColor;
 }
 
 .nav-copy small {
   color: var(--text-tertiary);
-  font-size: 0.76rem;
+  font-size: 0.78rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -346,9 +347,9 @@ const handleLogout = () => {
 
 .sidebar-footer {
   margin-top: auto;
-  padding: 14px;
+  padding: 10px;
   border: 1px solid var(--sidebar-border);
-  border-radius: 18px;
+  border-radius: 14px;
   background: rgba(255, 255, 255, 0.03);
 }
 
@@ -376,7 +377,7 @@ const handleLogout = () => {
 
 .space-spotlight-copy strong {
   color: var(--text-primary);
-  font-size: 0.88rem;
+  font-size: 0.95rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -384,11 +385,13 @@ const handleLogout = () => {
 
 .space-spotlight-copy span {
   color: var(--text-tertiary);
-  font-size: 0.78rem;
+  font-size: 0.8rem;
 }
 
 .app-main {
   flex: 1;
+  display: flex;
+  flex-direction: column;
   min-height: 100vh;
   margin-left: var(--sidebar-width);
   transition: margin-left 0.24s ease;
@@ -403,7 +406,7 @@ const handleLogout = () => {
   justify-content: space-between;
   gap: 24px;
   min-height: var(--header-height);
-  padding: 18px 32px;
+  padding: 14px 40px;
   background: var(--header-bg);
   backdrop-filter: blur(24px);
   border-bottom: 1px solid var(--header-border);
@@ -518,12 +521,42 @@ const handleLogout = () => {
 }
 
 .app-content {
-  padding: 30px 32px 40px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 36px 40px 48px;
 }
 
 .app-content-inner {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   max-width: var(--content-max-width);
   margin: 0 auto;
+  width: 100%;
+}
+
+.app-main.app-main--chat {
+  height: 100dvh;
+  max-height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.app-content.app-content--chat {
+  flex: 1 1 0%;
+  min-height: 0;
+  overflow: hidden;
+  /* 对话页主卡片更靠近标题区，与其它页 36px 顶距区分 */
+  padding: 14px 40px 40px;
+}
+
+.app-content-inner.app-content-inner--chat {
+  flex: 1 1 0%;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .app-layout.sidebar-collapsed .app-sidebar {

@@ -42,7 +42,7 @@ import { retrievalFormFromKnowledgeBase, type StoredRetrievalConfig } from './re
 const props = defineProps<{ knowledgeBase: KnowledgeBase }>()
 const emit = defineEmits<{ (e: 'saved', value: KnowledgeBase): void }>()
 
-const expanded = ref(true)
+const expanded = ref(false)
 const saving = ref(false)
 const message = ref('')
 const messageType = ref<'ok' | 'err'>('ok')

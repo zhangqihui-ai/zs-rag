@@ -42,6 +42,7 @@ from app.services.knowledge_base_service import (
     get_embedding_model_for_knowledge_base,
     get_knowledge_base_or_error,
 )
+from app.services import opensearch_chunk_service
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -50,6 +51,46 @@ SUPPORTED_EXTENSIONS = {"txt", "md", "pdf", "docx", "xlsx", "xlsm", "xls", "csv"
 settings = get_settings()
 
 MAX_PARSE_LOG_LINES = 2000
+
+MINERU_VIEW_MD_FILENAME = "mineru_markdown.md"
+MINERU_VIEW_CL_FILENAME = "mineru_content_list.json"
+
+
+def _persist_mineru_view_artifacts(*, parsed, file_path: Path) -> None:
+    """将 MinerU 原始 markdown / content_list 落盘，供前端「Markdown / JSON」视图读取；不入库大字段。"""
+    meta = parsed.metadata if isinstance(parsed.metadata, dict) else None
+    if not meta or meta.get("parser_backend") != "mineru":
+        return
+    parent = file_path.parent
+    md = meta.pop("_mineru_markdown", None)
+    cl = meta.pop("_mineru_content_list", None)
+    view: dict[str, bool] = {"markdown": False, "content_list": False}
+    if isinstance(md, str) and md.strip():
+        (parent / MINERU_VIEW_MD_FILENAME).write_text(md, encoding="utf-8")
+        view["markdown"] = True
+    if isinstance(cl, list) and len(cl) > 0:
+        (parent / MINERU_VIEW_CL_FILENAME).write_text(json.dumps(cl, ensure_ascii=False), encoding="utf-8")
+        view["content_list"] = True
+    meta["mineru_view"] = view
+
+
+def _clear_document_storage_dir(storage_path: str | None) -> None:
+    """删除文档目录下所有文件（含 MinerU 侧车文件），再尝试移除空目录。"""
+    if not storage_path:
+        return
+    file_path = Path(storage_path)
+    parent = file_path.parent
+    if not parent.is_dir():
+        if file_path.is_file():
+            file_path.unlink(missing_ok=True)
+        return
+    for child in parent.iterdir():
+        if child.is_file():
+            child.unlink(missing_ok=True)
+    try:
+        parent.rmdir()
+    except OSError:
+        pass
 
 
 def _utc_now_iso() -> str:
@@ -72,6 +113,30 @@ def _build_parse_log_payload(
 def _storage_path_for(document: KnowledgeDocument) -> Path:
     extension = f".{document.file_ext}" if document.file_ext else ""
     return STORAGE_ROOT / str(document.enterprise_space_id) / str(document.knowledge_base_id) / str(document.id) / f"original{extension}"
+
+
+def resolve_original_file_path(document: KnowledgeDocument) -> Path | None:
+    """
+    定位磁盘上的原始上传文件。
+    依次尝试数据库中的 storage_path、以及按规范拼装的 STORAGE_ROOT 路径，
+    用于兼容宿主机与容器内工作目录不一致时 DB 中仍为旧绝对路径的情况。
+    """
+    candidates: list[Path] = []
+    if document.storage_path and str(document.storage_path).strip():
+        candidates.append(Path(document.storage_path))
+    candidates.append(_storage_path_for(document))
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            if path.is_file():
+                return path
+        except OSError:
+            continue
+    return None
 
 
 def _document_file_ext(file_name: str) -> str:
@@ -161,6 +226,20 @@ def get_document_or_error(db: Session, *, space_id: int, kb_id: int, document_id
     if document is None:
         raise AppError(status_code=404, code="DOCUMENT_NOT_FOUND", message="文档不存在")
     return document
+
+
+def get_knowledge_chunk_serialized(db: Session, *, space_id: int, kb_id: int, chunk_id: int) -> dict[str, Any]:
+    get_knowledge_base_or_error(db, space_id=space_id, kb_id=kb_id, include_deleted=False)
+    chunk = db.execute(
+        select(KnowledgeChunk).where(
+            KnowledgeChunk.id == chunk_id,
+            KnowledgeChunk.enterprise_space_id == space_id,
+            KnowledgeChunk.knowledge_base_id == kb_id,
+        )
+    ).scalar_one_or_none()
+    if chunk is None:
+        raise AppError(status_code=404, code="CHUNK_NOT_FOUND", message="切片不存在或无权访问")
+    return serialize_chunk(chunk)
 
 
 def list_documents(
@@ -373,8 +452,8 @@ def preview_document_chunking(
     document = get_document_or_error(db, space_id=space_id, kb_id=kb_id, document_id=document_id)
     if document.status == KnowledgeDocumentStatus.DELETED.value:
         raise AppError(status_code=404, code="DOCUMENT_NOT_FOUND", message="文档不存在")
-    file_path = Path(document.storage_path)
-    if not file_path.exists():
+    file_path = resolve_original_file_path(document)
+    if not file_path:
         raise AppError(status_code=404, code="DOCUMENT_FILE_NOT_FOUND", message="原始文档文件不存在")
 
     file_bytes = file_path.read_bytes()
@@ -500,6 +579,7 @@ def _mark_document_failed(
 
 
 def _clear_document_chunks_and_vectors(db: Session, *, knowledge_base: KnowledgeBase, document: KnowledgeDocument) -> None:
+    opensearch_chunk_service.delete_by_document_id(document.id)
     chunks = db.execute(
         select(KnowledgeChunk)
         .where(KnowledgeChunk.document_id == document.id)
@@ -547,8 +627,8 @@ def _index_document(
             f"开始索引：文档 id={document.id}「{document.file_name}」"
             f"，chunk_size={document.chunk_size} overlap={document.chunk_overlap}"
         )
-        file_path = Path(document.storage_path)
-        if not file_path.exists():
+        file_path = resolve_original_file_path(document)
+        if not file_path:
             raise AppError(status_code=404, code="DOCUMENT_FILE_NOT_FOUND", message="原始文档文件不存在")
 
         document.status = KnowledgeDocumentStatus.PARSING.value
@@ -558,6 +638,7 @@ def _index_document(
         _emit(f"已读入 {len(file_bytes)} 字节，调用解析器…")
         try:
             parsed = parse_document(document.file_name, file_bytes, log=_emit)
+            _persist_mineru_view_artifacts(parsed=parsed, file_path=file_path)
         except UnsupportedDocumentError as exc:
             _emit(f"解析失败（不支持或依赖缺失）：{exc.message}")
             raise AppError(status_code=400, code="DOCUMENT_PARSE_FAILED", message=exc.message) from exc
@@ -766,6 +847,9 @@ def _index_document(
         document.parse_log_json = _build_parse_log_payload(log_kind, "success", log_lines)
         db.commit()
         db.refresh(document)
+        opensearch_chunk_service.sync_document_after_index(
+            db, document_id=document.id, document_name=document.document_name
+        )
         return serialize_document(document)
     except AppError as exc:
         db.rollback()
@@ -843,6 +927,7 @@ def upload_document(
         document.error_message = None
         document.metadata_json = None
         document.parse_log_json = None
+        opensearch_chunk_service.delete_by_document_id(document.id)
         db.execute(delete(KnowledgeChunk).where(KnowledgeChunk.document_id == document.id))
     else:
         document = KnowledgeDocument(
@@ -1069,13 +1154,7 @@ def delete_document_asset(db: Session, *, space_id: int, kb_id: int, document_id
 
     _clear_document_chunks_and_vectors(db, knowledge_base=knowledge_base, document=document)
 
-    file_path = Path(document.storage_path)
-    if file_path.exists():
-        file_path.unlink()
-        try:
-            file_path.parent.rmdir()
-        except OSError:
-            pass
+    _clear_document_storage_dir(document.storage_path)
 
     document.status = KnowledgeDocumentStatus.DELETED.value
     document.error_message = None

@@ -13,6 +13,8 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Any
@@ -437,7 +439,13 @@ class MineruGateway:
             return False
         return suffix.lower().lstrip(".") in self.format_whitelist
 
-    def parse(self, file_bytes: bytes, file_name: str) -> MineruResult:
+    def parse(
+        self,
+        file_bytes: bytes,
+        file_name: str,
+        *,
+        log: Callable[[str], None] | None = None,
+    ) -> MineruResult:
         """同步调 /file_parse，超时/HTTP 错误/payload 异常统一抛 MineruUnavailableError。"""
         if not self.is_enabled():
             raise MineruUnavailableError("MinerU 未启用")
@@ -454,6 +462,15 @@ class MineruGateway:
             "return_layout_pdf": "false",
             "response_format_zip": "false",
         }
+        n_bytes = len(file_bytes)
+        mb = n_bytes / (1024 * 1024)
+        if log:
+            log(
+                f"MinerU：POST {url}，文件「{file_name}」{n_bytes} 字节（约 {mb:.2f} MB），"
+                f"backend={self.backend} lang={self.lang}，超时上限 {self.timeout}s。"
+            )
+            log("MinerU：正在上传并等待服务端解析（版面分析/OCR，大文件可能需数分钟）…")
+        t0 = time.monotonic()
         try:
             with httpx.Client(timeout=self.timeout) as client:
                 resp = client.post(url, files=files, data=data)
@@ -461,19 +478,34 @@ class MineruGateway:
             raise MineruUnavailableError(f"MinerU 请求超时（>{self.timeout}s）：{e}") from e
         except httpx.HTTPError as e:
             raise MineruUnavailableError(f"MinerU 网络错误：{e}") from e
+        elapsed = round(time.monotonic() - t0, 1)
+        body_len = len(resp.content or b"")
+        if log:
+            log(f"MinerU：HTTP 响应 {resp.status_code}，耗时 {elapsed}s，响应体约 {body_len} 字节。")
         if resp.status_code >= 400:
             raise MineruUnavailableError(
                 f"MinerU HTTP {resp.status_code}：{resp.text[:200]}"
             )
+        if log:
+            log("MinerU：正在解析响应 JSON…")
         try:
             payload = resp.json()
         except ValueError as e:
             raise MineruUnavailableError(f"MinerU 返回非 JSON：{resp.text[:200]}") from e
+        if log and isinstance(payload, dict):
+            keys = ", ".join(sorted(payload.keys())[:12])
+            more = "…" if len(payload) > 12 else ""
+            log(f"MinerU：JSON 顶层字段（节选）：{keys}{more}")
+        if log:
+            log("MinerU：正在提取 content_list / markdown…")
         content_list, md = _extract_content_list_and_md(payload)
         if not content_list:
             raise MineruUnavailableError(
                 "MinerU 返回 payload 中未找到 content_list（可能是 API 版本不匹配或解析失败）"
             )
+        md_len = len(md) if md else 0
+        if log:
+            log(f"MinerU：已得到 content_list 共 {len(content_list)} 条；markdown 约 {md_len} 字符。")
         return MineruResult(
             content_list=content_list,
             markdown=md,

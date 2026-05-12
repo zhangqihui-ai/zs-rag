@@ -376,45 +376,63 @@
                 </div>
               </div>
 
-              <div class="embedding-model-section">
-                <div class="embedding-model-header">
-                  <h4 class="embedding-model-title">Embedding 模型</h4>
-                  <p class="embedding-model-sub">
-                    当前默认嵌入模型用于文档解析和向量索引。修改后新上传或重建索引的文档将使用新模型。
-                  </p>
-                </div>
-
-                <div class="embedding-model-select-row">
-                  <div class="custom-select-wrap">
-                    <select
-                      v-if="!embeddingModelsLoading"
-                      class="custom-select"
-                      :value="knowledgeBase?.embedding_model_id ?? ''"
-                      :disabled="savingEmbeddingModel"
-                      @change="(e) => saveEmbeddingModel((e.target as HTMLSelectElement).value ? Number((e.target as HTMLSelectElement).value) : null)"
-                    >
-                      <option value="">
-                        默认{{ defaultEmbeddingModel ? `（${defaultEmbeddingModel.model_name}）` : '' }}
-                      </option>
-                      <option
-                        v-for="model in embeddingModels"
-                        :key="model.id"
-                        :value="model.id"
+              <div class="pdf-parser-section">
+                <div class="pdf-parser-row">
+                  <h4 class="pdf-parser-label">Embedding 模型</h4>
+                  <div class="pdf-parser-field">
+                    <div class="custom-select-wrap pdf-parser-select-wrap">
+                      <select
+                        v-if="!embeddingModelsLoading"
+                        class="custom-select"
+                        :value="knowledgeBase?.embedding_model_id ?? ''"
+                        :disabled="savingEmbeddingModel"
+                        @change="(e) => saveEmbeddingModel((e.target as HTMLSelectElement).value ? Number((e.target as HTMLSelectElement).value) : null)"
                       >
-                        {{ model.model_name }}（{{ model.provider_name }}）
-                      </option>
-                    </select>
-                    <span v-else class="embedding-model-loading">加载中…</span>
-                    <span class="custom-select-arrow">
-                      <AppIcon name="chevron-down" :size="14" />
-                    </span>
+                        <option value="">
+                          默认{{ defaultEmbeddingModel ? `（${defaultEmbeddingModel.model_name}）` : '' }}
+                        </option>
+                        <option
+                          v-for="model in embeddingModels"
+                          :key="model.id"
+                          :value="model.id"
+                        >
+                          {{ model.model_name }}（{{ model.provider_name }}）
+                        </option>
+                      </select>
+                      <span v-else class="embedding-model-loading">加载中…</span>
+                      <span class="custom-select-arrow">
+                        <AppIcon name="chevron-down" :size="14" />
+                      </span>
+                    </div>
+                    <span v-if="savingEmbeddingModel" class="embedding-model-saving">保存中…</span>
                   </div>
-                  <span v-if="savingEmbeddingModel" class="embedding-model-saving">保存中…</span>
                 </div>
+              </div>
 
-                <div v-if="documents.some((d) => d.status === 'indexed')" class="embedding-model-warning">
+              <div class="pdf-parser-section">
+                <div class="pdf-parser-row">
+                  <h4 class="pdf-parser-label">PDF 解析器</h4>
+                  <div class="pdf-parser-field">
+                    <div class="custom-select-wrap pdf-parser-select-wrap">
+                      <select
+                        class="custom-select"
+                        :value="pdfParser"
+                        :disabled="savingPdfParser"
+                        @change="onPdfParserChange($event)"
+                      >
+                        <option value="mineru">MinerU（推荐）</option>
+                        <option value="docling">Docling（即将支持）</option>
+                      </select>
+                      <span class="custom-select-arrow">
+                        <AppIcon name="chevron-down" :size="14" />
+                      </span>
+                    </div>
+                    <span v-if="savingPdfParser" class="embedding-model-saving">保存中…</span>
+                  </div>
+                </div>
+                <div v-if="pdfParser === 'docling'" class="embedding-model-warning">
                   <AppIcon name="status" :size="14" />
-                  <span>修改 Embedding 模型后，已有文档需点击「重建索引」才能在问答中正常使用。</span>
+                  <span>Docling 引擎尚未上线，当前仍使用 MinerU 完成 PDF 与图片解析；功能就绪后会自动切换。</span>
                 </div>
               </div>
 
@@ -674,6 +692,40 @@ const embeddingModels = ref<ModelItem[]>([])
 const embeddingModelsLoading = ref(false)
 const savingEmbeddingModel = ref(false)
 const defaultEmbeddingModel = ref<DefaultModelOption | null>(null)
+
+type PdfParser = 'mineru' | 'docling'
+
+const savingPdfParser = ref(false)
+
+const pdfParser = computed<PdfParser>(() => {
+  const raw = (knowledgeBase.value?.config as Record<string, unknown> | null)?.pdf_parser
+  return raw === 'docling' ? 'docling' : 'mineru'
+})
+
+async function onPdfParserChange(evt: Event) {
+  const target = evt.target as HTMLSelectElement
+  const next = (target.value === 'docling' ? 'docling' : 'mineru') as PdfParser
+  if (!kbId.value || Number.isNaN(kbId.value) || next === pdfParser.value) {
+    return
+  }
+  savingPdfParser.value = true
+  try {
+    const prevConfig = (knowledgeBase.value?.config || {}) as Record<string, unknown>
+    const nextConfig = { ...prevConfig, pdf_parser: next }
+    const updated = await knowledgeBaseApi.update(kbId.value, { config: nextConfig })
+    knowledgeBase.value = updated
+    if (next === 'docling') {
+      showNotice('已记录偏好为 Docling；引擎上线前仍使用 MinerU 解析。', 'info', 4000)
+    } else {
+      showNotice('PDF 解析器已切换为 MinerU。', 'success', 3000)
+    }
+  } catch (value) {
+    showNotice(getKnowledgeBaseErrorMessage(value, '更新 PDF 解析器失败'), 'error')
+    target.value = pdfParser.value
+  } finally {
+    savingPdfParser.value = false
+  }
+}
 
 /** 底部单行 Toast（如上传成功），不占顶部 notice 条 */
 const toastText = ref('')
@@ -947,7 +999,14 @@ async function saveEmbeddingModel(modelId: number | null) {
   try {
     const updated = await knowledgeBaseApi.update(kbId.value, { embedding_model_id: modelId })
     knowledgeBase.value = updated
-    showNotice('Embedding 模型已更新。已有文档需「重建索引」后问答才能正常使用。', 'success', 5000)
+    const hasIndexed = documents.value.some((d) => d.status === 'indexed')
+    showNotice(
+      hasIndexed
+        ? 'Embedding 模型已更新。已有文档需点击「重建索引」才能在问答中正常使用。'
+        : 'Embedding 模型已更新。',
+      'success',
+      5000,
+    )
   } catch (value) {
     showNotice(getKnowledgeBaseErrorMessage(value, '更新 Embedding 模型失败'), 'error')
   } finally {
@@ -1354,36 +1413,6 @@ watch(openChunkingMenuForId, (value) => {
   border-top: 1px solid var(--border-color);
 }
 
-.embedding-model-section {
-  display: grid;
-  gap: 12px;
-  margin-bottom: 8px;
-}
-
-.embedding-model-header {
-  display: grid;
-  gap: 4px;
-}
-
-.embedding-model-title {
-  margin: 0;
-  font-size: 1.05rem;
-  color: var(--text-primary);
-}
-
-.embedding-model-sub {
-  margin: 0;
-  font-size: 0.9rem;
-  color: var(--text-secondary);
-  line-height: 1.55;
-}
-
-.embedding-model-select-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
 .custom-select-wrap {
   position: relative;
   flex: 1;
@@ -1474,6 +1503,38 @@ watch(openChunkingMenuForId, (value) => {
   margin-top: 1px;
 }
 
+.pdf-parser-section {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.pdf-parser-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 160px) minmax(0, 1fr);
+  align-items: center;
+  gap: 16px;
+}
+
+.pdf-parser-label {
+  margin: 0;
+  font-size: 1.05rem;
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.pdf-parser-field {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.pdf-parser-select-wrap {
+  flex: 1;
+  max-width: 420px;
+}
+
 .knowledge-detail-view {
   display: grid;
   gap: 16px;
@@ -1481,8 +1542,8 @@ watch(openChunkingMenuForId, (value) => {
 
 .knowledge-detail-layout {
   display: grid;
-  grid-template-columns: minmax(150px, 180px) minmax(0, 1fr);
-  gap: 12px;
+  grid-template-columns: minmax(180px, 200px) minmax(0, 1fr);
+  gap: 16px;
   align-items: start;
 }
 

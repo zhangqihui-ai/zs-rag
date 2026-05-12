@@ -21,6 +21,8 @@ class SearchResultItem(BaseModel):
     keyword_score: float | None = None
     metadata: dict | None = None
     citation: SearchCitationResponse
+    knowledge_base_id: int | None = None
+    knowledge_base_name: str | None = None
 
 
 class KnowledgeSearchRequest(BaseModel):
@@ -31,7 +33,7 @@ class KnowledgeSearchRequest(BaseModel):
         default=None,
         ge=0,
         le=1,
-        description="相似度下限（0~1）；混合模式下对融合后的 score 过滤，关键词/向量模式对各自 score 过滤",
+        description="相似度下限（0~1）。混合模式：先按融合分过滤再取 top_k；关键词/向量模式在返回前过滤。",
     )
     vector_weight: float | None = Field(
         default=None,
@@ -45,5 +47,17 @@ class KnowledgeSearchRequest(BaseModel):
 class KnowledgeSearchResponse(BaseModel):
     query: str
     mode: str
+    total: int
+    results: list[SearchResultItem]
+
+
+class MultiKnowledgeSearchRequest(KnowledgeSearchRequest):
+    knowledge_base_ids: list[int] = Field(..., min_length=1, max_length=24, description="参与检索的知识库 ID，顺序保留")
+
+
+class MultiKnowledgeSearchResponse(BaseModel):
+    query: str
+    mode: str
+    knowledge_base_ids: list[int]
     total: int
     results: list[SearchResultItem]

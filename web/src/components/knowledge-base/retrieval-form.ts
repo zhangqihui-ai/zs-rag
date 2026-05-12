@@ -43,6 +43,19 @@ export function readStoredRetrieval(kb: KnowledgeBase): StoredRetrievalConfig {
   }
 }
 
+export function defaultRetrievalFormState(): RetrievalFormState {
+  return {
+    mode: 'hybrid',
+    top_k: 5,
+    score_threshold_enabled: false,
+    score_threshold: 0.5,
+    vector_weight: 0.5,
+    hybrid_strategy: 'weight',
+    rerank_enabled: false,
+    rerank_model_id: null,
+  }
+}
+
 /** 从知识库详情构造检索表单初值。"设置面板"与"检索测试页"共用。 */
 export function retrievalFormFromKnowledgeBase(kb: KnowledgeBase): RetrievalFormState {
   const stored = readStoredRetrieval(kb)

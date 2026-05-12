@@ -184,11 +184,26 @@ export interface KnowledgeSearchResult {
     page_no: number | null
     chunk_index: number
   }
+  /** 多库检索时由后端填充 */
+  knowledge_base_id?: number | null
+  knowledge_base_name?: string | null
 }
 
 export interface KnowledgeSearchResponse {
   query: string
   mode: RetrievalMode
+  total: number
+  results: KnowledgeSearchResult[]
+}
+
+export interface MultiKnowledgeSearchRequest extends KnowledgeSearchRequest {
+  knowledge_base_ids: number[]
+}
+
+export interface MultiKnowledgeSearchResponse {
+  query: string
+  mode: RetrievalMode
+  knowledge_base_ids: number[]
   total: number
   results: KnowledgeSearchResult[]
 }
@@ -314,12 +329,28 @@ export const knowledgeBaseApi = {
   getDocumentParseLog(kbId: number, documentId: number) {
     return unwrap<KnowledgeDocumentParseLog>(http.get(`/knowledge-bases/${kbId}/documents/${documentId}/parse-log`))
   },
-  /** 获取原始文件二进制（需携带 Token，用于新窗口预览） */
+  /** 获取原始文件二进制（需携带 Token，用于新窗口预览；大 PDF 单独放宽超时） */
   async fetchDocumentFileBlob(kbId: number, documentId: number): Promise<Blob> {
+    const fileTimeoutMs = Number(import.meta.env.VITE_FILE_DOWNLOAD_TIMEOUT_MS) || 180_000
     const { data } = await http.get(`/knowledge-bases/${kbId}/documents/${documentId}/file`, {
       responseType: 'blob',
+      timeout: fileTimeoutMs,
     })
     return data as Blob
+  },
+  /** MinerU 侧车 Markdown（仅 MinerU 解析成功且已落盘时可用） */
+  async getDocumentMineruMarkdown(kbId: number, documentId: number): Promise<string> {
+    const { data } = await http.get(`/knowledge-bases/${kbId}/documents/${documentId}/mineru-markdown`, {
+      responseType: 'text',
+    })
+    return typeof data === 'string' ? data : String(data)
+  },
+  /** MinerU content_list JSON 原文 */
+  async getDocumentMineruContentListText(kbId: number, documentId: number): Promise<string> {
+    const { data } = await http.get(`/knowledge-bases/${kbId}/documents/${documentId}/mineru-content-list`, {
+      responseType: 'text',
+    })
+    return typeof data === 'string' ? data : String(data)
   },
   deleteDocument(kbId: number, documentId: number) {
     return unwrap<void>(http.delete(`/knowledge-bases/${kbId}/documents/${documentId}`))
@@ -341,8 +372,16 @@ export const knowledgeBaseApi = {
       http.get(`/knowledge-bases/${kbId}/documents/${documentId}/chunks`, { params }),
     )
   },
+  /** 按切片主键取全文（引文详情等） */
+  getChunk(kbId: number, chunkId: number) {
+    return unwrap<KnowledgeChunk>(http.get(`/knowledge-bases/${kbId}/chunks/${chunkId}`))
+  },
   search(kbId: number, payload: KnowledgeSearchRequest) {
     return unwrap<KnowledgeSearchResponse>(http.post(`/knowledge-bases/${kbId}/search`, payload))
+  },
+  /** 跨多个知识库检索，结果按分数全局合并 */
+  searchMulti(payload: MultiKnowledgeSearchRequest) {
+    return unwrap<MultiKnowledgeSearchResponse>(http.post('/knowledge-bases/multi-search', payload))
   },
 }
 

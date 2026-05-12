@@ -49,10 +49,10 @@
   --card-shadow-sm: 0 16px 36px rgba(15, 23, 42, 0.06);
   --card-shadow: 0 24px 48px rgba(15, 23, 42, 0.08);
 
-  --sidebar-width: 280px;
-  --sidebar-collapsed-width: 92px;
-  --header-height: 92px;
-  --content-max-width: 1680px;
+  --sidebar-width: 240px;
+  --sidebar-collapsed-width: 80px;
+  --header-height: 84px;
+  --content-max-width: 100%;
 }
 
 :root[data-theme='dark'] {
@@ -177,6 +177,54 @@ button {
 
 ::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/**
+ * 文档分栏等场景：更明显的圆角滑块 + 预留滚动条槽，避免「找不到拖动条」
+ * （叠加滚动条系统上仍可能悬停/滚动时出现，但轨道与拇指对比度更高）
+ */
+.scrollbar-pill {
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: #aeb8c6 rgba(148, 163, 184, 0.14);
+}
+
+.scrollbar-pill::-webkit-scrollbar {
+  width: 11px;
+  height: 11px;
+}
+
+.scrollbar-pill::-webkit-scrollbar-thumb {
+  background: #aeb8c6;
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+.scrollbar-pill::-webkit-scrollbar-thumb:hover {
+  background: #8b95a8;
+  background-clip: content-box;
+}
+
+.scrollbar-pill::-webkit-scrollbar-track {
+  background: rgba(148, 163, 184, 0.12);
+  border-radius: 999px;
+}
+
+:root[data-theme='dark'] .scrollbar-pill {
+  scrollbar-color: rgba(148, 163, 184, 0.55) rgba(15, 23, 42, 0.35);
+}
+
+:root[data-theme='dark'] .scrollbar-pill::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.45);
+}
+
+:root[data-theme='dark'] .scrollbar-pill::-webkit-scrollbar-thumb:hover {
+  background: rgba(203, 213, 225, 0.55);
+}
+
+:root[data-theme='dark'] .scrollbar-pill::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.45);
 }
 
 .page-shell {
@@ -729,4 +777,11 @@ button {
   .modal-overlay {
     padding: 14px;
   }
+}
+
+/* 对话设置侧栏内绝对定位popover（知识库多选、大模型列表），Layout 多层 overflow:hidden 会裁切 */
+body.chat-settings-floating-open .app-main.app-main--chat,
+body.chat-settings-floating-open .app-content.app-content--chat,
+body.chat-settings-floating-open .app-content-inner.app-content-inner--chat {
+  overflow: visible;
 }
