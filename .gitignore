@@ -13,11 +13,26 @@ ruff_cache/
 htmlcov/
 backend/.venv/
 
-# 离线 Docker 构建用 wheel（体积大，见 backend/Dockerfile.local）
-backend/offline_deps/*.whl
-backend/offline_deps/*.tar.gz
-backend/offline_deps/*.zip
+# 运行时本地存储（知识库原文、MinerU 解析结果、LightRAG 缓存等）
+backend/storage/*
+!backend/storage/.gitkeep
+!backend/storage/knowledge_files/
+backend/storage/knowledge_files/*
+!backend/storage/knowledge_files/.gitkeep
+!backend/storage/lightrag/
+backend/storage/lightrag/*
+!backend/storage/lightrag/.gitkeep
+
+# 离线 Docker 构建依赖（体积大，见 backend/scripts/download_offline_*.sh）
+backend/offline_deps/**/*.whl
+backend/offline_deps/**/*.tar.gz
+backend/offline_deps/**/*.zip
 backend/alembic/versions/__pycache__/
+
+# IDE
+.idea/
+.vscode/
+
 node_modules/
 web/node_modules/
 web/dist/
