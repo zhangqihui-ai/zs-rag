@@ -3,6 +3,7 @@ from app.models.enterprise_space import EnterpriseSpace, Membership, User
 from app.models.knowledge_base import KnowledgeBase, KnowledgeChunk, KnowledgeDocument, Neo4jConnection
 from app.models.model_management import AIModel, AIModelDefault, AIModelProvider
 from app.models.chat import ChatConversation, ChatSession, ChatMessage
+from app.models.chat_embed_api_key import ChatEmbedApiKey
 
 __all__ = [
     "Base",
@@ -19,4 +20,5 @@ __all__ = [
     "ChatConversation",
     "ChatSession",
     "ChatMessage",
+    "ChatEmbedApiKey",
 ]

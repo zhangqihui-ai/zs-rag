@@ -4,29 +4,62 @@ import asyncio
 import json
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Path, status
+from fastapi import APIRouter, Depends, HTTPException, Path, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.db.session import get_db
-from app.core.enterprise_space_context import CurrentSpace, CurrentUser
+from app.db.session import SessionLocal, get_db
+from app.core.enterprise_space_context import CurrentSpace, CurrentUser, RequireMembership
 from app.schemas.chat import (
     ChatConfigurationUpdate,
     ChatConfigurationResponse,
     ChatConversationCreate,
     ChatConversationResponse,
     ChatConversationUpdate,
+    ChatEmbedApiKeyCreateBody,
+    ChatEmbedApiKeyCreateResponse,
+    ChatEmbedApiKeyOut,
     ChatMessageResponse,
     ChatSessionCreate,
     ChatSessionResponse,
     ChatSessionUpdate,
     ChatStreamRequest,
 )
+from app.services import chat_embed_api_key_service as embed_key_service
 from app.services import chat_service
+from app.models.chat import ChatConversation
 
 router = APIRouter(tags=["chats"])
 
 _SSE_ITER_DONE = object()
+
+
+def _assert_conversation_owned_embed(
+    db: Session,
+    conversation_id: str,
+    *,
+    user_id: int,
+    enterprise_space_id: int,
+) -> None:
+    conv = db.get(ChatConversation, conversation_id)
+    if conv is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="对话不存在")
+    if conv.user_id != user_id or conv.enterprise_space_id != enterprise_space_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权为该对话管理嵌入密钥")
+
+
+def _embed_keys_response_rows(
+    db: Session,
+    enterprise_space_id: int,
+    conversation_id: str | None,
+):
+    if conversation_id:
+        return embed_key_service.list_active_embed_keys_for_conversation(db, enterprise_space_id, conversation_id)
+    return [
+        k
+        for k in embed_key_service.list_active_embed_keys(db, enterprise_space_id)
+        if k.conversation_id is None
+    ]
 
 # chat_id 须为 UUID（带连字符）或 32 位十六进制；字面量 "sessions" 不匹配，避免与 /sessions/ 子路径混淆。
 # 不使用正则前瞻（pydantic-core 不支持）。
@@ -149,24 +182,97 @@ async def session_stream_sse(
 ):
     """兼容旧版 SSE：`assistant_delta` / `assistant_done`。"""
 
+    user_id = current_user.id
+    enterprise_space_id = current_space.id
+
     async def event_gen():
-        iterator = chat_service.iter_chat_stream_events(
-            db,
-            session_id=session_id,
-            user_id=current_user.id,
-            enterprise_space_id=current_space.id,
-            user_content=payload.content,
-        )
+        stream_db = SessionLocal()
         try:
-            while True:
-                event = await asyncio.to_thread(next, iterator, _SSE_ITER_DONE)
-                if event is _SSE_ITER_DONE:
-                    break
+            iterator = chat_service.iter_chat_stream_events(
+                stream_db,
+                session_id=session_id,
+                user_id=user_id,
+                enterprise_space_id=enterprise_space_id,
+                user_content=payload.content,
+            )
+            for event in iterator:
                 line = json.dumps(event, ensure_ascii=False)
                 yield f"data: {line}\n\n".encode("utf-8")
+                await asyncio.sleep(0)
         except Exception as e:
             err = json.dumps({"type": "error", "message": str(e)}, ensure_ascii=False)
             yield f"data: {err}\n\n".encode("utf-8")
+        finally:
+            stream_db.close()
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/sessions/{session_id}/complete")
+def session_complete_blocking(
+    session_id: str,
+    payload: ChatStreamRequest,
+    current_space: CurrentSpace,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+):
+    """会话级非流式：返回 assistant_done 形态 JSON（含 session_id、content、citations）。"""
+    return chat_service.complete_chat_turn_blocking(
+        db,
+        session_id=session_id,
+        user_id=current_user.id,
+        enterprise_space_id=current_space.id,
+        user_content=payload.content,
+    )
+
+
+@router.post("/{chat_id}/stream")
+async def chat_conversation_stream_sse(
+    chat_id: ChatId,
+    payload: ChatStreamRequest,
+    current_space: CurrentSpace,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+):
+    """对话级 SSE：自动新建会话；assistant_done 事件含 session_id，供后续会话级接口复用。"""
+    session = chat_service.ensure_session_for_completion(
+        db,
+        chat_id=chat_id,
+        session_id=None,
+        user_id=current_user.id,
+        enterprise_space_id=current_space.id,
+    )
+    bound_session_id = session.id
+    user_id = current_user.id
+    enterprise_space_id = current_space.id
+
+    async def event_gen():
+        stream_db = SessionLocal()
+        try:
+            iterator = chat_service.iter_chat_stream_events(
+                stream_db,
+                session_id=bound_session_id,
+                user_id=user_id,
+                enterprise_space_id=enterprise_space_id,
+                user_content=payload.content,
+            )
+            for event in iterator:
+                line = json.dumps(event, ensure_ascii=False)
+                yield f"data: {line}\n\n".encode("utf-8")
+                await asyncio.sleep(0)
+        except Exception as e:
+            err = json.dumps({"type": "error", "message": str(e)}, ensure_ascii=False)
+            yield f"data: {err}\n\n".encode("utf-8")
+        finally:
+            stream_db.close()
 
     return StreamingResponse(
         event_gen(),
@@ -212,6 +318,137 @@ def list_chats(
         skip=skip,
         limit=limit,
     )
+
+
+@router.post("/embed-api-keys", response_model=ChatEmbedApiKeyCreateResponse)
+def create_or_ensure_embed_api_key(
+    payload: ChatEmbedApiKeyCreateBody,
+    current_space: CurrentSpace,
+    current_user: CurrentUser,
+    _: RequireMembership,
+    db: Session = Depends(get_db),
+):
+    """嵌入分享：按对话签发密钥；打开面板时可立即获得可复制明文。"""
+    cid = (payload.conversation_id or "").strip() or None
+    if cid is not None:
+        _assert_conversation_owned_embed(
+            db, cid, user_id=current_user.id, enterprise_space_id=current_space.id
+        )
+
+    if payload.regenerate:
+        if cid:
+            embed_key_service.revoke_active_embed_keys_for_conversation(db, current_space.id, cid)
+        else:
+            embed_key_service.revoke_all_active_for_space(db, current_space.id)
+        db.commit()
+        plain, row = embed_key_service.create_embed_api_key_row(
+            db,
+            enterprise_space_id=current_space.id,
+            created_by_user_id=current_user.id,
+            conversation_id=cid,
+        )
+        db.commit()
+        db.refresh(row)
+        rows = _embed_keys_response_rows(db, current_space.id, cid)
+        return ChatEmbedApiKeyCreateResponse(
+            created=True,
+            api_key=plain,
+            keys=[ChatEmbedApiKeyOut.model_validate(k) for k in rows],
+            message=None,
+        )
+
+    if cid and payload.issue_new_for_share:
+        embed_key_service.revoke_active_embed_keys_for_conversation(db, current_space.id, cid)
+        db.commit()
+        plain, row = embed_key_service.create_embed_api_key_row(
+            db,
+            enterprise_space_id=current_space.id,
+            created_by_user_id=current_user.id,
+            conversation_id=cid,
+        )
+        db.commit()
+        db.refresh(row)
+        rows = _embed_keys_response_rows(db, current_space.id, cid)
+        return ChatEmbedApiKeyCreateResponse(
+            created=True,
+            api_key=plain,
+            keys=[ChatEmbedApiKeyOut.model_validate(k) for k in rows],
+            message=None,
+        )
+
+    if cid:
+        existing = embed_key_service.list_active_embed_keys_for_conversation(db, current_space.id, cid)
+        if existing:
+            return ChatEmbedApiKeyCreateResponse(
+                created=False,
+                api_key=None,
+                keys=[ChatEmbedApiKeyOut.model_validate(k) for k in existing],
+                message=None,
+            )
+        plain, row = embed_key_service.create_embed_api_key_row(
+            db,
+            enterprise_space_id=current_space.id,
+            created_by_user_id=current_user.id,
+            conversation_id=cid,
+        )
+        db.commit()
+        db.refresh(row)
+        rows = _embed_keys_response_rows(db, current_space.id, cid)
+        return ChatEmbedApiKeyCreateResponse(
+            created=True,
+            api_key=plain,
+            keys=[ChatEmbedApiKeyOut.model_validate(k) for k in rows],
+            message=None,
+        )
+
+    all_active = embed_key_service.list_active_embed_keys(db, current_space.id)
+    active_global = [k for k in all_active if k.conversation_id is None]
+    if active_global:
+        return ChatEmbedApiKeyCreateResponse(
+            created=False,
+            api_key=None,
+            keys=[ChatEmbedApiKeyOut.model_validate(k) for k in active_global],
+            message=None,
+        )
+
+    plain, row = embed_key_service.create_embed_api_key_row(
+        db,
+        enterprise_space_id=current_space.id,
+        created_by_user_id=current_user.id,
+        conversation_id=None,
+    )
+    db.commit()
+    db.refresh(row)
+    rows = _embed_keys_response_rows(db, current_space.id, None)
+    return ChatEmbedApiKeyCreateResponse(
+        created=True,
+        api_key=plain,
+        keys=[ChatEmbedApiKeyOut.model_validate(k) for k in rows],
+        message=None,
+    )
+
+
+@router.get("/embed-api-keys", response_model=list[ChatEmbedApiKeyOut])
+def list_embed_api_keys(
+    current_space: CurrentSpace,
+    _: RequireMembership,
+    db: Session = Depends(get_db),
+):
+    active = embed_key_service.list_active_embed_keys(db, current_space.id)
+    return [ChatEmbedApiKeyOut.model_validate(k) for k in active]
+
+
+@router.delete("/embed-api-keys/{key_id}", status_code=status.HTTP_204_NO_CONTENT)
+def revoke_embed_api_key(
+    key_id: int,
+    current_space: CurrentSpace,
+    _: RequireMembership,
+    db: Session = Depends(get_db),
+):
+    ok = embed_key_service.revoke_embed_key_by_id(db, key_id=key_id, enterprise_space_id=current_space.id)
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="密钥不存在")
+    db.commit()
 
 
 @router.get("/{chat_id}/sessions", response_model=list[ChatSessionResponse])

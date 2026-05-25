@@ -147,6 +147,8 @@ services:
       # 示例：BACKEND_DOCKERFILE=Dockerfile.local docker compose up -d --build
       dockerfile: ${BACKEND_DOCKERFILE:-Dockerfile}
       target: ${BACKEND_TARGET:-development}
+      args:
+        APT_MIRROR: ${APT_MIRROR:-}
     container_name: zs-rag-backend
     environment:
       APP_NAME: ${APP_NAME:-zs-rag}
@@ -162,6 +164,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
       MILVUS_HOST: milvus
       MILVUS_PORT: 19530
+      MILVUS_DB_NAME: ${MILVUS_DB_NAME:-default}
       # OpenSearch：BM25 全文检索（与 Milvus 向量并行；未接代码前仅容器就绪）
       OPENSEARCH_URL: ${OPENSEARCH_URL:-http://opensearch:9200}
       OPENSEARCH_INDEX_CHUNKS: ${OPENSEARCH_INDEX_CHUNKS:-zs_rag_chunks}
@@ -175,6 +178,12 @@ services:
       MINERU_LANG: ${MINERU_LANG:-ch}
       MINERU_TIMEOUT: ${MINERU_TIMEOUT:-300}
       MINERU_FORMATS: ${MINERU_FORMATS:-pdf,png,jpg,jpeg,bmp,tif,tiff,webp}
+      # OpenDataLoader PDF（默认 PDF 引擎；进程内 Python SDK + JVM，无需 HTTP sidecar）
+      ODL_ENABLED: ${ODL_ENABLED:-true}
+      ODL_DEFAULT_PARSER: ${ODL_DEFAULT_PARSER:-opendataloader}
+      ODL_HYBRID: ${ODL_HYBRID:-false}
+      ODL_HYBRID_URL: ${ODL_HYBRID_URL:-http://opendataloader-hybrid:5002}
+      ODL_TIMEOUT: ${ODL_TIMEOUT:-120}
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     volumes:
@@ -219,6 +228,33 @@ services:
       timeout: 10s
       retries: 20
       start_period: 600s
+    networks:
+      - zs-rag-network
+    restart: unless-stopped
+
+  # ============== OpenDataLoader Hybrid Sidecar（扫描件 / 复杂表格；按 profile 启用） ==============
+  # 拉起：docker compose --profile odl-hybrid up -d opendataloader-hybrid
+  # 知识库配置开启 pdf_parser_hybrid 或 .env ODL_HYBRID=true
+  opendataloader-hybrid:
+    profiles: ["odl-hybrid"]
+    image: python:3.12-slim
+    container_name: zs-rag-odl-hybrid
+    working_dir: /srv
+    command:
+      - sh
+      - -c
+      - |
+        apt-get update -qq && apt-get install -y -qq --no-install-recommends default-jre-headless curl \
+        && pip install -q --no-cache-dir 'opendataloader-pdf[hybrid]' \
+        && opendataloader-pdf-hybrid --host 0.0.0.0 --port 5002
+    ports:
+      - "${ODL_HYBRID_PORT:-5002}:5002"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:5002/health >/dev/null || curl -fsS http://localhost:5002/ >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 300s
     networks:
       - zs-rag-network
     restart: unless-stopped

@@ -9,42 +9,48 @@ from sqlalchemy.orm import Session
 from app.core.authentication import decode_access_token
 from app.db.session import get_db
 from app.models.enterprise_space import EnterpriseSpace, Membership, User
+from app.services.chat_embed_api_key_service import (
+    resolve_embed_api_key_auth,
+    resolve_user_via_embed_api_key,
+)
 
 # Context variables
 current_user_ctx: ContextVar[dict | None] = ContextVar("current_user", default=None)
 current_space_ctx: ContextVar[str] = ContextVar("current_space", default="default")
+# 嵌入 API Key 鉴权成功后写入，供 get_enterprise_space_from_header 自动选用对应空间
+auth_resolved_space_slug_ctx: ContextVar[str | None] = ContextVar("auth_resolved_space_slug", default=None)
 
 # Security scheme
 security = HTTPBearer(auto_error=False)
 
 
-def get_current_user_from_token(token: str, db: Session) -> User:
-    """从 token 中解析并获取当前用户"""
-    payload = decode_access_token(token)
-    if payload is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="无效的认证 token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+def resolve_authenticated_user(request: Request, raw_token: str, db: Session) -> User | None:
+    """JWT 或嵌入 API Key（Bearer）解析为平台用户。"""
+    auth_resolved_space_slug_ctx.set(None)
 
-    user_id = payload.get("sub")
-    if user_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="无效的认证 token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    payload = decode_access_token(raw_token)
+    if payload is not None:
+        user_id = payload.get("sub")
+        if user_id is None:
+            return None
+        user = db.get(User, int(user_id))
+        if user is None or not user.is_active:
+            return None
+        return user
 
-    user = db.get(User, int(user_id))
-    if user is None or not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="用户不存在或已禁用",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    # 嵌入 Key：token_hash 全局唯一，可不传 X-Enterprise-Space
+    embed_auth = resolve_embed_api_key_auth(raw_token, db)
+    if embed_auth is not None:
+        user, space = embed_auth
+        auth_resolved_space_slug_ctx.set(space.slug)
+        return user
 
-    return user
+    # 兼容旧调用：若显式带了空间头，仍按头内空间校验 Key
+    space_slug = request.headers.get("X-Enterprise-Space", "default") or "default"
+    space = db.execute(select(EnterpriseSpace).where(EnterpriseSpace.slug == space_slug)).scalar_one_or_none()
+    if space is None:
+        return None
+    return resolve_user_via_embed_api_key(raw_token, space.id, db)
 
 
 def get_current_user(
@@ -60,7 +66,14 @@ def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    user = get_current_user_from_token(credentials.credentials, db)
+    user = resolve_authenticated_user(request, credentials.credentials, db)
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="无效的认证 token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     current_user_ctx.set({"id": user.id, "username": user.username, "is_admin": user.is_admin})
     return user
 
@@ -69,10 +82,12 @@ def get_enterprise_space_from_header(
     request: Request,
     db: Annotated[Session, Depends(get_db)],
 ) -> EnterpriseSpace:
-    """从请求头获取企业空间，默认为 default"""
-    space_slug = request.headers.get("X-Enterprise-Space", "default")
-    if not space_slug:
-        space_slug = "default"
+    """从请求头获取企业空间；嵌入 API Key 鉴权成功时自动使用 Key 所属空间。"""
+    resolved_slug = auth_resolved_space_slug_ctx.get()
+    if resolved_slug:
+        space_slug = resolved_slug
+    else:
+        space_slug = request.headers.get("X-Enterprise-Space", "default") or "default"
 
     space = db.execute(select(EnterpriseSpace).where(EnterpriseSpace.slug == space_slug)).scalar_one_or_none()
     if space is None:
@@ -122,7 +137,4 @@ def get_current_user_optional(
     if credentials is None:
         return None
 
-    try:
-        return get_current_user_from_token(credentials.credentials, db)
-    except HTTPException:
-        return None
+    return resolve_authenticated_user(request, credentials.credentials, db)

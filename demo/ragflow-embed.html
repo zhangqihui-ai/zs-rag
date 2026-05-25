@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RAGFlow 嵌入演示 · 第三方 iframe</title>
+    <style>
+      :root {
+        --bg: #f4f6fb;
+        --card: #fff;
+        --text: #1a2233;
+        --muted: #5c6b8a;
+        --accent: #0d9488;
+        --border: #e3e8f0;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family:
+          system-ui,
+          -apple-system,
+          'Segoe UI',
+          Roboto,
+          'PingFang SC',
+          'Microsoft YaHei',
+          sans-serif;
+        color: var(--text);
+        background: var(--bg);
+        line-height: 1.6;
+      }
+      .site-header {
+        background: var(--card);
+        border-bottom: 1px solid var(--border);
+      }
+      .site-header__inner {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 14px 24px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+      }
+      .logo {
+        font-weight: 700;
+        font-size: 1.1rem;
+        color: var(--text);
+        text-decoration: none;
+      }
+      .logo span {
+        color: var(--accent);
+      }
+      .hero {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 40px 24px 28px;
+      }
+      .hero h1 {
+        margin: 0 0 12px;
+        font-size: clamp(1.6rem, 3.5vw, 2rem);
+      }
+      .hero p {
+        margin: 0;
+        max-width: 640px;
+        color: var(--muted);
+      }
+      .note {
+        margin-top: 16px;
+        padding: 12px 16px;
+        background: #ecfdf5;
+        border: 1px solid #99f6e4;
+        border-radius: 10px;
+        font-size: 0.88rem;
+        color: #134e4a;
+      }
+      main {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 0 24px 56px;
+      }
+      .embed-card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        overflow: hidden;
+      }
+      .embed-card__head {
+        padding: 14px 18px;
+        border-bottom: 1px solid var(--border);
+        font-weight: 600;
+        font-size: 0.95rem;
+      }
+      .iframe-wrap {
+        background: #f8fafc;
+        min-height: 620px;
+      }
+      .iframe-wrap iframe {
+        display: block;
+        width: 100%;
+        border: 0;
+      }
+      footer {
+        text-align: center;
+        padding: 24px;
+        font-size: 0.88rem;
+        color: var(--muted);
+        border-top: 1px solid var(--border);
+        background: var(--card);
+      }
+    </style>
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="site-header__inner">
+        <a class="logo" href="#">演示页 · <span>RAGFlow 嵌入</span></a>
+        <a href="index.html" style="font-size: 0.92rem; color: var(--muted); text-decoration: none">← ZS-RAG 嵌入演示</a>
+      </div>
+    </header>
+
+    <section class="hero">
+      <h1>RAGFlow「嵌入网站」iframe 联调</h1>
+      <p>
+        以下为从你方 RAGFlow 控制台复制的全屏聊天 iframe（传统 iframe）。宿主页仅为排版示意；对话内容由 RAGFlow 域名加载。
+      </p>
+      <div class="note">
+        提示：<code>src</code> 中含 <code>auth</code> 等敏感参数，请勿提交到公开仓库；替换为你的实例时请同步修改本文件中的地址。
+      </div>
+    </section>
+
+    <main>
+      <div class="embed-card">
+        <div class="embed-card__head">对话区域 · RAGFlow share</div>
+        <div class="iframe-wrap">
+          <iframe
+            src="http://192.168.252.115/next-chats/share?shared_id=d5dffe6e4dab11f1976c59a7c6318a3c&from=chat&auth=OYH3IzrZHNYldGXqAlMPErgXMX35Y1yl&theme=light"
+            style="width: 100%; height: 100%; min-height: 600px"
+            frameborder="0"
+            title="RAGFlow 对话"
+          ></iframe>
+        </div>
+      </div>
+    </main>
+
+    <footer>仅供内网联调 · RAGFlow 内容由远端服务提供</footer>
+  </body>
+</html>

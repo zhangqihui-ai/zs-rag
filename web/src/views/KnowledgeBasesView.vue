@@ -108,7 +108,15 @@
               <textarea v-model.trim="form.description" class="textarea" maxlength="2000" placeholder="可选，描述用途与范围"></textarea>
             </label>
 
-            <div class="form-grid two">
+            <label class="field">
+              <span class="field-label">知识库类型</span>
+              <select v-model="form.kb_type" class="select" :disabled="modalMode === 'edit'">
+                <option value="classic">经典知识库（Milvus + 混合检索）</option>
+                <option value="lightrag">图知识库（LightRAG 图谱 + 五模式检索）</option>
+              </select>
+            </label>
+
+            <div v-if="form.kb_type === 'classic'" class="form-grid two">
               <label class="field inline-field">
                 <span class="field-label">启用向量数据库</span>
                 <label class="switch">
@@ -116,13 +124,15 @@
                 </label>
               </label>
 
-              <label class="field inline-field">
-                <span class="field-label">启用图数据库</span>
+              <label class="field inline-field deprecated-field">
+                <span class="field-label">启用图数据库（已废弃）</span>
                 <label class="switch">
-                  <input v-model="form.graph_db_enabled" type="checkbox" />
+                  <input v-model="form.graph_db_enabled" type="checkbox" disabled />
                 </label>
               </label>
             </div>
+
+            <p v-else class="field-hint">图知识库将自动启用 Neo4j + Milvus（LightRAG workspace 隔离），无需单独勾选图数据库。</p>
 
             <label v-if="modalMode === 'edit'" class="field">
               <span class="field-label">状态</span>
@@ -240,6 +250,7 @@ const openMenuId = ref<number | null>(null)
 const form = reactive({
   name: '',
   description: '',
+  kb_type: 'classic' as 'classic' | 'lightrag',
   vector_db_enabled: true,
   graph_db_enabled: false,
   status: 'active' as 'active' | 'inactive',
@@ -251,8 +262,14 @@ const createDefaults: Omit<KnowledgeBasePayload, 'name' | 'description' | 'vecto
   default_chunk_overlap: 50,
   default_retrieval_mode: 'hybrid',
   default_top_k: 5,
-  default_score_threshold: null,
-  config: null,
+  default_score_threshold: 0.5,
+  config: {
+    retrieval: {
+      vector_weight: 0.3,
+      hybrid_strategy: 'weight',
+      score_threshold_enabled: true,
+    },
+  },
 }
 
 const showNotice = (text: string, type: 'success' | 'error' = 'success') => {
@@ -269,6 +286,7 @@ const showNotice = (text: string, type: 'success' | 'error' = 'success') => {
 const resetForm = () => {
   form.name = ''
   form.description = ''
+  form.kb_type = 'classic'
   form.vector_db_enabled = true
   form.graph_db_enabled = false
   form.status = 'active'
@@ -325,6 +343,7 @@ const openEditModal = (kb: KnowledgeBase) => {
   editingId.value = kb.id
   form.name = kb.name
   form.description = kb.description || ''
+  form.kb_type = (kb.kb_type === 'lightrag' ? 'lightrag' : 'classic') as 'classic' | 'lightrag'
   form.vector_db_enabled = kb.vector_db_enabled
   form.graph_db_enabled = kb.graph_db_enabled
   form.status = kb.status === 'inactive' ? 'inactive' : 'active'
@@ -352,8 +371,9 @@ const submitModal = async () => {
         ...createDefaults,
         name: form.name.trim(),
         description,
-        vector_db_enabled: form.vector_db_enabled,
-        graph_db_enabled: form.graph_db_enabled,
+        kb_type: form.kb_type,
+        vector_db_enabled: form.kb_type === 'classic' ? form.vector_db_enabled : true,
+        graph_db_enabled: form.kb_type === 'lightrag' ? true : form.graph_db_enabled,
       })
       modalOpen.value = false
       editingId.value = null

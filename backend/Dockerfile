@@ -12,10 +12,19 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+ARG APT_MIRROR=
+
+# Install system dependencies（构建时可传 APT_MIRROR 使用国内 Debian 镜像）
+RUN set -eux; \
+    if [ -n "${APT_MIRROR}" ] && [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+      sed -i "s|http://deb.debian.org/debian|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources; \
+      sed -i "s|http://deb.debian.org/debian-security|${APT_MIRROR}-security|g" /etc/apt/sources.list.d/debian.sources || true; \
+    fi; \
+    apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libpq-dev \
+    default-jre-headless \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy and install Python dependencies
@@ -41,7 +50,8 @@ RUN pip install --no-cache-dir \
 ENV APP_ENV=development
 
 # Command for development with hot reload
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# timeout-graceful-shutdown：避免 parse-stream 等长连接阻塞热重载，导致整站无法登录
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--timeout-graceful-shutdown", "5"]
 
 
 # ============== Production Stage ==============

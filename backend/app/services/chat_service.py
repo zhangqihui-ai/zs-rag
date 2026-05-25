@@ -10,10 +10,18 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.errors import AppError
+from app.core.openai_compat import (
+    build_chat_completion_chunk,
+    estimate_usage,
+    last_user_content as _last_user_content_from_messages,
+    normalize_openai_messages as _normalize_openai_messages_list,
+    validate_messages_last_role_is_user,
+)
 from app.core.provider_adapter import get_provider
 from app.models.chat import ChatConversation, ChatMessage, ChatSession
 from app.models.knowledge_base import KnowledgeBase
 from app.models.model_management import AIModel, AIModelDefault, AIModelProvider
+from app.core.knowledge_retrieval_defaults import DEFAULT_TOP_K
 from app.schemas.chat import (
     ChatConfigurationResponse,
     ChatConfigurationUpdate,
@@ -25,11 +33,22 @@ from app.schemas.chat import (
 )
 
 
-DEFAULT_CHAT_SYSTEM_PROMPT = (
-    "你是一个智能助手，请总结知识库的内容来回答问题，请列举知识库中的数据详细回答。"
-    "当所有知识库内容都与问题无关时，你的回答必须包括「知识库中未找到您要的答案！」这句话。"
-    "回答需要考虑聊天历史。\n以下是知识库：\n{knowledge}\n以上是知识库。"
+DEFAULT_CHAT_SYSTEM_PROMPT_RAG = (
+    "你是一个智能助手。下面「参考片段」来自用户所选知识库的检索结果，条目以 [1]、[2]… 编号，可作引用。\n"
+    "作答要求：\n"
+    "1）若问题需要依据文档，请优先引用参考片段中的信息，并在对应叙述处使用角标 [1]、[2] 等。\n"
+    "2）若问题是问候、闲聊、常识、或明显与参考片段无关（例如询问你是谁、用的什么模型），请直接自然回答，不要强行引用片段，也不要说「知识库中未找到您要的答案」之类套话。\n"
+    "3）仅当用户问题**明确期望**从知识库文档中得到事实，且参考片段均不相关或明显不足时，再说明「知识库中未找到您要的答案！」并可补充合理说明。\n"
+    "回答需结合聊天历史。\n以下是参考片段：\n{knowledge}\n以上结束。"
 )
+
+DEFAULT_CHAT_SYSTEM_PROMPT_GENERAL = (
+    "你是一个乐于助人的智能助手。请结合聊天历史自然回答用户问题。\n"
+    "当前对话未选择知识库，或本轮检索未返回任何参考片段：请按通用对话方式回复，不必强行关联知识库或编造文档来源。"
+)
+
+# 兼容旧代码与文档中的名称：默认 GENERAL 作为「未自定义且未注入片段」时的基线说明长度参考
+DEFAULT_CHAT_SYSTEM_PROMPT = DEFAULT_CHAT_SYSTEM_PROMPT_GENERAL
 
 _CITATION_HINT_SUFFIX = (
     "\n\n（请在回答中引用上述片段时，在对应句末使用角标 [1]、[2] 等与编号对应；"
@@ -39,16 +58,31 @@ _CITATION_HINT_SUFFIX = (
 
 def _clamp_retrieval_top_k(raw: Any) -> int:
     if raw is None:
-        return 8
+        return DEFAULT_TOP_K
     try:
         return max(1, min(50, int(raw)))
     except (TypeError, ValueError):
-        return 8
+        return DEFAULT_TOP_K
+
+
+def _default_top_k_for_kb_ids(db: Session, *, enterprise_space_id: int, kb_ids: list[int]) -> int:
+    if not kb_ids:
+        return DEFAULT_TOP_K
+    kb = db.execute(
+        select(KnowledgeBase.default_top_k).where(
+            KnowledgeBase.enterprise_space_id == enterprise_space_id,
+            KnowledgeBase.id == int(kb_ids[0]),
+            KnowledgeBase.status != "deleted",
+        )
+    ).scalar_one_or_none()
+    if kb is None:
+        return DEFAULT_TOP_K
+    return _clamp_retrieval_top_k(kb)
 
 
 def _merge_top_k_for_conversation(conv: ChatConversation | None) -> int:
     if conv is None:
-        return 8
+        return DEFAULT_TOP_K
     return _clamp_retrieval_top_k(getattr(conv, "retrieval_top_k", None))
 
 
@@ -59,6 +93,7 @@ def _retrieve_knowledge_block_and_citations(
     knowledge_base_ids: list[int],
     query: str,
     merge_top_k: int = 8,
+    lightrag_query_mode: str = "mix",
 ) -> tuple[str, list[dict[str, Any]]]:
     q = (query or "").strip()
     ids = [int(x) for x in knowledge_base_ids if x is not None]
@@ -66,82 +101,128 @@ def _retrieve_knowledge_block_and_citations(
     if not q or not unique_ids:
         return "", []
 
-    existing_ids = set(
-        db.execute(
-            select(KnowledgeBase.id).where(
-                KnowledgeBase.enterprise_space_id == enterprise_space_id,
-                KnowledgeBase.id.in_(unique_ids),
-                KnowledgeBase.status != "deleted",
-            )
+    kb_rows = db.execute(
+        select(KnowledgeBase).where(
+            KnowledgeBase.enterprise_space_id == enterprise_space_id,
+            KnowledgeBase.id.in_(unique_ids),
+            KnowledgeBase.status != "deleted",
         )
-        .scalars()
-        .all()
-    )
-    ordered_existing = [kid for kid in unique_ids if kid in existing_ids]
+    ).scalars().all()
+    if not kb_rows:
+        return "", []
+
+    kb_by_id = {kb.id: kb for kb in kb_rows}
+    ordered_existing = [kid for kid in unique_ids if kid in kb_by_id]
     if not ordered_existing:
         return "", []
 
+    from app.core.kb_type import is_lightrag_kb
     from app.schemas.retrieval import KnowledgeSearchRequest
+    from app.services.lightrag_engine import query_graph_kb
     from app.services.retrieval_service import search_knowledge_bases_multi
 
     cap = _clamp_retrieval_top_k(merge_top_k)
-    try:
-        data = search_knowledge_bases_multi(
-            db,
-            space_id=enterprise_space_id,
-            knowledge_base_ids=ordered_existing,
-            payload=KnowledgeSearchRequest(query=q[:2000], top_k=cap),
-        )
-    except AppError:
-        return "", []
-
-    picked = data.get("results") or []
-    if not picked:
-        return "", []
+    classic_ids = [kid for kid in ordered_existing if not is_lightrag_kb(kb_by_id[kid])]
+    lightrag_ids = [kid for kid in ordered_existing if is_lightrag_kb(kb_by_id[kid])]
 
     parts: list[str] = []
     citations: list[dict[str, Any]] = []
     ref = 0
-    for item in picked:
-        raw_kb = item.get("knowledge_base_id")
-        if raw_kb is None:
-            continue
-        ref += 1
-        src_kb_id = int(raw_kb)
-        cite_raw = item.get("citation")
-        cite: dict[str, Any] = cite_raw if isinstance(cite_raw, dict) else {}
-        doc = str(item.get("document_name") or cite.get("document_name") or "文献")
-        page = cite.get("page_no")
-        page_bit = f" 第{int(page)}页" if isinstance(page, (int, float)) else ""
-        header = f"[{ref}] 《{doc}》{page_bit}"
-        body = str(item.get("content") or "").strip()
-        parts.append(f"{header}\n{body}")
-        pn: int | None = int(page) if isinstance(page, (int, float)) else None
-        citations.append(
-            {
-                "ref": ref,
-                "document_name": doc,
-                "page_no": pn,
-                "chunk_id": item.get("chunk_id"),
-                "document_id": item.get("document_id"),
-                "chunk_index": item.get("chunk_index"),
-                "knowledge_base_id": int(src_kb_id),
-                "score": round(float(item.get("score") or 0), 4),
-            }
-        )
 
-    block = "\n\n---\n\n".join(parts)
-    return block, citations
+    if classic_ids:
+        try:
+            data = search_knowledge_bases_multi(
+                db,
+                space_id=enterprise_space_id,
+                knowledge_base_ids=classic_ids,
+                payload=KnowledgeSearchRequest(query=q[:2000], top_k=cap),
+            )
+            for item in data.get("results") or []:
+                raw_kb = item.get("knowledge_base_id")
+                if raw_kb is None:
+                    continue
+                ref += 1
+                src_kb_id = int(raw_kb)
+                cite_raw = item.get("citation")
+                cite: dict[str, Any] = cite_raw if isinstance(cite_raw, dict) else {}
+                doc = str(item.get("document_name") or cite.get("document_name") or "文献")
+                page = cite.get("page_no")
+                page_bit = f" 第{int(page)}页" if isinstance(page, (int, float)) else ""
+                header = f"[{ref}] 《{doc}》{page_bit}"
+                body = str(item.get("content") or "").strip()
+                parts.append(f"{header}\n{body}")
+                pn: int | None = int(page) if isinstance(page, (int, float)) else None
+                citations.append(
+                    {
+                        "ref": ref,
+                        "document_name": doc,
+                        "page_no": pn,
+                        "chunk_id": item.get("chunk_id"),
+                        "document_id": item.get("document_id"),
+                        "chunk_index": item.get("chunk_index"),
+                        "knowledge_base_id": int(src_kb_id),
+                        "score": round(float(item.get("score") or 0), 4),
+                    }
+                )
+        except AppError:
+            pass
+
+    mode = lightrag_query_mode if lightrag_query_mode in ("naive", "local", "global", "hybrid", "mix") else "mix"
+    per_kb_top_k = max(1, cap // max(len(lightrag_ids), 1)) if lightrag_ids else cap
+    for kb_id in lightrag_ids:
+        kb = kb_by_id[kb_id]
+        try:
+            graph_data = query_graph_kb(
+                db,
+                knowledge_base=kb,
+                query=q[:2000],
+                mode=mode,
+                top_k=per_kb_top_k,
+                include_references=True,
+            )
+        except AppError:
+            continue
+        block = str(graph_data.get("answer_context") or "").strip()
+        if block:
+            parts.append(block)
+        for cite in graph_data.get("citations") or []:
+            if not isinstance(cite, dict):
+                continue
+            ref = int(cite.get("ref") or ref + 1)
+            citations.append(
+                {
+                    "ref": ref,
+                    "document_name": cite.get("document_name"),
+                    "page_no": None,
+                    "chunk_id": cite.get("chunk_id"),
+                    "document_id": cite.get("document_id"),
+                    "chunk_index": None,
+                    "knowledge_base_id": kb_id,
+                    "score": None,
+                }
+            )
+
+    if not parts:
+        return "", []
+
+    return "\n\n---\n\n".join(parts), citations
 
 
 def _effective_system_prompt(conv: ChatConversation | None, *, knowledge_block: str = "") -> str:
-    raw = ""
+    kb_nonempty = bool((knowledge_block or "").strip())
+    custom: str | None = None
     if conv is not None and conv.system_prompt is not None:
-        raw = str(conv.system_prompt).strip()
-    if not raw:
-        raw = DEFAULT_CHAT_SYSTEM_PROMPT.strip()
-    kb = knowledge_block.strip() if knowledge_block.strip() else "（本轮尚未注入检索片段）"
-    return raw.replace("{knowledge}", kb)
+        s = str(conv.system_prompt).strip()
+        if s:
+            custom = s
+    if custom is None:
+        if kb_nonempty:
+            return DEFAULT_CHAT_SYSTEM_PROMPT_RAG.strip().replace("{knowledge}", knowledge_block.strip())
+        return DEFAULT_CHAT_SYSTEM_PROMPT_GENERAL.strip()
+    if "{knowledge}" in custom:
+        kb_subst = knowledge_block.strip() if kb_nonempty else "（本轮尚未注入检索片段）"
+        return custom.replace("{knowledge}", kb_subst)
+    return custom
 
 
 def inject_system_into_messages(
@@ -211,6 +292,7 @@ def _config_response(conv: ChatConversation) -> ChatConfigurationResponse:
         knowledge_base_ids=list(conv.knowledge_base_ids or []),
         show_citations=bool(getattr(conv, "show_citations", True)),
         retrieval_top_k=_merge_top_k_for_conversation(conv),
+        lightrag_query_mode=str(getattr(conv, "lightrag_query_mode", None) or "mix"),
         temperature=float(conv.temperature),
         max_tokens=int(conv.max_tokens),
         top_p=float(conv.top_p),
@@ -235,13 +317,17 @@ def _resolve_chat_llm(
         ).scalar_one_or_none()
         if model is None or model.provider is None:
             raise AppError(
-                400,
-                "CHAT_MODEL_NOT_FOUND",
-                "对话绑定的模型不存在、未启用或已删除，请在聊天设置中重新选择模型",
+                status_code=400,
+                code="CHAT_MODEL_NOT_FOUND",
+                message="对话绑定的模型不存在、未启用或已删除，请在聊天设置中重新选择模型",
             )
         api_name = (model.model_name or model.model_code or "").strip()
         if not api_name:
-            raise AppError(500, "CHAT_MODEL_MISCONFIGURED", "模型缺少 model_name / model_code")
+            raise AppError(
+                status_code=500,
+                code="CHAT_MODEL_MISCONFIGURED",
+                message="模型缺少 model_name / model_code",
+            )
         return model.provider, api_name
 
     code = (conv.model_provider or "").strip()
@@ -262,9 +348,9 @@ def _resolve_chat_llm(
     ).scalars().unique().all()
     if len(pairs) > 1:
         raise AppError(
-            400,
-            "AMBIGUOUS_LLM_PROVIDER",
-            "存在多条相同「模型名称 + provider_code」的接入（通常为不同网关 URL）。请在聊天设置里重新选择模型以绑定 model_id。",
+            status_code=400,
+            code="AMBIGUOUS_LLM_PROVIDER",
+            message="存在多条相同「模型名称 + provider_code」的接入（通常为不同网关 URL）。请在聊天设置里重新选择模型以绑定 model_id。",
         )
     if len(pairs) == 1:
         return pairs[0], name
@@ -277,9 +363,9 @@ def _resolve_chat_llm(
     ).scalars().all()
     if len(provs) > 1:
         raise AppError(
-            400,
-            "AMBIGUOUS_PROVIDER_CODE",
-            "存在多个相同 provider_code 的厂商配置，无法唯一确定接入。请在聊天设置里重新选择模型以绑定 model_id。",
+            status_code=400,
+            code="AMBIGUOUS_PROVIDER_CODE",
+            message="存在多个相同 provider_code 的厂商配置，无法唯一确定接入。请在聊天设置里重新选择模型以绑定 model_id。",
         )
     if len(provs) == 1:
         return provs[0], name
@@ -293,6 +379,14 @@ def _touch_conversation(db: Session, conversation_id: str) -> None:
         db.add(conv)
 
 
+def _conversation_row_after_user_message(db: Session, conversation_id: str) -> ChatConversation | None:
+    """在用户消息已写入并可能触发 _touch_conversation 加载过对话行后，强制从库重读，避免 identity map 沿用切换模型前的旧字段。"""
+    conv = db.get(ChatConversation, conversation_id)
+    if conv is not None:
+        db.refresh(conv)
+    return conv
+
+
 def get_chat_conversation(
     db: Session, *, conversation_id: str, user_id: int, enterprise_space_id: int
 ) -> ChatConversation:
@@ -303,7 +397,7 @@ def get_chat_conversation(
     )
     obj = db.execute(stmt).scalar_one_or_none()
     if not obj:
-        raise AppError(404, "CONVERSATION_NOT_FOUND", "Conversation not found")
+        raise AppError(status_code=404, code="CONVERSATION_NOT_FOUND", message="Conversation not found")
     return obj
 
 
@@ -333,6 +427,11 @@ def create_chat_conversation(
     _apply_default_llm_if_missing(db, config_data=config_data, enterprise_space_id=enterprise_space_id)
 
     conv_id = str(uuid.uuid4())
+    kb_ids = list(config_data.get("knowledge_base_ids") or [])
+    top_k_raw = config_data.get("retrieval_top_k")
+    if top_k_raw is None and kb_ids:
+        top_k_raw = _default_top_k_for_kb_ids(db, enterprise_space_id=enterprise_space_id, kb_ids=kb_ids)
+
     conv = ChatConversation(
         id=conv_id,
         user_id=user_id,
@@ -341,9 +440,10 @@ def create_chat_conversation(
         model_provider=config_data.get("model_provider"),
         model_name=config_data.get("model_name"),
         selected_llm_model_id=config_data.get("model_id"),
-        knowledge_base_ids=list(config_data.get("knowledge_base_ids") or []),
+        knowledge_base_ids=kb_ids,
         show_citations=bool(config_data.get("show_citations", True)),
-        retrieval_top_k=_clamp_retrieval_top_k(config_data.get("retrieval_top_k")),
+        retrieval_top_k=_clamp_retrieval_top_k(top_k_raw),
+        lightrag_query_mode=str(config_data.get("lightrag_query_mode") or "mix"),
         temperature=float(config_data.get("temperature", 0.7)),
         max_tokens=int(config_data.get("max_tokens", 2000)),
         top_p=float(config_data.get("top_p", 1.0)),
@@ -442,7 +542,7 @@ def get_chat_session(
     )
     session_obj = db.execute(stmt).scalar_one_or_none()
     if not session_obj:
-        raise AppError(404, "SESSION_NOT_FOUND", "Chat session not found")
+        raise AppError(status_code=404, code="SESSION_NOT_FOUND", message="Chat session not found")
     return session_obj
 
 
@@ -483,7 +583,7 @@ def get_chat_configuration(
     session_obj = get_chat_session(db, session_id=session_id, user_id=user_id, enterprise_space_id=enterprise_space_id)
     conv = db.get(ChatConversation, session_obj.conversation_id)
     if conv is None:
-        raise AppError(404, "CONVERSATION_NOT_FOUND", "Conversation not found")
+        raise AppError(status_code=404, code="CONVERSATION_NOT_FOUND", message="Conversation not found")
     raw_name = conv.model_name
     if not (isinstance(raw_name, str) and raw_name.strip()):
         model = _default_llm_model_for_space(db, enterprise_space_id=session_obj.enterprise_space_id)
@@ -504,7 +604,7 @@ def update_chat_configuration(
     session_obj = get_chat_session(db, session_id=session_id, user_id=user_id, enterprise_space_id=enterprise_space_id)
     conv = db.get(ChatConversation, session_obj.conversation_id)
     if conv is None:
-        raise AppError(404, "CONVERSATION_NOT_FOUND", "Conversation not found")
+        raise AppError(status_code=404, code="CONVERSATION_NOT_FOUND", message="Conversation not found")
 
     update_data = obj_in.model_dump(exclude_unset=True)
     mid = update_data.pop("model_id", None)
@@ -569,6 +669,30 @@ def _next_stream_chunk(stream_iter: Iterator[str]) -> str | object:
         return _STREAM_STOP
 
 
+def complete_chat_turn_blocking(
+    db: Session,
+    *,
+    session_id: str,
+    user_id: int,
+    enterprise_space_id: int,
+    user_content: str,
+) -> dict[str, object]:
+    """单轮非流式：执行与 /stream 相同的推理逻辑，返回 assistant_done 载荷。"""
+    done: dict[str, object] | None = None
+    for event in iter_chat_stream_events(
+        db,
+        session_id=session_id,
+        user_id=user_id,
+        enterprise_space_id=enterprise_space_id,
+        user_content=user_content,
+    ):
+        if event.get("type") == "assistant_done":
+            done = event
+    if done is None:
+        raise AppError(status_code=500, code="CHAT_TURN_FAILED", message="未收到 assistant_done 事件")
+    return done
+
+
 def iter_chat_stream_events(
     db: Session,
     *,
@@ -584,7 +708,7 @@ def iter_chat_stream_events(
 
     add_chat_message(db, session_id=session_id, role="user", content=user_content)
 
-    conv = db.get(ChatConversation, session_obj.conversation_id)
+    conv = _conversation_row_after_user_message(db, session_obj.conversation_id)
 
     provider_cfg: AIModelProvider | None = None
     api_model_name = ""
@@ -628,6 +752,7 @@ def iter_chat_stream_events(
                 knowledge_base_ids=list(conv.knowledge_base_ids or []) if conv else [],
                 query=user_content,
                 merge_top_k=_merge_top_k_for_conversation(conv),
+                lightrag_query_mode=str(getattr(conv, "lightrag_query_mode", None) or "mix"),
             )
             if kb_block:
                 kb_block = kb_block + (
@@ -672,64 +797,6 @@ def iter_chat_stream_events(
     }
 
 
-def _normalize_openai_messages_list(
-    messages: list[OpenAICompatMessage] | list[dict[str, Any]] | None,
-) -> list[dict[str, str]]:
-    if not messages:
-        return []
-    out: list[dict[str, str]] = []
-    for m in messages:
-        if isinstance(m, OpenAICompatMessage):
-            role, content = m.role, m.content
-        elif isinstance(m, dict):
-            role, content = m.get("role"), m.get("content")
-        else:
-            continue
-        if role not in ("system", "user", "assistant"):
-            continue
-        if content is None:
-            continue
-        s = str(content)
-        if not s.strip():
-            continue
-        out.append({"role": str(role), "content": s})
-    return out
-
-
-def _last_user_content_from_messages(messages: list[dict[str, str]]) -> str:
-    for m in reversed(messages):
-        if m.get("role") == "user":
-            return str(m.get("content") or "")
-    return ""
-
-
-def _openai_stream_chunk_dict(
-    *,
-    completion_id: str,
-    created: int,
-    model: str,
-    chat_id: str,
-    session_id: str,
-    content: str | None = None,
-    role: str | None = None,
-    finish_reason: str | None = None,
-) -> dict[str, Any]:
-    delta: dict[str, Any] = {}
-    if role is not None:
-        delta["role"] = role
-    if content:
-        delta["content"] = content
-    return {
-        "id": completion_id,
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": model,
-        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
-        "chat_id": chat_id,
-        "session_id": session_id,
-    }
-
-
 def _extract_assistant_from_openai_completion(data: Any) -> str:
     if not isinstance(data, dict):
         return ""
@@ -763,7 +830,9 @@ def ensure_session_for_completion(
         )
         if sess.conversation_id != chat_id:
             raise AppError(
-                400, "SESSION_CHAT_MISMATCH", "session_id does not belong to the given chat_id"
+                status_code=400,
+                code="SESSION_CHAT_MISMATCH",
+                message="session_id does not belong to the given chat_id",
             )
         return sess
     cnt = db.execute(
@@ -789,15 +858,21 @@ def build_completion_messages(
     conv = db.get(ChatConversation, session.conversation_id)
     normalized = _normalize_openai_messages_list(request_messages)
     if normalized:
+        validate_messages_last_role_is_user(normalized)
         user_text = _last_user_content_from_messages(normalized)
         if not user_text.strip():
-            raise AppError(400, "INVALID_MESSAGES", "messages must include a user message with non-empty content")
+            raise AppError(
+                status_code=400,
+                code="INVALID_MESSAGES",
+                message="messages must include a user message with non-empty content",
+            )
         kb_block, cites = _retrieve_knowledge_block_and_citations(
             db,
             enterprise_space_id=session.enterprise_space_id,
             knowledge_base_ids=list(conv.knowledge_base_ids or []) if conv else [],
             query=user_text,
             merge_top_k=_merge_top_k_for_conversation(conv),
+            lightrag_query_mode=str(getattr(conv, "lightrag_query_mode", None) or "mix"),
         )
         if kb_block:
             kb_block = kb_block + (_CITATION_HINT_SUFFIX if getattr(conv, "show_citations", True) else "")
@@ -805,9 +880,9 @@ def build_completion_messages(
     q = (question or "").strip()
     if not q:
         raise AppError(
-            400,
-            "MESSAGES_NORMALIZATION_EMPTY",
-            "messages 无有效条目；请提供 question 或有效的 messages",
+            status_code=400,
+            code="MESSAGES_NORMALIZATION_EMPTY",
+            message="messages 无有效条目；请提供 question 或有效的 messages",
         )
     history = db.execute(
         select(ChatMessage)
@@ -823,6 +898,7 @@ def build_completion_messages(
         knowledge_base_ids=list(conv.knowledge_base_ids or []) if conv else [],
         query=q,
         merge_top_k=_merge_top_k_for_conversation(conv),
+        lightrag_query_mode=str(getattr(conv, "lightrag_query_mode", None) or "mix"),
     )
     if kb_block:
         kb_block = kb_block + (_CITATION_HINT_SUFFIX if getattr(conv, "show_citations", True) else "")
@@ -839,27 +915,34 @@ def iter_openai_completion_events(
     user_content_to_persist: str,
     llm_messages: list[dict[str, str]],
     turn_citations: list[dict[str, Any]] | None = None,
+    response_model: str | None = None,
 ) -> Iterator[dict[str, Any]]:
     session_obj = get_chat_session(
         db, session_id=session_id, user_id=user_id, enterprise_space_id=enterprise_space_id
     )
     if session_obj.conversation_id != chat_id:
-        raise AppError(400, "SESSION_CHAT_MISMATCH", "session_id does not belong to the given chat_id")
+        raise AppError(
+            status_code=400,
+            code="SESSION_CHAT_MISMATCH",
+            message="session_id does not belong to the given chat_id",
+        )
 
     add_chat_message(db, session_id=session_id, role="user", content=user_content_to_persist)
-    conv = db.get(ChatConversation, session_obj.conversation_id)
+    conv = _conversation_row_after_user_message(db, session_obj.conversation_id)
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     created = int(time.time())
-    model_label = (conv.model_name if conv else None) or "unknown"
+    model_label = response_model or (conv.model_name if conv else None) or "model"
 
-    yield _openai_stream_chunk_dict(
+    yield build_chat_completion_chunk(
         completion_id=completion_id,
         created=created,
         model=model_label,
         chat_id=chat_id,
         session_id=session_id,
+        content=None,
         role="assistant",
         finish_reason=None,
+        usage=None,
     )
 
     assistant_content = ""
@@ -872,27 +955,32 @@ def iter_openai_completion_events(
             provider_cfg, api_model_name = _resolve_chat_llm(
                 db, conv=conv, enterprise_space_id=session_obj.enterprise_space_id
             )
-            if api_model_name:
+            if api_model_name and not response_model:
                 model_label = api_model_name
         except AppError as e:
             assistant_content = f"【错误】{e.message}"
-            yield _openai_stream_chunk_dict(
+            yield build_chat_completion_chunk(
                 completion_id=completion_id,
                 created=created,
                 model=model_label,
                 chat_id=chat_id,
                 session_id=session_id,
                 content=assistant_content,
+                role="assistant",
                 finish_reason=None,
+                usage=None,
             )
             add_chat_message(db, session_id=session_id, role="assistant", content=assistant_content)
-            yield _openai_stream_chunk_dict(
+            yield build_chat_completion_chunk(
                 completion_id=completion_id,
                 created=created,
                 model=model_label,
                 chat_id=chat_id,
                 session_id=session_id,
+                content=None,
+                role="assistant",
                 finish_reason="stop",
+                usage=None,
             )
             return
 
@@ -906,38 +994,44 @@ def iter_openai_completion_events(
                     break
                 piece = str(chunk)
                 parts.append(piece)
-                yield _openai_stream_chunk_dict(
+                yield build_chat_completion_chunk(
                     completion_id=completion_id,
                     created=created,
                     model=model_label,
                     chat_id=chat_id,
                     session_id=session_id,
                     content=piece,
+                    role="assistant",
                     finish_reason=None,
+                    usage=None,
                 )
             assistant_content = "".join(parts)
         except Exception as e:
             tail = f"\n\n【错误】{e!s}"
             assistant_content = "".join(parts) + (tail if parts else f"Exception: {e!s}")
-            yield _openai_stream_chunk_dict(
+            yield build_chat_completion_chunk(
                 completion_id=completion_id,
                 created=created,
                 model=model_label,
                 chat_id=chat_id,
                 session_id=session_id,
                 content=tail if parts else f"Exception: {e!s}",
+                role="assistant",
                 finish_reason=None,
+                usage=None,
             )
     else:
         assistant_content = f"Echo: {user_content_to_persist} (No model configured)"
-        yield _openai_stream_chunk_dict(
+        yield build_chat_completion_chunk(
             completion_id=completion_id,
             created=created,
             model=model_label,
             chat_id=chat_id,
             session_id=session_id,
             content=assistant_content,
+            role="assistant",
             finish_reason=None,
+            usage=None,
         )
 
     add_chat_message(
@@ -947,13 +1041,16 @@ def iter_openai_completion_events(
         content=assistant_content,
         citations=turn_citations if turn_citations else None,
     )
-    yield _openai_stream_chunk_dict(
+    yield build_chat_completion_chunk(
         completion_id=completion_id,
         created=created,
         model=model_label,
         chat_id=chat_id,
         session_id=session_id,
+        content=None,
+        role="assistant",
         finish_reason="stop",
+        usage=estimate_usage(prompt_messages=llm_messages, completion_text=assistant_content),
     )
 
 
@@ -967,18 +1064,23 @@ def run_chat_completion_blocking(
     user_content_to_persist: str,
     llm_messages: list[dict[str, str]],
     turn_citations: list[dict[str, Any]] | None = None,
+    response_model: str | None = None,
 ) -> dict[str, Any]:
     session_obj = get_chat_session(
         db, session_id=session_id, user_id=user_id, enterprise_space_id=enterprise_space_id
     )
     if session_obj.conversation_id != chat_id:
-        raise AppError(400, "SESSION_CHAT_MISMATCH", "session_id does not belong to the given chat_id")
+        raise AppError(
+            status_code=400,
+            code="SESSION_CHAT_MISMATCH",
+            message="session_id does not belong to the given chat_id",
+        )
 
     add_chat_message(db, session_id=session_id, role="user", content=user_content_to_persist)
-    conv = db.get(ChatConversation, session_obj.conversation_id)
+    conv = _conversation_row_after_user_message(db, session_obj.conversation_id)
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     created = int(time.time())
-    model_label = (conv.model_name if conv else None) or "unknown"
+    model_label = response_model or (conv.model_name if conv else None) or "model"
 
     provider_cfg: AIModelProvider | None = None
     api_model_name = ""
@@ -987,7 +1089,7 @@ def run_chat_completion_blocking(
             provider_cfg, api_model_name = _resolve_chat_llm(
                 db, conv=conv, enterprise_space_id=session_obj.enterprise_space_id
             )
-            if api_model_name:
+            if api_model_name and not response_model:
                 model_label = api_model_name
         except AppError as e:
             assistant_content = f"【错误】{e.message}"

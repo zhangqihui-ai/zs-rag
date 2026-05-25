@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
+import ChatEmbedBootstrap from '../views/ChatEmbedBootstrap.vue'
 import ChatView from '../views/ChatView.vue'
 import HealthView from '../views/HealthView.vue'
 import HomeView from '../views/HomeView.vue'
@@ -19,6 +20,7 @@ const router = createRouter({
       name: 'login',
       component: LoginView,
       meta: {
+        public: true,
         title: '登录',
         description: '进入 ZS-RAG 企业级知识平台。',
       },
@@ -78,6 +80,16 @@ const router = createRouter({
       },
     },
     {
+      path: '/chat/embed',
+      name: 'chat-embed',
+      component: ChatEmbedBootstrap,
+      meta: {
+        public: true,
+        title: '嵌入对话',
+        description: '第三方站点 iframe / 脚本嵌入入口。',
+      },
+    },
+    {
       path: '/chat',
       name: 'chat',
       component: ChatView,
@@ -110,8 +122,9 @@ const router = createRouter({
 router.beforeEach((to, from, next) => {
   const token = localStorage.getItem('auth_token')
   const isLoginPage = to.path === '/login'
+  const isPublic = Boolean(to.meta.public)
 
-  if (!token && !isLoginPage) {
+  if (!token && !isLoginPage && !isPublic) {
     next('/login')
   } else if (token && isLoginPage) {
     next('/')

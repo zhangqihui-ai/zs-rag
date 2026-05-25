@@ -13,8 +13,8 @@ export interface ChatConversation {
   model_name?: string | null
   knowledge_base_ids?: number[]
   show_citations?: boolean
-  /** 与知识检索多库一致：合并后 Top K；各库内先放大候选再全局排序 */
   retrieval_top_k?: number
+  lightrag_query_mode?: 'naive' | 'local' | 'global' | 'hybrid' | 'mix'
   temperature?: number
   max_tokens?: number
   top_p?: number
@@ -41,6 +41,7 @@ export interface ChatConfiguration {
   show_citations?: boolean
   /** 与知识检索多库一致：合并后 Top K；各库内先放大候选再全局排序 */
   retrieval_top_k?: number
+  lightrag_query_mode?: 'naive' | 'local' | 'global' | 'hybrid' | 'mix'
   temperature: number
   max_tokens: number
   top_p: number
@@ -127,5 +128,38 @@ export const chatApi = {
 
   streamPath(sessionId: string) {
     return `/api/v1/chats/sessions/${sessionId}/stream`
+  },
+}
+
+/** 嵌入对话用 API Key（Bearer）；可按 conversation_id 绑定对话 */
+export interface ChatEmbedApiKeyMeta {
+  id: number
+  key_prefix: string
+  created_at: string
+  conversation_id?: string | null
+}
+
+export interface ChatEmbedApiKeyCreateResponse {
+  created: boolean
+  api_key?: string | null
+  keys: ChatEmbedApiKeyMeta[]
+  message?: string | null
+}
+
+export interface ChatEmbedApiKeyEnsurePayload {
+  regenerate?: boolean
+  conversation_id?: string | null
+  issue_new_for_share?: boolean
+}
+
+export const chatEmbedApiKeyApi = {
+  ensureOrCreate(payload: ChatEmbedApiKeyEnsurePayload = {}) {
+    return http.post<ChatEmbedApiKeyCreateResponse>('/api/v1/chats/embed-api-keys', payload)
+  },
+  list() {
+    return http.get<ChatEmbedApiKeyMeta[]>('/api/v1/chats/embed-api-keys')
+  },
+  revoke(keyId: number) {
+    return http.delete(`/api/v1/chats/embed-api-keys/${keyId}`)
   },
 }

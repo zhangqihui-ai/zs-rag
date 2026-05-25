@@ -19,6 +19,8 @@ const props = defineProps<{
   fileName: string
   fileExt: string | null
   mimeType: string | null
+  /** PDF iframe 预览时跳转到指定页（1-based） */
+  initialPage?: number | null
 }>()
 
 const loading = ref(true)
@@ -53,7 +55,12 @@ async function load() {
     if (ext === 'pdf') {
       const mime = blob.type || props.mimeType || 'application/pdf'
       const toOpen = blob.type ? blob : new Blob([blob], { type: mime })
-      iframeUrl.value = URL.createObjectURL(toOpen)
+      let url = URL.createObjectURL(toOpen)
+      const page = props.initialPage
+      if (typeof page === 'number' && Number.isFinite(page) && page >= 1) {
+        url += `#page=${Math.round(page)}`
+      }
+      iframeUrl.value = url
       mode.value = 'iframe'
       return
     }
@@ -71,7 +78,7 @@ onMounted(() => {
 })
 
 watch(
-  () => [props.kbId, props.documentId, props.fileName, props.fileExt],
+  () => [props.kbId, props.documentId, props.fileName, props.fileExt, props.initialPage],
   () => {
     void load()
   },

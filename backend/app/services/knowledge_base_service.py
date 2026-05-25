@@ -5,9 +5,14 @@ from datetime import datetime, timezone
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
+from app.core.embedding_gateway import probe_embedding_dimension
 from app.core.errors import AppError
+from app.core.kb_type import KB_TYPE_LIGHTRAG
 from app.models.knowledge_base import KnowledgeBase, KnowledgeChunk, KnowledgeDocument, Neo4jConnection
 from app.models.model_management import AIModel, AIModelDefault
+
+# 历史遗留占位：OpenAI text-embedding-ada-002 等常见模型维度；新建库应通过 embedding 探测写入。
+FALLBACK_MILVUS_DIMENSION = 1536
 
 
 def build_collection_name(space_id: int, kb_id: int) -> str:
@@ -71,13 +76,49 @@ def build_deleted_knowledge_base_name(original: str, kb_id: int) -> str:
     return f"{base[:keep]}{suffix}"
 
 
-def ensure_knowledge_base_milvus_fields(knowledge_base: KnowledgeBase) -> None:
+def resolve_knowledge_base_milvus_dimension(
+    db: Session,
+    *,
+    knowledge_base: KnowledgeBase,
+    persist: bool = True,
+) -> int:
+    """按知识库绑定（或企业空间默认）的 embedding 模型探测向量维度。"""
+    model = get_embedding_model_for_knowledge_base(db, knowledge_base=knowledge_base)
+    dimension = probe_embedding_dimension(model)
+    if knowledge_base.milvus_dimension != dimension:
+        knowledge_base.milvus_dimension = dimension
+        if persist:
+            db.commit()
+            db.refresh(knowledge_base)
+        else:
+            db.flush()
+    return dimension
+
+
+def ensure_knowledge_base_milvus_fields(db: Session, knowledge_base: KnowledgeBase) -> None:
     if not knowledge_base.milvus_collection_name:
-        knowledge_base.milvus_collection_name = build_collection_name(knowledge_base.enterprise_space_id, knowledge_base.id)
-    if not knowledge_base.milvus_dimension or knowledge_base.milvus_dimension <= 0:
-        knowledge_base.milvus_dimension = 1536
+        knowledge_base.milvus_collection_name = build_collection_name(
+            knowledge_base.enterprise_space_id,
+            knowledge_base.id,
+        )
     if not knowledge_base.milvus_metric_type:
         knowledge_base.milvus_metric_type = "COSINE"
+    needs_dimension = (
+        not knowledge_base.milvus_dimension or knowledge_base.milvus_dimension <= 0
+    )
+    if needs_dimension and (
+        knowledge_base.vector_db_enabled or knowledge_base.kb_type == KB_TYPE_LIGHTRAG
+    ):
+        try:
+            resolve_knowledge_base_milvus_dimension(
+                db,
+                knowledge_base=knowledge_base,
+                persist=False,
+            )
+        except AppError:
+            knowledge_base.milvus_dimension = FALLBACK_MILVUS_DIMENSION
+    elif needs_dimension:
+        knowledge_base.milvus_dimension = FALLBACK_MILVUS_DIMENSION
 
 
 def get_neo4j_connection_or_error(db: Session, *, knowledge_base_id: int) -> Neo4jConnection:
@@ -129,6 +170,21 @@ def get_embedding_model_for_knowledge_base(
     return model
 
 
+def format_ai_model_for_log(model: AIModel, *, role: str) -> str:
+    """生成解析/入库日志中展示的模型一行说明。"""
+    prov_name = ""
+    if model.provider is not None:
+        prov_name = (
+            getattr(model.provider, "provider_name", None)
+            or getattr(model.provider, "provider_code", None)
+            or ""
+        )
+    label = (model.model_name or model.model_code or "").strip() or f"id={model.id}"
+    if prov_name:
+        return f"{role}：{label}（{prov_name}）"
+    return f"{role}：{label}"
+
+
 def get_knowledge_base_stats(db: Session, *, knowledge_base: KnowledgeBase) -> dict[str, int]:
     document_total = db.execute(
         select(func.count(KnowledgeDocument.id)).where(
@@ -139,13 +195,13 @@ def get_knowledge_base_stats(db: Session, *, knowledge_base: KnowledgeBase) -> d
     indexed_document_total = db.execute(
         select(func.count(KnowledgeDocument.id)).where(
             KnowledgeDocument.knowledge_base_id == knowledge_base.id,
-            KnowledgeDocument.status == "indexed",
+            KnowledgeDocument.status.in_(("indexed", "graph_indexed")),
         )
     ).scalar_one()
     failed_document_total = db.execute(
         select(func.count(KnowledgeDocument.id)).where(
             KnowledgeDocument.knowledge_base_id == knowledge_base.id,
-            KnowledgeDocument.status == "failed",
+            KnowledgeDocument.status.in_(("failed", "graph_failed")),
         )
     ).scalar_one()
     chunk_total = db.execute(

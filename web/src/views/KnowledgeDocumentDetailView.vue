@@ -42,13 +42,15 @@
             </header>
             <div class="doc-split-pane-body">
               <DocumentPdfMineruLayout
-                v-if="showPdfMineruSync"
+                v-if="isPdfDocument"
                 ref="pdfMineruLayoutRef"
                 :kb-id="kbId"
                 :document-id="document.id"
                 :items="mineruContentList"
                 v-model="selectedMineruBlockIndex"
+                :citation-focus-index="citationFocusMineruIndex"
                 @page-change="onPdfMineruPageChange"
+                @ready="onPdfViewerReady"
               />
               <DocumentOriginalPreview
                 v-else
@@ -57,6 +59,7 @@
                 :file-name="document.file_name"
                 :file-ext="document.file_ext"
                 :mime-type="document.mime_type"
+                :initial-page="focusedPageNo"
               />
             </div>
           </section>
@@ -180,7 +183,12 @@
                       @keydown.enter.prevent="selectMineruBlock(ent.index)"
                     >
                       <span class="doc-mineru-block-type">{{ String(ent.item.type || 'text') }}</span>
-                      <pre class="doc-mineru-block-text">{{ mineruBlockPlainText(ent.item) }}</pre>
+                      <div
+                        v-if="mineruBlockIsTableRenderable(ent.item)"
+                        class="doc-mineru-table-wrap"
+                        v-html="mineruBlockTableHtml(ent.item)"
+                      />
+                      <pre v-else class="doc-mineru-block-text">{{ mineruBlockPlainText(ent.item) }}</pre>
                     </div>
                   </section>
                 </div>
@@ -199,6 +207,12 @@
               <template v-else>
                 <div v-if="!hasChunksAvailable" class="doc-split-empty doc-split-empty-fill">
                   <p v-if="document.status === 'indexed' && document.chunk_count === 0">暂无切片数据。</p>
+                  <p v-else-if="document.status === 'graph_indexed' && isLightragKb && document.chunk_count === 0">
+                    图知识库已完成图谱入库，但暂无分块记录；PDF/图片可切换至「Markdown / JSON」查看 MinerU 解析结果。
+                  </p>
+                  <p v-else-if="document.status === 'graph_indexing' || document.status === 'parsing'">
+                    解析或图谱入库进行中，请稍候…
+                  </p>
                   <p v-else>请先完成「开始解析」并等待索引完成后再查看切片。</p>
                 </div>
 
@@ -216,6 +230,7 @@
                           v-for="chunk in chunkItems"
                           :key="chunk.id"
                           class="doc-chunk-card"
+                          :class="{ 'doc-chunk-card--focused': chunk.chunk_index === focusedChunkIndex }"
                           :data-page-no="chunkPageNoAttr(chunk)"
                           :data-chunk-index="chunk.chunk_index"
                         >
@@ -230,12 +245,17 @@
                                 <span
                                   :class="['doc-chunk-vec', chunk.vector_status === 'indexed' ? 'indexed' : 'pending']"
                                 >
-                                  {{ chunk.vector_status === 'indexed' ? '已向量化' : '待向量' }}
+                                  {{ chunkVectorLabel(chunk) }}
                                 </span>
                               </div>
                             </div>
                           </div>
-                          <p class="doc-chunk-body">{{ chunkDisplayText(chunk) }}</p>
+                          <div
+                            v-if="chunkTableHtmlForDisplay(chunk)"
+                            class="doc-chunk-table-wrap"
+                            v-html="chunkTableHtmlForDisplay(chunk)"
+                          />
+                          <p v-else class="doc-chunk-body">{{ chunkDisplayText(chunk) }}</p>
                         </article>
                       </div>
                     </ScrollRowWithVSlider>
@@ -267,7 +287,8 @@ import DocumentOriginalPreview from '../components/DocumentOriginalPreview.vue'
 const DocumentPdfMineruLayout = defineAsyncComponent(() => import('../components/DocumentPdfMineruLayout.vue'))
 import Layout from '../components/Layout.vue'
 import ScrollRowWithVSlider from '../components/ScrollRowWithVSlider.vue'
-import { groupMineruItemsByPage, mineruBlockPlainText, type MineruContentItem } from '../lib/mineruContentDisplay'
+import { groupMineruItemsByPage, chunkTableHtml, mineruBlockPlainText, mineruBlockTableHtml, mineruBlockIsTableRenderable, shouldShowMineruBlock, type MineruContentItem } from '../lib/mineruContentDisplay'
+import { findMineruBlockForChunk, parseRouteFocusInt } from '../lib/documentCitationFocus'
 
 const route = useRoute()
 
@@ -302,14 +323,22 @@ const mineruJsonLoaded = ref(false)
 
 const mineruContentList = ref<MineruContentItem[]>([])
 const selectedMineruBlockIndex = ref<number | null>(null)
+const focusedChunkIndex = ref<number | null>(null)
+const focusedPageNo = ref<number | null>(null)
+const citationFocusMineruIndex = ref<number | null>(null)
+const focusedChunkData = ref<KnowledgeChunk | null>(null)
+let citationFocusApplying = false
 
 const docSplitRootRef = ref<HTMLElement | null>(null)
 const isDocSplitFullscreen = ref(false)
 
 /** MinerU 左侧 PDF：供切片列表联动翻页 */
 const pdfMineruLayoutRef = ref<{
+  whenReady: () => Promise<void>
+  goToCitationPage: (page: number, blockIndex?: number | null) => Promise<void>
   goToPage: (n: number) => Promise<void>
   getPageNum: () => number
+  focusBlock: (index: number | null) => Promise<void>
 } | null>(null)
 const chunkScrollSliderRef = ref<{
   getScrollEl: () => HTMLElement | null
@@ -375,12 +404,35 @@ onUnmounted(() => {
   doc.removeEventListener('webkitfullscreenchange', syncDocSplitFullscreen)
 })
 
+const isLightragKb = computed(() => knowledgeBase.value?.kb_type === 'lightrag')
+
+const usesGraphSegmentPreview = computed(() => {
+  if (!isLightragKb.value || document.value?.status !== 'graph_indexed' || !mineruViewEnabled.value) {
+    return false
+  }
+  return mineruContentList.value.some(shouldShowMineruBlock)
+})
+
+const usesLightragChunkList = computed(() => {
+  const d = document.value
+  if (!d || !isLightragKb.value) {
+    return false
+  }
+  return d.status === 'graph_indexed' && d.chunk_count > 0 && !usesGraphSegmentPreview.value
+})
+
 const hasChunksAvailable = computed(() => {
   const d = document.value
   if (!d) {
     return false
   }
-  return d.status === 'indexed' && d.chunk_count > 0
+  if (d.status === 'indexed' && d.chunk_count > 0) {
+    return true
+  }
+  if (usesLightragChunkList.value) {
+    return true
+  }
+  return usesGraphSegmentPreview.value
 })
 
 function docMetadata(): Record<string, unknown> | null {
@@ -388,29 +440,35 @@ function docMetadata(): Record<string, unknown> | null {
   return m && typeof m === 'object' ? (m as Record<string, unknown>) : null
 }
 
-const mineruViewEnabled = computed(() => {
+const parseViewEnabled = computed(() => {
   const d = document.value
   if (!d) {
     return false
   }
-  if (d.parser_type === 'mineru') {
-    return true
+  if (d.parser_type === 'mineru' || d.parser_type === 'pdf') {
+    const meta = docMetadata()
+    const backend = meta?.parser_backend
+    if (backend === 'mineru' || backend === 'opendataloader') {
+      return true
+    }
   }
   const meta = docMetadata()
-  return meta?.parser_backend === 'mineru'
+  return meta?.parser_backend === 'mineru' || meta?.parser_backend === 'opendataloader'
 })
 
-const mineruViewDisabledTitle = '仅 MinerU 解析的 PDF / 图片可使用 Markdown 与 JSON 视图'
+const parseViewDisabledTitle = '仅 PDF/图片解析引擎输出的文档可使用 Markdown 与 JSON 视图'
 
-const showPdfMineruSync = computed(() => {
+const mineruViewEnabled = parseViewEnabled
+const mineruViewDisabledTitle = parseViewDisabledTitle
+
+const showPdfMineruSync = computed(() => isPdfDocument.value && mineruContentList.value.length > 0)
+
+const isPdfDocument = computed(() => {
   const d = document.value
   if (!d) {
     return false
   }
-  if ((d.file_ext || '').toLowerCase() !== 'pdf') {
-    return false
-  }
-  return mineruContentList.value.length > 0
+  return (d.file_ext || '').toLowerCase() === 'pdf'
 })
 
 function chunkPageNoAttr(chunk: KnowledgeChunk): string | undefined {
@@ -453,7 +511,7 @@ function pickVisibleChunkPageNo(container: HTMLElement): number | null {
 }
 
 function onChunkListScroll() {
-  if (!showPdfMineruSync.value || rightView.value !== 'chunks') {
+  if (!isPdfDocument.value || rightView.value !== 'chunks') {
     return
   }
   if (ignoreChunkScrollForPdf) {
@@ -484,7 +542,7 @@ function onChunkListScroll() {
 }
 
 async function onPdfMineruPageChange(page: number) {
-  if (!showPdfMineruSync.value || rightView.value !== 'chunks') {
+  if (!isPdfDocument.value || rightView.value !== 'chunks') {
     return
   }
   if (ignorePdfPageForChunkScroll) {
@@ -510,10 +568,10 @@ const mineruMarkdownPages = computed(() => groupMineruItemsByPage(mineruContentL
 
 const rightPaneTitle = computed(() => {
   if (rightView.value === 'markdown') {
-    return 'MinerU · Markdown'
+    return '解析 · Markdown'
   }
   if (rightView.value === 'json') {
-    return 'MinerU · JSON'
+    return '解析 · JSON'
   }
   return '切片结果'
 })
@@ -523,10 +581,16 @@ const rightPaneSub = computed(() => {
     if (mineruMarkdownPages.value.length) {
       return '按 content_list 分页展示；点击左侧 PDF 色块或右侧段落可双向联动高亮'
     }
-    return '与 MinerU 返回的 md_content 一致（侧车文件 mineru_markdown.md）'
+    return '与解析引擎返回的 md_content 一致（侧车文件 mineru_markdown.md）'
   }
   if (rightView.value === 'json') {
-    return '与 MinerU 返回的 content_list 一致（侧车文件 mineru_content_list.json）'
+    return '与解析引擎返回的 content_list 一致（侧车文件 mineru_content_list.json）'
+  }
+  if (usesGraphSegmentPreview.value) {
+    return '图知识库使用 LightRAG 图谱索引；此处展示 PDF 解析段落供预览（非经典向量切片）'
+  }
+  if (usesLightragChunkList.value) {
+    return '图知识库 LightRAG 索引分块，用于实体抽取与图谱检索'
   }
   return '将用于嵌入和召回的切片段落'
 })
@@ -639,6 +703,19 @@ function formatFileSize(value: number | null) {
 function chunkKindLabel(chunk: KnowledgeChunk): string {
   const m = chunk.metadata
   if (m && typeof m === 'object') {
+    if ((m as { source?: string }).source === 'mineru_graph_preview') {
+      const typeMap: Record<string, string> = {
+        text: '文本',
+        title: '标题',
+        table: '表格',
+        image: '图片',
+        code: '代码',
+        list: '列表',
+        equation: '公式',
+      }
+      const t = String((m as { type?: string }).type || 'text').toLowerCase()
+      return typeMap[t] || t
+    }
     const block = (m as { block?: string }).block
     if (block === 'table') {
       return '表格'
@@ -648,6 +725,66 @@ function chunkKindLabel(chunk: KnowledgeChunk): string {
     }
   }
   return '文本'
+}
+
+function chunkVectorLabel(chunk: KnowledgeChunk): string {
+  const m = chunk.metadata
+  if (m && typeof m === 'object') {
+    const source = (m as { source?: string }).source
+    if (source === 'mineru_graph_preview' || source === 'lightrag_text_chunk') {
+      return '图谱索引'
+    }
+  }
+  return chunk.vector_status === 'indexed' ? '已向量化' : '待向量'
+}
+
+function buildGraphPreviewChunks(items: MineruContentItem[], documentId: number): KnowledgeChunk[] {
+  const now = new Date().toISOString()
+  const shown = items.filter(shouldShowMineruBlock)
+  return shown.map((item, index) => {
+    const text = mineruBlockPlainText(item)
+    const pageIdx = typeof item.page_idx === 'number' ? item.page_idx : 0
+    const preview = text.length > 240 ? `${text.slice(0, 240)}…` : text
+    return {
+      id: -(index + 1),
+      chunk_uid: `graph-preview-${documentId}-${index}`,
+      document_id: documentId,
+      chunk_index: index,
+      content: text,
+      content_preview: preview,
+      char_count: [...text].length,
+      token_count: null,
+      start_offset: null,
+      end_offset: null,
+      page_no: pageIdx + 1,
+      heading_path: null,
+      vector_status: 'indexed',
+      vector_id: null,
+      metadata: {
+        source: 'mineru_graph_preview',
+        type: item.type,
+        mineru_index: typeof item._index === 'number' ? item._index : index,
+      },
+      created_at: now,
+      updated_at: now,
+    }
+  })
+}
+
+function loadGraphPreviewChunksPage() {
+  if (!document.value) {
+    chunkItems.value = []
+    chunkTotal.value = 0
+    return
+  }
+  let all = buildGraphPreviewChunks(mineruContentList.value, document.value.id)
+  const kw = chunkKeyword.value.trim()
+  if (kw) {
+    all = all.filter((chunk) => chunk.content.includes(kw))
+  }
+  chunkTotal.value = all.length
+  const start = (chunkPage.value - 1) * chunkPageSize.value
+  chunkItems.value = all.slice(start, start + chunkPageSize.value)
 }
 
 function chunkCharCount(chunk: KnowledgeChunk): number {
@@ -667,6 +804,10 @@ function chunkDisplayText(chunk: KnowledgeChunk): string {
     return t.length > 400 ? `${t.slice(0, 400)}…` : t
   }
   return chunk.content
+}
+
+function chunkTableHtmlForDisplay(chunk: KnowledgeChunk): string {
+  return chunkTableHtml(chunk, mineruContentList.value)
 }
 
 function applyChunkKeyword() {
@@ -717,8 +858,12 @@ async function loadPage() {
     selectedMineruBlockIndex.value = null
     const d = document.value
     const meta = d?.metadata && typeof d.metadata === 'object' ? (d.metadata as Record<string, unknown>) : null
-    const isMineru = d?.parser_type === 'mineru' || meta?.parser_backend === 'mineru'
-    if (d && isMineru) {
+    const isParseViewDoc =
+      d?.parser_type === 'mineru' ||
+      d?.parser_type === 'pdf' ||
+      meta?.parser_backend === 'mineru' ||
+      meta?.parser_backend === 'opendataloader'
+    if (d && isParseViewDoc) {
       try {
         const raw = await knowledgeBaseApi.getDocumentMineruContentListText(kbId.value, docId.value)
         mineruContentList.value = JSON.parse(raw) as MineruContentItem[]
@@ -727,7 +872,17 @@ async function loadPage() {
       }
     }
     if (hasChunksAvailable.value) {
+      await resolveCitationFocusChunk()
+      const chunkTotalHint = usesGraphSegmentPreview.value
+        ? mineruContentList.value.filter(shouldShowMineruBlock).length
+        : d.chunk_count
+      if (focusedChunkIndex.value != null && chunkTotalHint > 0) {
+        chunkPage.value = desiredPageForChunkIndex(focusedChunkIndex.value, chunkTotalHint)
+      }
       await loadChunks()
+    } else {
+      await resolveCitationFocusChunk()
+      await applyCitationFocus()
     }
   } catch (value) {
     error.value = getKnowledgeBaseErrorMessage(value, '加载失败')
@@ -743,54 +898,175 @@ async function loadChunks() {
   chunksLoading.value = true
   chunksError.value = ''
   try {
-    const data = await knowledgeBaseApi.listChunks(kbId.value, docId.value, {
-      page: chunkPage.value,
-      page_size: chunkPageSize.value,
-      keyword: chunkKeyword.value || undefined,
-    })
-    chunkItems.value = data.items
-    chunkTotal.value = data.total
+    if (usesGraphSegmentPreview.value) {
+      loadGraphPreviewChunksPage()
+    } else {
+      const data = await knowledgeBaseApi.listChunks(kbId.value, docId.value, {
+        page: chunkPage.value,
+        page_size: chunkPageSize.value,
+        keyword: chunkKeyword.value || undefined,
+      })
+      chunkItems.value = data.items
+      chunkTotal.value = data.total
+    }
   } catch (value) {
     chunksError.value = getKnowledgeBaseErrorMessage(value, '加载切片失败')
     chunkItems.value = []
     chunkTotal.value = 0
   } finally {
     chunksLoading.value = false
-    void syncRouteFocusChunk()
+    void applyCitationFocus()
   }
 }
 
-function desiredPageForChunkIndex(idx: number): number {
-  if (chunkTotal.value <= 0) {
+function desiredPageForChunkIndex(idx: number, total = chunkTotal.value): number {
+  if (total <= 0) {
     return 1
   }
-  const pages = Math.max(1, Math.ceil(chunkTotal.value / chunkPageSize.value))
+  const pages = Math.max(1, Math.ceil(total / chunkPageSize.value))
   return Math.min(pages, Math.floor(idx / chunkPageSize.value) + 1)
 }
 
-async function syncRouteFocusChunk() {
-  const raw = route.query.focus_chunk_index
-  if (raw == null || Array.isArray(raw) || rightView.value !== 'chunks') {
-    return
+function hasCitationFocusQuery(): boolean {
+  return (
+    route.query.focus_chunk_index != null ||
+    route.query.focus_page_no != null ||
+    route.query.focus_chunk_id != null
+  )
+}
+
+function onPdfViewerReady() {
+  if (hasCitationFocusQuery()) {
+    void applyCitationFocus()
   }
-  const target = Number(raw)
-  if (!Number.isFinite(target)) {
-    return
-  }
-  if (chunkTotal.value > 0) {
-    const wantPage = desiredPageForChunkIndex(target)
-    if (wantPage !== chunkPage.value) {
-      chunkPage.value = wantPage
-      return
-    }
+}
+
+async function scrollFocusedChunkIntoView(retry = 0): Promise<boolean> {
+  if (focusedChunkIndex.value == null) {
+    return true
   }
   await nextTick()
+  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
   const el = getChunkListScrollEl()
-  const card = el?.querySelector<HTMLElement>(`.doc-chunk-card[data-chunk-index="${target}"]`)
+  const card = el?.querySelector<HTMLElement>(
+    `.doc-chunk-card[data-chunk-index="${focusedChunkIndex.value}"]`,
+  )
   if (card) {
-    card.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
-    card.classList.add('doc-chunk-card--flash')
-    window.setTimeout(() => card.classList.remove('doc-chunk-card--flash'), 2200)
+    card.scrollIntoView({ behavior: 'auto', block: 'center' })
+    return true
+  }
+  if (retry < 12) {
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 100))
+    return scrollFocusedChunkIntoView(retry + 1)
+  }
+  return false
+}
+
+async function focusPdfOnCitation(page: number | null, blockIdx: number | null) {
+  if (page == null || page < 1 || !isPdfDocument.value) {
+    return
+  }
+  const pdf = pdfMineruLayoutRef.value
+  if (!pdf?.goToCitationPage) {
+    return
+  }
+  await pdf.whenReady()
+  if (blockIdx != null) {
+    citationFocusMineruIndex.value = blockIdx
+    selectedMineruBlockIndex.value = blockIdx
+  }
+  await pdf.goToCitationPage(page, blockIdx)
+}
+
+function resetCitationFocusState() {
+  focusedChunkIndex.value = null
+  focusedPageNo.value = null
+  citationFocusMineruIndex.value = null
+  focusedChunkData.value = null
+  selectedMineruBlockIndex.value = null
+}
+
+function readCitationFocusFromRoute() {
+  focusedChunkIndex.value = parseRouteFocusInt(route.query.focus_chunk_index)
+  focusedPageNo.value = parseRouteFocusInt(route.query.focus_page_no)
+}
+
+async function resolveCitationFocusChunk() {
+  readCitationFocusFromRoute()
+  const chunkId = parseRouteFocusInt(route.query.focus_chunk_id)
+  if (chunkId == null || Number.isNaN(kbId.value)) {
+    return
+  }
+  try {
+    const chunk = await knowledgeBaseApi.getChunk(kbId.value, chunkId)
+    focusedChunkData.value = chunk
+    if (focusedChunkIndex.value == null) {
+      focusedChunkIndex.value = chunk.chunk_index
+    }
+    if (focusedPageNo.value == null && chunk.page_no != null) {
+      focusedPageNo.value = chunk.page_no
+    }
+  } catch {
+    /* 引文切片可能已删除，仍尝试按 index / page 定位 */
+  }
+}
+
+function focusedChunkInCurrentList(): KnowledgeChunk | null {
+  if (focusedChunkIndex.value == null) {
+    return focusedChunkData.value
+  }
+  const hit = chunkItems.value.find((c) => c.chunk_index === focusedChunkIndex.value)
+  return hit ?? focusedChunkData.value
+}
+
+async function applyCitationFocus() {
+  if (citationFocusApplying) {
+    return
+  }
+  if (focusedChunkIndex.value == null && focusedPageNo.value == null) {
+    return
+  }
+  if (loading.value || !document.value) {
+    return
+  }
+
+  citationFocusApplying = true
+  try {
+    rightView.value = 'chunks'
+    chunkDisplayMode.value = 'full'
+    chunkKeyword.value = ''
+    chunkKeywordInput.value = ''
+
+    const chunkTotalHint = document.value.chunk_count || chunkTotal.value
+    if (focusedChunkIndex.value != null && chunkTotalHint > 0) {
+      const wantPage = desiredPageForChunkIndex(focusedChunkIndex.value, chunkTotalHint)
+      if (hasChunksAvailable.value && wantPage !== chunkPage.value) {
+        chunkPage.value = wantPage
+        return
+      }
+    }
+
+    if (chunksLoading.value) {
+      return
+    }
+
+    await nextTick()
+
+    const chunk = focusedChunkInCurrentList()
+    const page =
+      focusedPageNo.value ??
+      (chunk?.page_no != null && Number.isFinite(chunk.page_no) ? chunk.page_no : null)
+
+    await scrollFocusedChunkIntoView()
+
+    let blockIdx: number | null = null
+    if (chunk && mineruContentList.value.length > 0) {
+      blockIdx = findMineruBlockForChunk(chunk, mineruContentList.value)
+    }
+
+    await focusPdfOnCitation(page, blockIdx)
+  } finally {
+    citationFocusApplying = false
   }
 }
 
@@ -803,6 +1079,7 @@ watch(
     chunkItems.value = []
     chunkTotal.value = 0
     chunksError.value = ''
+    resetCitationFocusState()
     resetMineruViewCache()
     void loadPage()
   },
@@ -827,11 +1104,20 @@ watch([selectedMineruBlockIndex, rightView], async ([idx, rv]) => {
 })
 
 watch(
-  () => route.query.focus_chunk_index,
+  () => [route.query.focus_chunk_index, route.query.focus_page_no, route.query.focus_chunk_id],
   () => {
-    void syncRouteFocusChunk()
+    void (async () => {
+      await resolveCitationFocusChunk()
+      await applyCitationFocus()
+    })()
   },
 )
+
+watch(isPdfDocument, (pdf) => {
+  if (pdf && hasCitationFocusQuery()) {
+    void applyCitationFocus()
+  }
+})
 </script>
 
 <style scoped>
@@ -1174,6 +1460,130 @@ watch(
   word-break: break-word;
 }
 
+.doc-mineru-table-wrap,
+.doc-chunk-table-wrap {
+  margin-top: 6px;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-primary);
+  -webkit-overflow-scrolling: touch;
+}
+
+.doc-mineru-table-wrap :deep(table),
+.doc-chunk-table-wrap :deep(table) {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: auto;
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.doc-mineru-table-wrap :deep(th),
+.doc-mineru-table-wrap :deep(td),
+.doc-chunk-table-wrap :deep(th),
+.doc-chunk-table-wrap :deep(td) {
+  border: 1px solid var(--border-color);
+  padding: 8px 10px;
+  vertical-align: middle;
+  white-space: nowrap;
+  word-break: keep-all;
+  overflow-wrap: normal;
+  hyphens: none;
+  min-width: 2.8em;
+  max-width: 240px;
+}
+
+.doc-mineru-table-wrap :deep(th),
+.doc-chunk-table-wrap :deep(th) {
+  background: var(--bg-secondary);
+  font-weight: 600;
+  text-align: center;
+  white-space: normal;
+  line-height: 1.35;
+  min-width: 3.2em;
+}
+
+.doc-mineru-table-wrap :deep(thead th),
+.doc-chunk-table-wrap :deep(thead th) {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  box-shadow: 0 1px 0 var(--border-color);
+}
+
+.doc-mineru-table-wrap :deep(tr:nth-child(even) td),
+.doc-chunk-table-wrap :deep(tr:nth-child(even) td) {
+  background: color-mix(in srgb, var(--accent-soft, #eef4ff) 35%, transparent);
+}
+
+.doc-mineru-table-wrap :deep(td),
+.doc-chunk-table-wrap :deep(td) {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.doc-mineru-table-wrap :deep(td:first-child),
+.doc-mineru-table-wrap :deep(th:first-child),
+.doc-chunk-table-wrap :deep(td:first-child),
+.doc-chunk-table-wrap :deep(th:first-child) {
+  text-align: left;
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--bg-primary);
+  box-shadow: 2px 0 4px color-mix(in srgb, var(--border-color) 60%, transparent);
+}
+
+.doc-mineru-table-wrap :deep(thead th:first-child),
+.doc-chunk-table-wrap :deep(thead th:first-child),
+.doc-mineru-table-wrap :deep(table > tr:first-child > td:first-child),
+.doc-chunk-table-wrap :deep(table > tr:first-child > td:first-child) {
+  z-index: 4;
+}
+
+.doc-mineru-table-wrap :deep(tr:nth-child(even) td:first-child),
+.doc-chunk-table-wrap :deep(tr:nth-child(even) td:first-child) {
+  background: color-mix(in srgb, var(--accent-soft, #eef4ff) 35%, var(--bg-primary));
+}
+
+/* MinerU HTML 表头常为 td + rowspan，前两行按表头样式 */
+.doc-mineru-table-wrap :deep(table > tr:nth-child(-n+2) > td),
+.doc-mineru-table-wrap :deep(table > tbody > tr:nth-child(-n+2) > td),
+.doc-chunk-table-wrap :deep(table > tr:nth-child(-n+2) > td),
+.doc-chunk-table-wrap :deep(table > tbody > tr:nth-child(-n+2) > td) {
+  background: var(--bg-secondary);
+  font-weight: 600;
+  text-align: center;
+  white-space: normal;
+  line-height: 1.35;
+}
+
+.doc-mineru-table-wrap :deep(table > tr:nth-child(-n+2) > td:first-child),
+.doc-mineru-table-wrap :deep(table > tbody > tr:nth-child(-n+2) > td:first-child),
+.doc-chunk-table-wrap :deep(table > tr:nth-child(-n+2) > td:first-child),
+.doc-chunk-table-wrap :deep(table > tbody > tr:nth-child(-n+2) > td:first-child) {
+  background: var(--bg-secondary);
+}
+
+.doc-mineru-table-wrap :deep(table > tr:first-child > td),
+.doc-mineru-table-wrap :deep(table > tr:first-child > th),
+.doc-mineru-table-wrap :deep(table > tbody > tr:first-child > td),
+.doc-mineru-table-wrap :deep(table > tbody > tr:first-child > th),
+.doc-chunk-table-wrap :deep(table > tr:first-child > td),
+.doc-chunk-table-wrap :deep(table > tr:first-child > th),
+.doc-chunk-table-wrap :deep(table > tbody > tr:first-child > td),
+.doc-chunk-table-wrap :deep(table > tbody > tr:first-child > th) {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  box-shadow: 0 1px 0 var(--border-color);
+}
+
 .doc-mineru-md-pre {
   margin: 0;
   padding: 18px 20px;
@@ -1303,6 +1713,19 @@ watch(
   border-radius: 14px;
   border: 1px solid var(--border-color);
   background: var(--bg-tertiary);
+}
+
+.doc-chunk-card--focused {
+  border-color: rgba(245, 158, 11, 0.75);
+  background: rgba(254, 243, 199, 0.45);
+  box-shadow:
+    0 0 0 2px rgba(245, 158, 11, 0.28),
+    inset 4px 0 0 #f59e0b;
+}
+
+.doc-chunk-card--focused .doc-chunk-title-line {
+  color: #b45309;
+  font-weight: 700;
 }
 
 .doc-chunk-card--flash {

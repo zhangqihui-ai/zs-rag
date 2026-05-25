@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -60,6 +61,62 @@ class ParsedDocument:
     char_count: int
     segments: list[ParsedSegment]
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+# 索引前安全阈值：兜底解析易把 PDF 流里的字面量拼成超长乱码
+MAX_INDEXABLE_DOCUMENT_CHARS = 3_000_000
+PDF_FALLBACK_SUSPICIOUS_CHARS = 80_000
+
+
+def _cjk_ratio(sample: str) -> float:
+    if not sample:
+        return 0.0
+    cjk = sum(1 for ch in sample if "\u4e00" <= ch <= "\u9fff")
+    return cjk / len(sample)
+
+
+def validate_parsed_document_for_indexing(parsed: ParsedDocument) -> None:
+    """拒绝明显无效的解析结果，避免对乱码做上万次分块与向量化。"""
+    text = (parsed.text or "").strip()
+    if not text:
+        return
+
+    length = len(text)
+    meta = parsed.metadata or {}
+    backend = str(meta.get("parser_backend") or "")
+
+    if length > MAX_INDEXABLE_DOCUMENT_CHARS:
+        raise UnsupportedDocumentError(
+            f"解析文本过长（约 {length:,} 字符），疑似误提取了 PDF 内部数据而非正文。"
+            "请在 .env 中设置 MINERU_ENABLED=true 并启动 mineru 服务后重新解析，"
+            "或提供可选中文本的 PDF。"
+        )
+
+    sample = text[: min(length, 80_000)]
+    cjk_ratio = _cjk_ratio(sample)
+
+    if backend == "pypdf_fallback":
+        if length > PDF_FALLBACK_SUSPICIOUS_CHARS and cjk_ratio < 0.08:
+            raise UnsupportedDocumentError(
+                "PDF 通过兜底方式提取的正文疑似乱码（中文占比过低且文本极长）。"
+                "该文件可能为扫描件或复杂版式，请在 .env 中设置 MINERU_ENABLED=true "
+                "并启动 mineru 服务后重新解析。"
+            )
+        if length > 30_000 and len(parsed.segments) <= 1 and cjk_ratio < 0.12:
+            raise UnsupportedDocumentError(
+                "PDF 兜底解析得到单段超长文本且中文占比偏低，无法可靠分块。"
+                "请启用 MinerU 解析（MINERU_ENABLED=true）后重试。"
+            )
+        if length > 20_000 and cjk_ratio < 0.02:
+            raise UnsupportedDocumentError(
+                "PDF 兜底解析未得到有效中文正文，请启用 MinerU 后重新解析。"
+            )
+
+    if parsed.parser_type == "pdf" and length > 500_000 and cjk_ratio < 0.05:
+        raise UnsupportedDocumentError(
+            "PDF 解析文本过长且中文占比异常，可能未正确提取正文。"
+            "请启用 MinerU（MINERU_ENABLED=true）后重新解析。"
+        )
 
 
 def _decode_text_content(file_bytes: bytes) -> str:
@@ -174,37 +231,77 @@ def _parse_pdf(
     file_bytes: bytes,
     *,
     file_name: str | None = None,
+    pdf_parser: str | None = None,
+    pdf_parser_hybrid: bool | None = None,
     log: Callable[[str], None] | None = None,
 ) -> ParsedDocument:
-    # 优先交给 MinerU（若启用且可达）；失败时降级到本地 pypdf 兜底
-    try:
-        from app.core.mineru_gateway import MineruUnavailableError, get_mineru_gateway
-    except Exception:  # pragma: no cover
-        MineruUnavailableError = Exception  # type: ignore[assignment]
-        get_mineru_gateway = None  # type: ignore[assignment]
-    if get_mineru_gateway is not None:
-        gw = get_mineru_gateway()
-        if gw.should_handle("pdf"):
+    from app.core.opendataloader_gateway import (
+        OpenDataLoaderUnavailableError,
+        get_opendataloader_gateway,
+        resolve_pdf_parser,
+    )
+
+    resolved = (pdf_parser or resolve_pdf_parser(None)).strip().lower()
+    fname = file_name or "doc.pdf"
+
+    if resolved == "opendataloader":
+        odl = get_opendataloader_gateway()
+        if odl.is_enabled():
             try:
                 if log:
-                    log(f"使用 MinerU 解析 PDF（backend={gw.backend}, lang={gw.lang}）…")
-                result = gw.parse(file_bytes, file_name or "doc.pdf", log=log)
+                    log("使用 OpenDataLoader 解析 PDF…")
+                result = odl.parse(
+                    file_bytes,
+                    fname,
+                    use_hybrid=pdf_parser_hybrid,
+                    log=log,
+                )
                 if log:
-                    log("MinerU：正在映射为内部分段结构（标题路径、表格等）…")
+                    log("OpenDataLoader：正在映射为内部分段结构…")
                 doc = result.to_parsed_document()
                 m = dict(doc.metadata or {})
-                m["_mineru_markdown"] = result.markdown if result.markdown is not None else ""
-                m["_mineru_content_list"] = list(result.content_list)
+                m["_parse_markdown"] = result.markdown if result.markdown is not None else ""
+                m["_parse_content_list"] = result.to_content_list()
                 doc.metadata = m
                 if log:
                     log(
-                        f"MinerU：字符数 {doc.char_count}，分段 {len(doc.segments)}，"
+                        f"OpenDataLoader：字符数 {doc.char_count}，分段 {len(doc.segments)}，"
                         f"标题 {doc.metadata.get('heading_count')}，表格 {doc.metadata.get('table_count')}"
                     )
                 return doc
-            except MineruUnavailableError as e:
+            except OpenDataLoaderUnavailableError as e:
                 if log:
-                    log(f"MinerU 不可用，降级到 pypdf：{e}")
+                    log(f"OpenDataLoader 不可用，尝试其他解析器：{e}")
+
+    if resolved in {"opendataloader", "mineru"}:
+        try:
+            from app.core.mineru_gateway import MineruUnavailableError, get_mineru_gateway
+        except Exception:  # pragma: no cover
+            MineruUnavailableError = Exception  # type: ignore[assignment]
+            get_mineru_gateway = None  # type: ignore[assignment]
+        if get_mineru_gateway is not None and resolved == "mineru":
+            gw = get_mineru_gateway()
+            if gw.should_handle("pdf"):
+                try:
+                    if log:
+                        log(f"使用 MinerU 解析 PDF（backend={gw.backend}, lang={gw.lang}）…")
+                    result = gw.parse(file_bytes, fname, log=log)
+                    if log:
+                        log("MinerU：正在映射为内部分段结构（标题路径、表格等）…")
+                    doc = result.to_parsed_document()
+                    m = dict(doc.metadata or {})
+                    m["_parse_markdown"] = result.markdown if result.markdown is not None else ""
+                    m["_parse_content_list"] = list(result.content_list)
+                    doc.metadata = m
+                    if log:
+                        log(
+                            f"MinerU：字符数 {doc.char_count}，分段 {len(doc.segments)}，"
+                            f"标题 {doc.metadata.get('heading_count')}，表格 {doc.metadata.get('table_count')}"
+                        )
+                    return doc
+                except MineruUnavailableError as e:
+                    if log:
+                        log(f"MinerU 不可用，降级到 pypdf：{e}")
 
     if log:
         log("使用 pypdf 解析 PDF…")
@@ -317,8 +414,8 @@ def _parse_image(
     doc.parser_type = f"image.{suffix}"
     meta = dict(doc.metadata or {})
     meta["image_suffix"] = suffix
-    meta["_mineru_markdown"] = result.markdown if result.markdown is not None else ""
-    meta["_mineru_content_list"] = list(result.content_list)
+    meta["_parse_markdown"] = result.markdown if result.markdown is not None else ""
+    meta["_parse_content_list"] = list(result.content_list)
     doc.metadata = meta
     if log:
         log(
@@ -472,6 +569,8 @@ def build_table_segments_from_rows(
     offset_ref: list[int],
     parts: list[str],
     heading_path: str | None,
+    *,
+    table_body_html: str | None = None,
 ) -> list[ParsedSegment]:
     """
     通用"行 → 表格 ParsedSegment 列表"转换器：
@@ -514,11 +613,16 @@ def build_table_segments_from_rows(
                 "table_header": header,
                 "table_row_count": len(data_rows),
                 "heading_path": heading_path,
+                **({"table_body_html": table_body_html} if table_body_html else {}),
             },
         )
     )
     parts.append(overview)
     offset_ref[0] = end + 1
+
+    row_meta_base: dict[str, Any] = {}
+    if table_body_html:
+        row_meta_base["table_body_html"] = table_body_html
 
     for ri, cells in enumerate(data_rows):
         if header and len(cells) == len(header):
@@ -543,6 +647,7 @@ def build_table_segments_from_rows(
                     "table_row_index": ri,
                     "table_header": header,
                     "heading_path": heading_path,
+                    **row_meta_base,
                 },
             )
         )
@@ -821,10 +926,24 @@ def _parse_csv(file_bytes: bytes) -> ParsedDocument:
     )
 
 
+def _metadata_log_preview(metadata: dict | None, *, max_len: int = 800) -> str:
+    """日志用 metadata 摘要，排除 MinerU 侧车大字段避免 SSE 刷屏。"""
+    if not metadata:
+        return "{}"
+    slim = {k: v for k, v in metadata.items() if not str(k).startswith(("_mineru_", "_parse_"))}
+    preview = json.dumps(slim, ensure_ascii=False)
+    if len(preview) > max_len:
+        preview = preview[:max_len] + "…"
+    return preview
+
+
 def parse_document(
     file_name: str,
     file_bytes: bytes,
     log: Callable[[str], None] | None = None,
+    *,
+    pdf_parser: str | None = None,
+    pdf_parser_hybrid: bool | None = None,
 ) -> ParsedDocument:
     def _log(msg: str) -> None:
         if log:
@@ -857,8 +976,20 @@ def parse_document(
         return doc
 
     if suffix == "pdf":
-        doc = _parse_pdf(file_bytes, file_name=file_name, log=log)
-        _log(f"PDF：字符数 {doc.char_count}，分段 {len(doc.segments)}，元数据 {doc.metadata}")
+        doc = _parse_pdf(
+            file_bytes,
+            file_name=file_name,
+            pdf_parser=pdf_parser,
+            pdf_parser_hybrid=pdf_parser_hybrid,
+            log=log,
+        )
+        meta_for_log = {
+            k: v for k, v in (doc.metadata or {}).items() if not str(k).startswith(("_mineru_", "_parse_"))
+        }
+        meta_preview = json.dumps(meta_for_log, ensure_ascii=False)
+        if len(meta_preview) > 800:
+            meta_preview = meta_preview[:800] + "…"
+        _log(f"PDF：字符数 {doc.char_count}，分段 {len(doc.segments)}，元数据 {meta_preview}")
         return doc
 
     if suffix in _IMAGE_SUFFIXES:

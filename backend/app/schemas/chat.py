@@ -3,33 +3,54 @@ from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.core.knowledge_retrieval_defaults import DEFAULT_TOP_K
+
 
 class ChatStreamRequest(BaseModel):
     content: str = Field(..., min_length=1, description="用户本轮输入（纯文本）")
 
 
 class OpenAICompatMessage(BaseModel):
-    role: str
-    content: str
-
-
-class ChatCompletionsRequest(BaseModel):
-    """对齐 OpenAI Chat Completions 的常用字段，并扩展本系统的 chat_id / session_id / question。"""
+    """与 OpenAI Chat Completions messages 项对齐；content 可为字符串或多模态数组。"""
 
     model_config = ConfigDict(extra="ignore")
 
-    chat_id: str = Field(..., min_length=1)
-    session_id: str | None = None
-    stream: bool = False
+    role: str
+    content: str | list[dict[str, Any]] | None = None
+    name: str | None = None
+
+
+class ChatCompletionsRequest(BaseModel):
+    """
+    OpenAI Chat Completions 请求体（并扩展本系统字段）。
+
+    - 标准字段：model、messages、stream、temperature、max_tokens、top_p 等
+    - 扩展：chat_id（也可放在 URL 路径）、session_id（或 extra_body.session_id）、question（兼容旧客户端）
+    - extra_body：与 OpenAI Python SDK 一致，可携带 session_id 等扩展
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    chat_id: str | None = Field(default=None, description="对话 ID；路径型接口可省略")
+    session_id: str | None = Field(default=None, description="会话 ID；省略时在仅 chat_id 时自动建会话")
+    model: str | None = Field(default=None, description="请求中的模型名（回显用；实际推理以对话配置为准）")
     messages: list[OpenAICompatMessage] | None = None
-    question: str | None = None
+    stream: bool = False
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    max_tokens: int | None = Field(default=None, ge=1)
+    top_p: float | None = Field(default=None, ge=0.0, le=1.0)
+    question: str | None = Field(default=None, description="兼容字段：无 messages 时与历史合并")
+    extra_body: dict[str, Any] | None = Field(
+        default=None,
+        description="扩展参数（如 session_id、reference 等），与 OpenAI SDK extra_body 一致",
+    )
 
     @model_validator(mode="after")
     def need_messages_or_question(self) -> Self:
         has_m_raw = bool(self.messages and len(self.messages) > 0)
         has_q = bool(self.question and str(self.question).strip())
         if not has_m_raw and not has_q:
-            raise ValueError("必须提供 messages（至少一条）或 question")
+            raise ValueError("messages is required (at least one message) or provide question")
         return self
 
 
@@ -57,13 +78,17 @@ class ChatConfigurationBase(BaseModel):
         description="是否在问答中展示引文角标与来源列表（知识库检索开启时生效）。",
     )
     retrieval_top_k: int = Field(
-        default=8,
+        default=DEFAULT_TOP_K,
         ge=1,
         le=50,
         description=(
-            "与「知识检索」多库一致：合并后按分数取 Top K 条注入上下文；"
-            "各库内会先按该值放大召回候选再全局排序（见 search_knowledge_bases_multi）。"
+            "与知识库 default_top_k / 检索测试 Top K 一致："
+            "单库时即该库召回条数；多库时为合并排序后注入上下文的上限。"
         ),
+    )
+    lightrag_query_mode: str = Field(
+        default="mix",
+        description="图知识库 LightRAG 检索模式：naive/local/global/hybrid/mix",
     )
     temperature: float = Field(0.7, ge=0.0, le=2.0)
     max_tokens: int = Field(2000, ge=1)
@@ -131,7 +156,44 @@ class ChatConversationResponse(BaseModel):
     top_p: float = 1.0
     system_prompt: str | None = None
     show_citations: bool = True
-    retrieval_top_k: int = 8
+    retrieval_top_k: int = DEFAULT_TOP_K
 
     class Config:
         from_attributes = True
+
+
+class ChatEmbedApiKeyCreateBody(BaseModel):
+    """生成或轮换嵌入用 API Key。"""
+
+    regenerate: bool = Field(default=False, description="为 True 时吊销目标范围内已有密钥并签发新密钥")
+    conversation_id: str | None = Field(
+        default=None,
+        description="对话 ID；嵌入分享按对话签发独立密钥，便于复制即用",
+        max_length=36,
+    )
+    issue_new_for_share: bool = Field(
+        default=False,
+        description="为 True 时吊销该对话已有嵌入密钥并立即签发新密钥（用于再次获得可复制明文）",
+    )
+
+    @model_validator(mode="after")
+    def _issue_share_requires_conversation(self) -> Self:
+        if self.issue_new_for_share and not (self.conversation_id or "").strip():
+            raise ValueError("issue_new_for_share 必须提供 conversation_id")
+        return self
+
+
+class ChatEmbedApiKeyOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    key_prefix: str
+    created_at: datetime
+    conversation_id: str | None = None
+
+
+class ChatEmbedApiKeyCreateResponse(BaseModel):
+    created: bool = Field(description="本次是否新创建了密钥（轮换时也视为 True）")
+    api_key: str | None = Field(default=None, description="明文密钥，仅创建/轮换当次返回")
+    keys: list[ChatEmbedApiKeyOut] = Field(default_factory=list)
+    message: str | None = None

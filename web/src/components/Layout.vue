@@ -1,5 +1,11 @@
 <template>
-  <div class="app-layout" :class="{ 'sidebar-collapsed': appStore.sidebarCollapsed }">
+  <div
+    class="app-layout"
+    :class="{
+      'sidebar-collapsed': appStore.sidebarCollapsed,
+      'app-layout--chat-embed-panel': isChatEmbedPanel,
+    }"
+  >
     <aside class="app-sidebar">
       <div class="sidebar-brand">
         <div class="brand-content">
@@ -42,7 +48,10 @@
       </div>
     </aside>
 
-    <div class="app-main" :class="{ 'app-main--chat': isChatRoute }">
+    <div
+      class="app-main"
+      :class="{ 'app-main--chat': isChatRoute, 'app-main--chat-embed-panel': isChatEmbedPanel }"
+    >
       <header class="app-header">
         <div class="app-header-main">
           <div class="app-breadcrumb">
@@ -87,8 +96,20 @@
         </div>
       </header>
 
-      <main class="app-content" :class="{ 'app-content--chat': isChatRoute }">
-        <div class="app-content-inner" :class="{ 'app-content-inner--chat': isChatRoute }">
+      <main
+        class="app-content"
+        :class="{
+          'app-content--chat': isChatRoute,
+          'app-content--chat-embed-panel': isChatEmbedPanel,
+        }"
+      >
+        <div
+          class="app-content-inner"
+          :class="{
+            'app-content-inner--chat': isChatRoute,
+            'app-content-inner--chat-embed-panel': isChatEmbedPanel,
+          }"
+        >
           <slot />
         </div>
       </main>
@@ -144,6 +165,12 @@ const breadcrumbs = computed(() => {
 
 const userInitial = computed(() => (authStore.currentUser?.username || 'U').charAt(0).toUpperCase())
 const isChatRoute = computed(() => route.name === 'chat')
+/** iframe 嵌入：仅保留对话主区域，隐藏侧栏与顶栏 */
+const isChatEmbedPanel = computed(() => {
+  if (route.name !== 'chat') return false
+  const ep = route.query.embed_panel
+  return ep === '1' || ep === 'true'
+})
 const spaceWatchReady = ref(false)
 
 watch(
@@ -386,6 +413,23 @@ const handleLogout = () => {
 .space-spotlight-copy span {
   color: var(--text-tertiary);
   font-size: 0.8rem;
+}
+
+.app-layout.app-layout--chat-embed-panel .app-sidebar,
+.app-layout.app-layout--chat-embed-panel .app-header {
+  display: none !important;
+}
+
+.app-layout.app-layout--chat-embed-panel .app-main {
+  margin-left: 0 !important;
+}
+
+.app-content.app-content--chat-embed-panel {
+  padding: 0 !important;
+}
+
+.app-content-inner.app-content-inner--chat-embed-panel {
+  max-width: none !important;
 }
 
 .app-main {

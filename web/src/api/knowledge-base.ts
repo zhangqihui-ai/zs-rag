@@ -1,8 +1,11 @@
 import axios from 'axios'
 
-import { http, longRequestTimeoutMs } from '../lib/http'
+import { http, longRequestTimeoutMs, documentRequestTimeoutMs } from '../lib/http'
 
 export type RetrievalMode = 'vector' | 'keyword' | 'hybrid'
+
+/** 知识库底层实现类型；图可视化 Tab 在 lightrag 或 graph_db_enabled 时展示 */
+export type KnowledgeBaseType = 'lightrag' | 'classic' | string
 
 export interface KnowledgeBase {
   id: number
@@ -10,6 +13,8 @@ export interface KnowledgeBase {
   name: string
   description: string | null
   status: 'active' | 'inactive' | 'deleted'
+  /** 后端 Phase 1+ 返回；未返回时前端以 graph_db_enabled 作为图 Tab 回退 */
+  kb_type?: KnowledgeBaseType | null
   vector_db_enabled: boolean
   graph_db_enabled: boolean
   embedding_model_id: number | null
@@ -26,6 +31,7 @@ export interface KnowledgeBase {
 export interface KnowledgeBasePayload {
   name: string
   description?: string | null
+  kb_type?: KnowledgeBaseType
   vector_db_enabled: boolean
   graph_db_enabled: boolean
   embedding_model_id?: number | null
@@ -242,7 +248,7 @@ export const knowledgeBaseApi = {
     return unwrap<KnowledgeBase[]>(http.get('/knowledge-bases'))
   },
   get(kbId: number) {
-    return unwrap<KnowledgeBase>(http.get(`/knowledge-bases/${kbId}`))
+    return unwrap<KnowledgeBase>(http.get(`/knowledge-bases/${kbId}`, { timeout: documentRequestTimeoutMs }))
   },
   create(payload: KnowledgeBasePayload) {
     return unwrap<KnowledgeBase>(http.post('/knowledge-bases', payload))
@@ -274,8 +280,20 @@ export const knowledgeBaseApi = {
   testNeo4jConnection(kbId: number) {
     return unwrap<ConnectionTestResult>(http.post(`/knowledge-bases/${kbId}/neo4j-connection/test`))
   },
-  listDocuments(kbId: number, params?: { status?: string; keyword?: string; page?: number; page_size?: number }) {
-    return unwrap<PaginatedResponse<KnowledgeDocument>>(http.get(`/knowledge-bases/${kbId}/documents`, { params }))
+  listDocuments(
+    kbId: number,
+    params?: {
+      status?: string
+      keyword?: string
+      page?: number
+      page_size?: number
+      /** created_desc | created_asc | name_asc | updated_desc */
+      sort?: string
+    },
+  ) {
+    return unwrap<PaginatedResponse<KnowledgeDocument>>(
+      http.get(`/knowledge-bases/${kbId}/documents`, { params, timeout: documentRequestTimeoutMs }),
+    )
   },
   uploadDocument(
     kbId: number,
@@ -307,7 +325,9 @@ export const knowledgeBaseApi = {
     )
   },
   getDocument(kbId: number, documentId: number) {
-    return unwrap<KnowledgeDocument>(http.get(`/knowledge-bases/${kbId}/documents/${documentId}`))
+    return unwrap<KnowledgeDocument>(
+      http.get(`/knowledge-bases/${kbId}/documents/${documentId}`, { timeout: documentRequestTimeoutMs }),
+    )
   },
   updateDocumentChunkingConfig(kbId: number, documentId: number, chunking_config: Record<string, unknown> | null) {
     return unwrap<KnowledgeDocument>(
@@ -327,7 +347,11 @@ export const knowledgeBaseApi = {
     return unwrap<KnowledgeDocumentChunkingPreviewResponse>(http.post(`/knowledge-bases/${kbId}/chunking/preview`, payload))
   },
   getDocumentParseLog(kbId: number, documentId: number) {
-    return unwrap<KnowledgeDocumentParseLog>(http.get(`/knowledge-bases/${kbId}/documents/${documentId}/parse-log`))
+    return unwrap<KnowledgeDocumentParseLog>(
+      http.get(`/knowledge-bases/${kbId}/documents/${documentId}/parse-log`, {
+        timeout: documentRequestTimeoutMs,
+      }),
+    )
   },
   /** 获取原始文件二进制（需携带 Token，用于新窗口预览；大 PDF 单独放宽超时） */
   async fetchDocumentFileBlob(kbId: number, documentId: number): Promise<Blob> {
@@ -391,6 +415,14 @@ function getApiBaseUrl(): string {
 
 export type DocumentProcessStreamMode = 'parse' | 'reindex'
 
+export interface DocumentProgressPayload {
+  phase: string
+  percent: number
+  current?: number | null
+  total?: number | null
+  message?: string
+}
+
 /**
  * 通过 SSE（text/event-stream）消费解析/重建过程日志，完成后返回文档快照。
  * 需使用 fetch：axios 对流式响应支持不便。
@@ -401,9 +433,13 @@ export async function streamDocumentProcess(
   mode: DocumentProcessStreamMode,
   options: {
     embedding_model_id?: number | null
+    force?: boolean
+    signal?: AbortSignal
     onLog: (line: string) => void
+    onProgress?: (payload: DocumentProgressPayload) => void
     onDone?: (document: KnowledgeDocument) => void
     onError?: (message: string, code?: string) => void
+    onCancelled?: (document: KnowledgeDocument) => void
   },
 ): Promise<KnowledgeDocument> {
   const token = localStorage.getItem('auth_token')
@@ -417,11 +453,15 @@ export async function streamDocumentProcess(
   if (typeof options.embedding_model_id === 'number') {
     params.set('embedding_model_id', String(options.embedding_model_id))
   }
+  if (options.force) {
+    params.set('force', 'true')
+  }
   const qs = params.toString()
   const url = `${base}${path}${qs ? `?${qs}` : ''}`
 
   const res = await fetch(url, {
     method: 'POST',
+    signal: options.signal,
     headers: {
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(enterpriseSpace ? { 'X-Enterprise-Space': enterpriseSpace } : {}),
@@ -460,7 +500,16 @@ export async function streamDocumentProcess(
   let streamError: Error | undefined
 
   const handlePayload = (raw: string) => {
-    let obj: { type?: string; message?: string; document?: KnowledgeDocument; code?: string }
+    let obj: {
+      type?: string
+      message?: string
+      document?: KnowledgeDocument
+      code?: string
+      phase?: string
+      percent?: number
+      current?: number | null
+      total?: number | null
+    }
     try {
       obj = JSON.parse(raw) as typeof obj
     } catch {
@@ -470,9 +519,25 @@ export async function streamDocumentProcess(
       options.onLog(obj.message)
       return
     }
+    if (obj.type === 'progress' && typeof obj.percent === 'number') {
+      options.onProgress?.({
+        phase: typeof obj.phase === 'string' ? obj.phase : 'parsing',
+        percent: obj.percent,
+        current: obj.current ?? null,
+        total: obj.total ?? null,
+        message: typeof obj.message === 'string' ? obj.message : '',
+      })
+      return
+    }
     if (obj.type === 'done' && obj.document) {
       completed = obj.document
       options.onDone?.(obj.document)
+      return
+    }
+    if (obj.type === 'cancelled' && obj.document) {
+      completed = obj.document
+      options.onCancelled?.(obj.document)
+      options.onLog('【已取消】解析任务已停止')
       return
     }
     if (obj.type === 'error') {
@@ -485,6 +550,10 @@ export async function streamDocumentProcess(
   }
 
   while (true) {
+    if (options.signal?.aborted) {
+      const err = new DOMException('Aborted', 'AbortError')
+      throw err
+    }
     const { done, value } = await reader.read()
     if (done) {
       break
@@ -529,4 +598,15 @@ export async function streamDocumentProcess(
     throw err
   }
   return completed
+}
+
+export async function cancelDocumentProcess(
+  kbId: number,
+  documentId: number,
+): Promise<KnowledgeDocument> {
+  return unwrap<KnowledgeDocument>(
+    http.post(`/knowledge-bases/${kbId}/documents/${documentId}/cancel-process`, undefined, {
+      timeout: documentRequestTimeoutMs,
+    }),
+  )
 }

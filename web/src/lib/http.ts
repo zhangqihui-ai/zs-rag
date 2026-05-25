@@ -11,6 +11,10 @@ const defaultTimeoutMs = Number(import.meta.env.VITE_HTTP_TIMEOUT_MS) || 30_000
  */
 export const longRequestTimeoutMs = Number(import.meta.env.VITE_LONG_REQUEST_TIMEOUT_MS) || 900_000
 
+/** 知识库详情页文档列表/元数据等（解析进行中后端可能繁忙，避免 30s 误报） */
+export const documentRequestTimeoutMs =
+  Number(import.meta.env.VITE_DOCUMENT_REQUEST_TIMEOUT_MS) || longRequestTimeoutMs
+
 export const http = axios.create({
   baseURL,
   timeout: defaultTimeoutMs,
@@ -38,10 +42,18 @@ http.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
-      // Token 过期，清除本地存储并跳转到登录页
+      // Token 过期，清除本地存储并跳转到登录页（iframe 内跳转会破坏嵌入体验，交由页面自行展示错误）
       localStorage.removeItem('auth_token')
       localStorage.removeItem('current_user')
-      window.location.href = '/login'
+      let inIframe = false
+      try {
+        inIframe = window.self !== window.top
+      } catch {
+        inIframe = true
+      }
+      if (!inIframe) {
+        window.location.href = '/login'
+      }
     }
     return Promise.reject(error)
   }

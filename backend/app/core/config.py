@@ -32,14 +32,48 @@ class Settings(BaseSettings):
     
     # Security
     jwt_secret: str = Field(default="change-me-in-production", description="JWT 密钥")
+    embed_api_key_pepper: str = Field(
+        default="",
+        description="嵌入 API Key 哈希用盐；为空则回退使用 jwt_secret",
+    )
 
     # Milvus runtime configuration (ops-managed)
     milvus_host: str = Field(default="milvus", description="Milvus 服务地址")
     milvus_port: int = Field(default=19530, description="Milvus 服务端口")
+    milvus_db_name: str = Field(default="default", description="Milvus 数据库名（LightRAG MilvusVectorDBStorage 必填）")
     milvus_username: str | None = Field(default=None, description="Milvus 用户名")
     milvus_password: str | None = Field(default=None, description="Milvus 密码")
 
-    # OpenSearch：BM25 全文索引（单节点；compose 中编排，检索接入可读取此配置）
+    # Neo4j（LightRAG 图库 / 图谱可视化；平台级连接，按 workspace 隔离）
+    neo4j_uri: str | None = Field(default=None, description="Neo4j Bolt URI")
+    neo4j_username: str | None = Field(default=None, description="Neo4j 用户名")
+    neo4j_password: str | None = Field(default=None, description="Neo4j 密码")
+    neo4j_database: str | None = Field(default=None, description="Neo4j 数据库名（可选）")
+
+    lightrag_storage_root: str | None = Field(
+        default=None,
+        description="LightRAG JsonKV 等工作目录根路径；默认 backend/storage/lightrag",
+    )
+    lightrag_use_tiktoken: bool = Field(
+        default=False,
+        description="LightRAG 使用 tiktoken 分块（默认 false：离线字符分词，不访问 openaipublic.blob.core.windows.net）",
+    )
+    lightrag_tiktoken_model: str = Field(
+        default="gpt-4o-mini",
+        description="lightrag_use_tiktoken=true 时使用的 tiktoken 模型名",
+    )
+    lightrag_llm_timeout_sec: int = Field(
+        default=300,
+        description="LightRAG 实体/关系抽取 LLM 单次请求读超时（秒）；大 chunk 可能需数分钟",
+    )
+    lightrag_llm_max_retries: int = Field(
+        default=3,
+        description="LightRAG LLM 读超时等可重试错误的最大重试次数",
+    )
+    tiktoken_cache_dir: str | None = Field(
+        default=None,
+        description="tiktoken 离线缓存目录（对应环境变量 TIKTOKEN_CACHE_DIR）",
+    )
     opensearch_url: str | None = Field(
         default=None,
         description="OpenSearch REST 基址，如 http://opensearch:9200；未设置则保持仅用 PG 全文",
@@ -66,6 +100,19 @@ class Settings(BaseSettings):
     @property
     def mineru_format_set(self) -> set[str]:
         return {s.strip().lower().lstrip(".") for s in self.mineru_formats.split(",") if s.strip()}
+
+    # OpenDataLoader PDF（进程内 Python SDK + JVM；PDF 默认解析引擎）
+    odl_enabled: bool = Field(default=True, description="是否启用 OpenDataLoader 解析 PDF")
+    odl_default_parser: str = Field(
+        default="opendataloader",
+        description="未在知识库 config 指定 pdf_parser 时的默认 PDF 引擎",
+    )
+    odl_hybrid: bool = Field(default=False, description="OpenDataLoader 是否默认走 Hybrid（需 sidecar）")
+    odl_hybrid_url: str = Field(
+        default="http://opendataloader-hybrid:5002",
+        description="OpenDataLoader Hybrid 后端 URL",
+    )
+    odl_timeout: int = Field(default=120, description="OpenDataLoader Hybrid 单次请求超时（秒）")
 
     @property
     def normalized_cors_origins(self) -> list[str]:

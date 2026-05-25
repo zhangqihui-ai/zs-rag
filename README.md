@@ -249,6 +249,16 @@ cp .env.template .env
 - `ADMIN_USERNAME` - 管理员用户名
 - `ADMIN_PASSWORD` - 管理员密码
 
+### PDF 解析引擎
+
+| 引擎 | 用途 | 依赖 |
+|------|------|------|
+| **OpenDataLoader**（默认） | 数字版 PDF，本地 CPU，无 HTTP | backend 镜像内 JRE 11+、`opendataloader-pdf` |
+| **MinerU** | 图片 OCR、兼容模式 | `docker compose --profile mineru up -d mineru` |
+| **Hybrid** | 扫描 PDF / 复杂表格 | `docker compose --profile odl-hybrid up -d opendataloader-hybrid` |
+
+知识库「配置 → PDF 解析器」可 per-KB 选择；图片上传仍走 MinerU。
+
 ## 开发说明
 
 ### Docker 开发模式
@@ -295,12 +305,27 @@ docker compose exec backend python -m alembic upgrade head
 # 构建并启动生产环境
 docker compose -f docker-compose.prod.yml up -d --build
 ##离线构建
-BACKEND_DOCKERFILE=Dockerfile.local docker compose -f docker-compose.yml up -d --build
+offline / 离线 Docker 构建说明
+================================
+
+conda create -n zs-rag python=3.12 -y
+conda activate zs-rag
+cd backend
+./scripts/download_offline_wheels.sh
+# 从仓库根目录离线构建（注意最后的 context 是 backend）：
+docker build -f backend/Dockerfile.local --target development -t zs-rag-backend:dev backend
+# 或使用 compose（context 已指向 ./backend）：
+BACKEND_DOCKERFILE=Dockerfile.local docker compose up -d --build backend
+
 
 # 查看日志
 docker compose -f docker-compose.prod.yml logs -f
 ```
 
+
+## 设计文档
+
+- [RAGFlow 与 zs-rag 知识库构建对比与优化计划](docs/kb-design/RAGFlow与zs-rag知识库构建对比与优化计划.md)
 
 ## License
 

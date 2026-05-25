@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dify 嵌入演示 · 悬浮对话组件</title>
+    <style>
+      :root {
+        --bg: #f4f6fb;
+        --card: #fff;
+        --text: #1a2233;
+        --muted: #5c6b8a;
+        --accent: #1c64f2;
+        --border: #e3e8f0;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family:
+          system-ui,
+          -apple-system,
+          'Segoe UI',
+          Roboto,
+          'PingFang SC',
+          'Microsoft YaHei',
+          sans-serif;
+        color: var(--text);
+        background: var(--bg);
+        line-height: 1.6;
+      }
+      .site-header {
+        background: var(--card);
+        border-bottom: 1px solid var(--border);
+      }
+      .site-header__inner {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 14px 24px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        flex-wrap: wrap;
+      }
+      .logo {
+        font-weight: 700;
+        font-size: 1.1rem;
+        color: var(--text);
+        text-decoration: none;
+      }
+      .logo span {
+        color: var(--accent);
+      }
+      .nav-links {
+        display: flex;
+        gap: 18px;
+        flex-wrap: wrap;
+      }
+      .nav-links a {
+        font-size: 0.92rem;
+        color: var(--muted);
+        text-decoration: none;
+      }
+      .nav-links a:hover {
+        color: var(--accent);
+      }
+      .hero {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 40px 24px 28px;
+      }
+      .hero h1 {
+        margin: 0 0 12px;
+        font-size: clamp(1.6rem, 3.5vw, 2rem);
+      }
+      .hero p {
+        margin: 0;
+        max-width: 680px;
+        color: var(--muted);
+      }
+      .note {
+        margin-top: 16px;
+        padding: 12px 16px;
+        background: #eff6ff;
+        border: 1px solid #bfdbfe;
+        border-radius: 10px;
+        font-size: 0.88rem;
+        color: #1e3a5f;
+      }
+      .note code {
+        background: rgba(28, 100, 242, 0.12);
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 0.85em;
+      }
+      main {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 0 24px 56px;
+      }
+      .feature-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 18px;
+      }
+      .feature-card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 22px;
+      }
+      .feature-card h3 {
+        margin: 0 0 8px;
+        font-size: 1rem;
+      }
+      .feature-card p {
+        margin: 0;
+        font-size: 0.92rem;
+        color: var(--muted);
+      }
+      footer {
+        text-align: center;
+        padding: 24px;
+        font-size: 0.88rem;
+        color: var(--muted);
+        border-top: 1px solid var(--border);
+        background: var(--card);
+      }
+    </style>
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="site-header__inner">
+        <a class="logo" href="#">演示页 · <span>Dify 嵌入</span></a>
+        <nav class="nav-links">
+          <a href="index.html">ZS-RAG 嵌入</a>
+          <a href="ragflow-embed.html">RAGFlow iframe</a>
+        </nav>
+      </div>
+    </header>
+
+    <section class="hero">
+      <h1>Dify「嵌入网站」悬浮组件联调</h1>
+      <p>
+        下方为官网示例配置：<code>window.difyChatbotConfig</code> + <code>embed.min.js</code>。页面加载后右下角会出现对话气泡（需能访问脚本 CDN 与你的 Dify / Udify 服务）。
+      </p>
+      <div class="note">
+        请将 <code>token</code>、脚本 <code>src</code> 换成你自己的应用嵌入凭证与域名；自建部署时一般为
+        <code>https://你的域名/embed.min.js</code>，且第二段 <code>&lt;script&gt;</code> 的 <code>id</code> 需与
+        <code>token</code> 一致。
+      </div>
+    </section>
+
+    <main>
+      <div class="feature-grid">
+        <article class="feature-card">
+          <h3>宿主页面区域</h3>
+          <p>此处可放置任意业务内容；对话以浮动窗口叠在页面之上。</p>
+        </article>
+        <article class="feature-card">
+          <h3>Start 节点变量</h3>
+          <p>可在 <code>difyChatbotConfig.inputs</code> 中传入工作流起始节点的变量键值。</p>
+        </article>
+        <article class="feature-card">
+          <h3>用户上下文</h3>
+          <p><code>systemVariables</code> / <code>userVariables</code> 可按官方文档传入会话与用户维度信息。</p>
+        </article>
+      </div>
+    </main>
+
+    <footer>Dify 内容由远端 embed 脚本与应用配置加载 · 示例 token 来自官方文档形态，请替换为自己的</footer>
+
+    <script>
+      window.difyChatbotConfig = {
+        token: 'eBocVXNajS1Ff3DY',
+        inputs: {
+          // You can define the inputs from the Start node here
+          // key is the variable name
+          // e.g.
+          // name: "NAME"
+        },
+        systemVariables: {
+          // user_id: 'YOU CAN DEFINE USER ID HERE',
+          // conversation_id: 'YOU CAN DEFINE CONVERSATION ID HERE, IT MUST BE A VALID UUID',
+        },
+        userVariables: {
+          // avatar_url: 'YOU CAN DEFINE USER AVATAR URL HERE',
+          // name: 'YOU CAN DEFINE USER NAME HERE',
+        },
+      }
+    </script>
+    <script src="https://udify.app/embed.min.js" id="eBocVXNajS1Ff3DY" defer></script>
+    <style>
+      #dify-chatbot-bubble-button {
+        background-color: #1c64f2 !important;
+      }
+      #dify-chatbot-bubble-window {
+        width: 24rem !important;
+        height: 40rem !important;
+      }
+    </style>
+  </body>
+</html>

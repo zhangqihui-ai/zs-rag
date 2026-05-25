@@ -45,8 +45,9 @@
                   :key="'box-' + p + '-' + box.index"
                   type="button"
                   class="pdf-mineru-box"
-                  :class="{ active: modelValue === box.index }"
+                  :class="{ active: modelValue === box.index, 'citation-focus': citationFocusIndex === box.index }"
                   :style="box.style"
+                  :data-mineru-block-index="box.index"
                   :title="'块 #' + (box.index + 1)"
                   @click="onBoxClick(box.index)"
                 />
@@ -78,11 +79,14 @@ const props = defineProps<{
   documentId: number
   items: MineruContentItem[]
   modelValue: number | null
+  /** 引文跳转时的强调高亮（可与 modelValue 同时存在） */
+  citationFocusIndex?: number | null
 }>()
 
 const emit = defineEmits<{
   'update:modelValue': [value: number | null]
   'page-change': [page: number]
+  ready: [numPages: number]
 }>()
 
 const loading = ref(true)
@@ -480,6 +484,8 @@ async function loadPdf() {
       lastEmittedPdfPage = p
       emit('page-change', p)
     }
+    emit('ready', numPages.value)
+    resolveReadyWaiters()
   }
 }
 
@@ -518,11 +524,94 @@ onMounted(() => {
   void loadPdf()
 })
 
+let readyWaiters: Array<() => void> = []
+
+function resolveReadyWaiters() {
+  if (loading.value || !pdfDoc.value || numPages.value < 1) {
+    return
+  }
+  const waiters = readyWaiters
+  readyWaiters = []
+  waiters.forEach((fn) => fn())
+}
+
+async function whenReady(): Promise<void> {
+  if (!loading.value && pdfDoc.value && numPages.value > 0) {
+    return
+  }
+  return new Promise<void>((resolve) => {
+    readyWaiters.push(resolve)
+  })
+}
+
+async function scrollPageSlabIntoView(page: number) {
+  await nextTick()
+  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+  const root = getStackEl()
+  const slab = root?.querySelector<HTMLElement>(`.pdf-mineru-page-slab[data-pdf-page="${page}"]`)
+  slab?.scrollIntoView({ behavior: 'auto', block: 'start' })
+}
+
+async function scrollBlockIntoView(index: number) {
+  await nextTick()
+  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+  const root = getStackEl()
+  const btn = root?.querySelector<HTMLElement>(`button[data-mineru-block-index="${index}"]`)
+  btn?.scrollIntoView({ behavior: 'auto', block: 'center' })
+}
+
+async function focusBlockInternal(index: number) {
+  const it = props.items[index]
+  if (!it || typeof it.page_idx !== 'number') {
+    return
+  }
+  const want = it.page_idx + 1
+  if (want >= 1 && want <= numPages.value) {
+    if (want !== pageNum.value) {
+      pageNum.value = want
+      await renderVisiblePages()
+      await scrollStackToTop()
+    }
+    emit('update:modelValue', index)
+    await scrollBlockIntoView(index)
+  }
+}
+
+async function goToCitationPage(page: number, blockIndex: number | null = null) {
+  await whenReady()
+  if (page < 1 || page > numPages.value) {
+    return
+  }
+  if (blockIndex != null && props.items.length > 0) {
+    await focusBlockInternal(blockIndex)
+    return
+  }
+  if (page !== pageNum.value) {
+    pageNum.value = page
+    await renderVisiblePages()
+    await scrollStackToTop()
+  }
+  await scrollPageSlabIntoView(page)
+}
+
 defineExpose({
+  whenReady,
+  isReady: () => !loading.value && pdfDoc.value != null && numPages.value > 0,
   async goToPage(n: number) {
+    await whenReady()
     await goPage(n)
   },
   getPageNum: () => pageNum.value,
+  async goToCitationPage(page: number, blockIndex: number | null = null) {
+    await goToCitationPage(page, blockIndex)
+  },
+  async focusBlock(index: number | null) {
+    if (index == null) {
+      return
+    }
+    await whenReady()
+    await focusBlockInternal(index)
+  },
 })
 
 onUnmounted(() => {
@@ -652,5 +741,28 @@ onUnmounted(() => {
   background: rgba(59, 130, 246, 0.32);
   border-color: #1d4ed8;
   box-shadow: 0 0 0 2px rgba(29, 78, 216, 0.25);
+}
+
+.pdf-mineru-box.citation-focus {
+  background: rgba(250, 204, 21, 0.35);
+  border-color: #d97706;
+  box-shadow:
+    0 0 0 3px rgba(245, 158, 11, 0.35),
+    0 0 12px rgba(245, 158, 11, 0.45);
+  animation: pdf-mineru-citation-pulse 1.6s ease-in-out 3;
+}
+
+@keyframes pdf-mineru-citation-pulse {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 3px rgba(245, 158, 11, 0.35),
+      0 0 12px rgba(245, 158, 11, 0.45);
+  }
+  50% {
+    box-shadow:
+      0 0 0 5px rgba(245, 158, 11, 0.55),
+      0 0 18px rgba(245, 158, 11, 0.65);
+  }
 }
 </style>

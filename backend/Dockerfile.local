@@ -1,28 +1,67 @@
 # Backend Dockerfile — offline / air-gapped build
-# 预先将 wheel/sdist 放入 offline_deps/，构建时不再访问 PyPI。
+# 预先将 wheel/sdist 放入 offline_deps/，JRE 放入 offline_deps/jre/*.tar.gz，构建时不再访问 PyPI / Debian 源。
 # 准备依赖：见 offline_deps/PIP_DOWNLOAD.txt
 #
-# 构建示例：
-#   docker build -f Dockerfile.local --target development -t zs-rag-backend:dev .
-#   docker build -f Dockerfile.local --target production -t zs-rag-backend:prod .
+# 构建示例（注意：构建 context 必须是 backend 目录）：
+#   在 backend 目录下：
+#     docker build -f Dockerfile.local --target development -t zs-rag-backend:dev .
+#   在仓库根目录下：
+#     docker build -f backend/Dockerfile.local --target development -t zs-rag-backend:dev backend
+#
+# 若构建机可访问 Debian 镜像但无法访问 deb.debian.org，可传：
+#   --build-arg APT_MIRROR=http://mirrors.aliyun.com/debian
 
 FROM python:3.12-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    JAVA_HOME=/opt/java \
+    PATH=/opt/java/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
+ARG APT_MIRROR=
+
+# 先复制 offline_deps，以便检测是否含离线 JRE
+COPY offline_deps ./offline_deps
+
+# 离线 JRE：offline_deps/jre/*.tar.gz（由 scripts/download_offline_jre.sh 下载）
+# 在线回退：apt 安装（可设 APT_MIRROR 使用国内镜像）
+RUN set -eu; \
+    JRE_TAR=""; \
+    for f in offline_deps/jre/*.tar.gz; do \
+      if [ -f "$f" ]; then JRE_TAR="$f"; break; fi; \
+    done; \
+    if [ -n "$JRE_TAR" ]; then \
+      echo "Installing bundled Temurin JRE from ${JRE_TAR} …"; \
+      mkdir -p /opt/java; \
+      tar -xzf "$JRE_TAR" -C /opt/java --strip-components=1; \
+      java -version; \
+    else \
+      echo "No offline JRE found under offline_deps/jre/; falling back to apt …"; \
+      echo "Hint: run backend/scripts/download_offline_jre.sh on a networked machine,"; \
+      echo "      then build with context=backend (e.g. docker build -f backend/Dockerfile.local backend)"; \
+      if [ -n "${APT_MIRROR}" ] && [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+        sed -i "s|http://deb.debian.org/debian|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources; \
+        sed -i "s|http://deb.debian.org/debian-security|${APT_MIRROR}-security|g" /etc/apt/sources.list.d/debian.sources || true; \
+      fi; \
+      apt-get update; \
+      apt-get install -y --no-install-recommends \
+        gcc \
+        libpq-dev \
+        default-jre-headless \
+        ca-certificates \
+        && rm -rf /var/lib/apt/lists/*; \
+      if [ -d /usr/lib/jvm/default-java ]; then \
+        ln -sf /usr/lib/jvm/default-java /opt/java; \
+      fi; \
+      java -version; \
+    fi
 
 # 离线安装：仅使用 offline_deps 目录，不访问外网索引
 COPY requirements.txt .
-COPY offline_deps ./offline_deps
 RUN pip install --no-index --find-links=offline_deps --no-cache-dir -r requirements.txt
 
 COPY . .

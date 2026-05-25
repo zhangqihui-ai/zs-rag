@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ZS-RAG 嵌入演示 · 示例企业站</title>
+    <style>
+      :root {
+        --bg: #eef2f9;
+        --card: #ffffff;
+        --text: #0f172a;
+        --muted: #64748b;
+        --brand: #1c64f2;
+        --brand-soft: rgba(28, 100, 242, 0.12);
+        --border: #e2e8f0;
+        --radius: 16px;
+        --shadow: 0 4px 24px rgba(15, 23, 42, 0.06);
+        --shadow-lg: 0 16px 48px rgba(15, 23, 42, 0.08);
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family:
+          system-ui,
+          -apple-system,
+          'Segoe UI',
+          Roboto,
+          'PingFang SC',
+          'Microsoft YaHei',
+          sans-serif;
+        color: var(--text);
+        background: linear-gradient(180deg, #eef2f9 0%, #f8fafc 40%, #fff 100%);
+        line-height: 1.6;
+        min-height: 100vh;
+      }
+      .site-header {
+        background: rgba(255, 255, 255, 0.85);
+        backdrop-filter: blur(10px);
+        border-bottom: 1px solid var(--border);
+        position: sticky;
+        top: 0;
+        z-index: 100;
+      }
+      .site-header__inner {
+        max-width: 1120px;
+        margin: 0 auto;
+        padding: 14px 24px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        flex-wrap: wrap;
+      }
+      .logo {
+        font-weight: 800;
+        font-size: 1.05rem;
+        color: var(--text);
+        text-decoration: none;
+        letter-spacing: -0.02em;
+      }
+      .logo span {
+        color: var(--brand);
+      }
+      .nav-cluster {
+        display: flex;
+        align-items: center;
+        gap: 8px 20px;
+        flex-wrap: wrap;
+      }
+      nav a,
+      .nav-cluster a {
+        color: var(--muted);
+        text-decoration: none;
+        font-size: 0.9rem;
+        font-weight: 500;
+      }
+      nav a:hover,
+      .nav-cluster a:hover {
+        color: var(--brand);
+      }
+      .nav-pill {
+        font-size: 0.75rem;
+        font-weight: 600;
+        padding: 4px 10px;
+        border-radius: 999px;
+        background: var(--brand-soft);
+        color: var(--brand);
+      }
+      .hero {
+        max-width: 1120px;
+        margin: 0 auto;
+        padding: 40px 24px 28px;
+      }
+      .hero-badge {
+        display: inline-block;
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--brand);
+        background: var(--brand-soft);
+        padding: 6px 12px;
+        border-radius: 999px;
+        margin-bottom: 14px;
+      }
+      .hero h1 {
+        margin: 0 0 14px;
+        font-size: clamp(1.85rem, 4vw, 2.35rem);
+        letter-spacing: -0.03em;
+        line-height: 1.2;
+      }
+      .hero-lead {
+        margin: 0;
+        max-width: 640px;
+        color: var(--muted);
+        font-size: 1.05rem;
+      }
+      .hero-lead code {
+        font-size: 0.88em;
+        padding: 2px 7px;
+        border-radius: 6px;
+        background: var(--brand-soft);
+        color: #1e40af;
+      }
+      .security-strip {
+        margin-top: 22px;
+        padding: 14px 18px;
+        border-radius: var(--radius);
+        border: 1px solid rgba(245, 158, 11, 0.45);
+        background: rgba(255, 251, 235, 0.95);
+        font-size: 0.86rem;
+        line-height: 1.55;
+        color: #78350f;
+        max-width: 720px;
+      }
+      .security-strip strong {
+        color: #b45309;
+      }
+      .demo-panel {
+        margin-top: 22px;
+        padding: 18px 20px;
+        border-radius: var(--radius);
+        border: 1px solid var(--border);
+        background: var(--card);
+        box-shadow: var(--shadow);
+        max-width: 720px;
+      }
+      .demo-panel h3 {
+        margin: 0 0 12px;
+        font-size: 0.82rem;
+        font-weight: 700;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .param-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 12px;
+        align-items: center;
+        margin-bottom: 12px;
+        font-size: 0.88rem;
+      }
+      .param-row:last-child {
+        margin-bottom: 0;
+      }
+      .param-label {
+        color: var(--muted);
+        min-width: 4.5rem;
+      }
+      .param-value {
+        font-weight: 600;
+        color: var(--text);
+        word-break: break-all;
+      }
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        padding: 4px 10px;
+        border-radius: 999px;
+        font-size: 0.78rem;
+        font-weight: 600;
+      }
+      .chip--ok {
+        background: #ecfdf5;
+        color: #047857;
+      }
+      .chip--warn {
+        background: #fff7ed;
+        color: #c2410c;
+      }
+      .embed-url-preview {
+        margin-top: 12px;
+        padding: 12px 14px;
+        border-radius: 10px;
+        background: #f8fafc;
+        border: 1px solid var(--border);
+        font-size: 0.78rem;
+        word-break: break-all;
+        color: #475569;
+        font-family: ui-monospace, 'Cascadia Code', monospace;
+      }
+      .demo-auth-hint {
+        display: none;
+        margin-top: 14px;
+        padding: 12px 14px;
+        border-radius: 10px;
+        border: 1px solid rgba(245, 158, 11, 0.55);
+        background: rgba(255, 251, 235, 0.98);
+        font-size: 0.84rem;
+        line-height: 1.55;
+        color: #78350f;
+      }
+      .demo-auth-hint--show {
+        display: block;
+      }
+      .demo-auth-hint strong {
+        color: #92400e;
+      }
+      .demo-auth-hint code {
+        font-size: 0.78em;
+        padding: 1px 5px;
+        border-radius: 4px;
+        background: rgba(180, 83, 9, 0.12);
+      }
+      .btn-copy {
+        margin-left: auto;
+        padding: 6px 12px;
+        font-size: 0.8rem;
+        font-weight: 600;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: var(--card);
+        color: var(--brand);
+        cursor: pointer;
+      }
+      .btn-copy:hover {
+        border-color: var(--brand);
+        background: var(--brand-soft);
+      }
+      main {
+        max-width: 1120px;
+        margin: 0 auto;
+        padding: 0 24px 72px;
+      }
+      .section {
+        margin-bottom: 44px;
+      }
+      .section-head {
+        margin-bottom: 18px;
+      }
+      .section-head h2 {
+        margin: 0 0 6px;
+        font-size: 1.35rem;
+        letter-spacing: -0.02em;
+      }
+      .section-head .lead {
+        margin: 0;
+        color: var(--muted);
+        font-size: 0.95rem;
+      }
+      .features {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 16px;
+        margin-bottom: 8px;
+      }
+      .feature {
+        background: var(--card);
+        padding: 22px;
+        border-radius: var(--radius);
+        border: 1px solid var(--border);
+        box-shadow: var(--shadow);
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
+      }
+      .feature:hover {
+        transform: translateY(-2px);
+        box-shadow: var(--shadow-lg);
+      }
+      .feature h3 {
+        margin: 0 0 8px;
+        font-size: 1rem;
+      }
+      .feature p {
+        margin: 0;
+        font-size: 0.92rem;
+        color: var(--muted);
+      }
+      .embed-card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        overflow: hidden;
+        box-shadow: var(--shadow-lg);
+      }
+      .embed-card__head {
+        padding: 14px 20px;
+        border-bottom: 1px solid var(--border);
+        font-weight: 700;
+        font-size: 0.92rem;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        background: linear-gradient(180deg, #fafbfc 0%, var(--card) 100%);
+      }
+      .embed-card__head span.tag {
+        font-size: 0.72rem;
+        font-weight: 700;
+        padding: 3px 8px;
+        border-radius: 6px;
+        background: var(--brand-soft);
+        color: var(--brand);
+      }
+      .iframe-shell {
+        min-height: 720px;
+        background: linear-gradient(180deg, #f1f5f9 0%, #e2e8f0 100%);
+      }
+      .iframe-shell iframe {
+        display: block;
+        width: 100%;
+        height: 720px;
+        border: 0;
+        background: #fff;
+      }
+      .bubble-placeholder {
+        padding: 56px 24px;
+        text-align: center;
+        color: var(--muted);
+        font-size: 0.95rem;
+        background: linear-gradient(165deg, #f8fafc 0%, #fff 100%);
+      }
+      .bubble-placeholder .fab-demo {
+        display: inline-flex;
+        width: 52px;
+        height: 52px;
+        border-radius: 999px;
+        margin-top: 16px;
+        background: linear-gradient(145deg, #3b82f6, var(--brand));
+        box-shadow:
+          0 8px 28px rgba(28, 100, 242, 0.35),
+          0 0 0 4px rgba(255, 255, 255, 0.95);
+      }
+      footer {
+        text-align: center;
+        padding: 28px 24px;
+        color: var(--muted);
+        font-size: 0.85rem;
+        border-top: 1px solid var(--border);
+        background: var(--card);
+      }
+      footer a {
+        color: var(--brand);
+        text-decoration: none;
+        font-weight: 600;
+      }
+      @media (max-width: 640px) {
+        nav {
+          display: none;
+        }
+        .param-row {
+          flex-direction: column;
+          align-items: flex-start;
+        }
+        .btn-copy {
+          margin-left: 0;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="site-header__inner">
+        <a class="logo" href="#">ZS-RAG <span>嵌入演示</span></a>
+        <div class="nav-cluster">
+          <span class="nav-pill">静态宿主页</span>
+          <nav aria-label="主导航">
+            <a href="#features">产品能力</a>
+            <a href="#embed-iframe">内嵌 iframe</a>
+            <a href="#embed-bubble">悬浮气泡</a>
+          </nav>
+          <a href="ragflow-embed.html">RAGFlow 示例</a>
+          <a href="dify-embed.html">Dify 示例</a>
+        </div>
+      </div>
+    </header>
+
+    <section class="hero">
+      <span class="hero-badge">Embed sandbox</span>
+      <h1>像真实官网一样嵌入对话</h1>
+      <p class="hero-lead">
+        本页演示 iframe / 气泡嵌入 <code>/chat/embed</code>。<strong>要直接聊天</strong>：在下面脚本里的
+        <code>ZS_RAG_DEMO_CONFIG</code> 填入控制台「嵌入网站」复制的明文密钥（以 <code>zs_rag_embed_</code>
+        开头），保存后<strong>整页刷新</strong>；也可用地址栏 <code>?api_key=…&amp;space=…</code> 覆盖配置。
+      </p>
+      <div class="security-strip">
+        <strong>安全提示：</strong>不要把嵌入 API Key 写进公开仓库或发给不可信第三方；生产环境强烈建议密钥仅保存在服务端，由后端注入
+        <code>Authorization: Bearer …</code>，以免泄露产生模型调用费用。
+      </div>
+      <div class="demo-panel">
+        <h3>当前联调参数</h3>
+        <div class="param-row">
+          <span class="param-label">前端 origin</span>
+          <span class="param-value" id="origin-display">…</span>
+        </div>
+        <div class="param-row">
+          <span class="param-label">conversation</span>
+          <span class="param-value" id="conversation-display">—</span>
+        </div>
+        <div class="param-row">
+          <span class="param-label">鉴权方式</span>
+          <span id="auth-chip"></span>
+        </div>
+        <div class="param-row">
+          <span class="param-label">嵌入 URL</span>
+          <button type="button" class="btn-copy" id="btn-copy-embed-url" title="复制完整嵌入链接">
+            复制链接
+          </button>
+        </div>
+        <div class="embed-url-preview" id="embed-src-preview" aria-label="实际 iframe / 气泡使用的地址"></div>
+        <div class="demo-auth-hint" id="demo-auth-hint" role="status"></div>
+      </div>
+    </section>
+
+    <main>
+      <section class="section" id="features">
+        <div class="section-head">
+          <h2>产品能力</h2>
+          <p class="lead">仅占位的业务模块，模拟企业官网版心内容。</p>
+        </div>
+        <div class="features">
+          <article class="feature">
+            <h3>知识检索</h3>
+            <p>对接企业文档与知识库，统一问询入口。</p>
+          </article>
+          <article class="feature">
+            <h3>安全合规</h3>
+            <p>租户隔离与访问控制，可按环境切换策略。</p>
+          </article>
+          <article class="feature">
+            <h3>可扩展</h3>
+            <p>通过 API / 嵌入脚本接入官网、工作台与 WebView。</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section" id="embed-iframe">
+        <div class="section-head">
+          <h2>方式一 · 页面内 iframe</h2>
+          <p class="lead">
+            与控制台「嵌入到网站中」的 iframe 片段一致；下方区域由脚本写入 <code>src</code>（含 <code>api_key</code> /
+            <code>space</code>、可选 <code>conversation_id</code>，或 <code>access_token</code>）。
+          </p>
+        </div>
+        <div class="embed-card">
+          <div class="embed-card__head">
+            <span class="tag">iframe</span>
+            对话嵌入区域
+          </div>
+          <div class="iframe-shell">
+            <iframe
+              id="zs-rag-inline-chat"
+              title="ZS-RAG 知识对话"
+              style="width: 100%; height: 100%; min-height: 700px"
+              frameborder="0"
+              allow="microphone; clipboard-read; clipboard-write"
+            ></iframe>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="embed-bubble">
+        <div class="section-head">
+          <h2>方式二 · 悬浮气泡</h2>
+          <p class="lead">
+            由 <code>/embed/zs-rag-chat-widget.js</code> 注入，与控制台复制的脚本一致；展开面板内加载同一嵌入 URL。
+          </p>
+        </div>
+        <div class="embed-card">
+          <div class="embed-card__head">
+            <span class="tag">widget</span>
+            浮动组件已加载 — 请看浏览器右下角
+          </div>
+          <div class="bubble-placeholder">
+            主内容区可放置任意营销或业务文案；气泡独立浮在视口之上，不挤压版心布局。
+            <div class="fab-demo" aria-hidden="true"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      © 示例演示站 · 仅用于 ZS-RAG 嵌入联调 ·
+      <a
+        href="?origin=http://192.168.11.19&amp;api_key=YOUR_KEY&amp;space=default&amp;conversation_id=00000000-0000-0000-0000-000000000000"
+        >示例查询串（请把 YOUR_KEY 换成真实 zs_rag_embed_…）</a
+      >
+    </footer>
+
+    <!-- 联调认证：在这里填入真实密钥后即可 iframe 内直接对话（勿将含密钥的改动提交到公开仓库）。 -->
+    <script>
+      window.ZS_RAG_DEMO_CONFIG = {
+        origin: 'http://192.168.11.19',
+        apiKey: 'zs_rag_embed_v_xnf0ABNtI0YqRvz91sy9j36y5B50WEQznP6B84m6Y',
+        accessToken: '',
+        space: 'default',
+        conversationId: 'bc0525c4-931a-4e34-8700-65238e2dee5d',
+      }
+    </script>
+
+    <script>
+      ;(function () {
+        var cfg = window.ZS_RAG_DEMO_CONFIG || {}
+        var params = new URLSearchParams(window.location.search)
+
+        function str(v, fb) {
+          return v != null && String(v) !== '' ? String(v) : fb
+        }
+
+        var originRaw = params.has('origin') ? params.get('origin') : str(cfg.origin, 'http://192.168.11.19')
+        var origin = String(originRaw).replace(/\/$/, '')
+
+        document.getElementById('origin-display').textContent = origin
+
+        var embedApiKey = params.has('api_key') ? params.get('api_key') : cfg.apiKey || ''
+        var embedSpace = params.has('space') ? params.get('space') || 'default' : str(cfg.space, 'default')
+        var conversationId = params.has('conversation_id')
+          ? params.get('conversation_id')
+          : cfg.conversationId || ''
+
+        var chatBase = origin + '/chat/embed'
+        var chatUrl = chatBase
+        var authMode = 'none'
+
+        function appendConversationId(url) {
+          if (!conversationId || !String(conversationId).trim()) return url
+          var sep = url.indexOf('?') >= 0 ? '&' : '?'
+          return url + sep + 'conversation_id=' + encodeURIComponent(String(conversationId).trim())
+        }
+
+        function appendEmbedPanel(url) {
+          var sep = url.indexOf('?') >= 0 ? '&' : '?'
+          return url + sep + 'embed_panel=1'
+        }
+
+        document.getElementById('conversation-display').textContent =
+          conversationId && String(conversationId).trim()
+            ? String(conversationId).trim()
+            : '（未指定，进入后为默认列表视图）'
+
+        var hintEl = document.getElementById('demo-auth-hint')
+        function showHint(html) {
+          hintEl.innerHTML = html
+          hintEl.classList.add('demo-auth-hint--show')
+        }
+        hintEl.classList.remove('demo-auth-hint--show')
+        hintEl.innerHTML = ''
+
+        function looksLikeEmbedApiKey(k) {
+          return k && String(k).indexOf('zs_rag_embed_') === 0 && String(k).length > 20
+        }
+
+        if (embedApiKey) {
+          chatUrl =
+            chatBase +
+            '?api_key=' +
+            encodeURIComponent(embedApiKey) +
+            '&space=' +
+            encodeURIComponent(embedSpace)
+          chatUrl = appendConversationId(chatUrl)
+          chatUrl = appendEmbedPanel(chatUrl)
+          authMode = 'api_key'
+          if (!looksLikeEmbedApiKey(embedApiKey)) {
+            showHint(
+              '<strong>密钥格式可疑：</strong>嵌入明文应以 <code>zs_rag_embed_</code> 开头（控制台「嵌入网站」复制）。占位符 <code>YOUR_KEY</code> 无效，请改成真实密钥或编辑上方 <code>ZS_RAG_DEMO_CONFIG.apiKey</code>。',
+            )
+          }
+        } else {
+          var embedToken = params.has('access_token') ? params.get('access_token') : cfg.accessToken || ''
+          if (embedToken) {
+            chatUrl = chatBase + '?access_token=' + encodeURIComponent(embedToken)
+            var tokSpace = params.has('space') ? params.get('space') : cfg.space
+            if (tokSpace) {
+              chatUrl += '&space=' + encodeURIComponent(tokSpace)
+            }
+            chatUrl = appendConversationId(chatUrl)
+            chatUrl = appendEmbedPanel(chatUrl)
+            authMode = 'jwt'
+          }
+        }
+
+        var chipEl = document.getElementById('auth-chip')
+        if (authMode === 'api_key') {
+          chipEl.innerHTML =
+            '<span class="chip chip--ok">api_key + space' +
+            (conversationId && String(conversationId).trim() ? ' + conversation_id' : '') +
+            '</span>'
+        } else if (authMode === 'jwt') {
+          chipEl.innerHTML =
+            '<span class="chip chip--ok">access_token（JWT）' +
+            (conversationId && String(conversationId).trim() ? ' + conversation_id' : '') +
+            '</span>'
+        } else {
+          chipEl.innerHTML =
+            '<span class="chip chip--warn">未配置密钥 · iframe 只会打开说明页</span>'
+          showHint(
+            '<strong>当前无法匿名聊天：</strong>请在本文件靠前的 <code>&lt;script&gt;</code> 里编辑 <code>ZS_RAG_DEMO_CONFIG.apiKey</code>，粘贴控制台「嵌入网站」生成的密钥，保存后<strong>刷新本页</strong>。<br />' +
+              '可选填 <code>conversationId</code>（与密钥绑定的对话 UUID）。<code>origin</code> 必须与你的前端访问地址一致（含端口）。',
+          )
+        }
+
+        var preview = document.getElementById('embed-src-preview')
+        preview.textContent = chatUrl
+
+        document.getElementById('btn-copy-embed-url').addEventListener('click', function () {
+          navigator.clipboard.writeText(chatUrl).catch(function () {
+            window.prompt('复制以下嵌入 URL：', chatUrl)
+          })
+        })
+
+        var widgetUrl = origin + '/embed/zs-rag-chat-widget.js'
+
+        var iframe = document.getElementById('zs-rag-inline-chat')
+        if (iframe) {
+          iframe.src = chatUrl
+        }
+
+        window.zsRagChatEmbedConfig = {
+          src: chatUrl,
+          bubbleColor: '#1C64F2',
+          panelWidth: '24rem',
+          panelHeight: '40rem',
+        }
+
+        var bubbleScript = document.createElement('script')
+        bubbleScript.src = widgetUrl
+        bubbleScript.defer = true
+        document.body.appendChild(bubbleScript)
+
+        var bubbleStyle = document.createElement('style')
+        bubbleStyle.textContent =
+          '#zs-rag-chat-embed-button { background-color: #1C64F2 !important; }\n' +
+          '#zs-rag-chat-embed-window { width: 24rem !important; height: 40rem !important; }'
+        document.head.appendChild(bubbleStyle)
+      })()
+    </script>
+  </body>
+</html>

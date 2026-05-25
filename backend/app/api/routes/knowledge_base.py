@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import mimetypes
 import shutil
+import threading
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, Query, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
@@ -13,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.enterprise_space_context import CurrentSpace, RequireMembership
 from app.core.errors import AppError
+from app.core.knowledge_retrieval_defaults import apply_retrieval_defaults_to_payload
 from app.core.neo4j_client import test_neo4j_connection
 from app.db.session import get_db
 from app.core.milvus_client import drop_collection_if_exists
@@ -38,12 +42,15 @@ from app.schemas.knowledge_document import (
     KnowledgeDocumentChunkingPreviewResponse,
     KnowledgeDocumentResponse,
 )
+from app.schemas.graph_search import GraphSearchRequest, GraphSearchResponse
 from app.schemas.retrieval import (
     KnowledgeSearchRequest,
     KnowledgeSearchResponse,
     MultiKnowledgeSearchRequest,
     MultiKnowledgeSearchResponse,
 )
+from app.core.kb_type import ensure_lightrag_kb
+from app.services.lightrag_engine import query_graph_kb
 from app.services.knowledge_base_service import (
     build_deleted_knowledge_base_name,
     build_collection_name,
@@ -51,10 +58,12 @@ from app.services.knowledge_base_service import (
     get_knowledge_base_or_error,
     get_knowledge_base_stats,
     get_neo4j_connection_or_error,
+    resolve_knowledge_base_milvus_dimension,
 )
 from app.services.knowledge_document_service import (
     MINERU_VIEW_CL_FILENAME,
     MINERU_VIEW_MD_FILENAME,
+    cancel_document_process,
     delete_document_asset,
     get_document_detail,
     get_document_or_error,
@@ -77,6 +86,48 @@ settings = get_settings()
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/knowledge-bases", tags=["knowledge-base-management"])
+
+
+def _take_next_chunk(sync_iter: Iterator[str]) -> str | None:
+    try:
+        return next(sync_iter)
+    except StopIteration:
+        return None
+
+
+async def _stream_document_process_sse(
+    request: Request,
+    *,
+    space_id: int,
+    kb_id: int,
+    document_id: int,
+    embedding_model_id: int | None,
+    mode: str,
+    force: bool,
+) -> AsyncIterator[str]:
+    """异步包装 SSE：客户端断开或热重载时尽快结束长连接。"""
+    stop_event = threading.Event()
+    sync_iter = iter_document_process_sse_events(
+        space_id=space_id,
+        kb_id=kb_id,
+        document_id=document_id,
+        embedding_model_id=embedding_model_id,
+        mode=mode,  # type: ignore[arg-type]
+        force=force,
+        stop_event=stop_event,
+    )
+    loop = asyncio.get_running_loop()
+    try:
+        while True:
+            if await request.is_disconnected():
+                stop_event.set()
+                break
+            chunk = await loop.run_in_executor(None, _take_next_chunk, sync_iter)
+            if chunk is None:
+                break
+            yield chunk
+    finally:
+        stop_event.set()
 
 
 @router.get("", response_model=list[KnowledgeBaseResponse])
@@ -103,15 +154,32 @@ def create_knowledge_base(
     db: Session = Depends(get_db),
 ) -> KnowledgeBase:
     ensure_knowledge_base_name_unique(db, space_id=current_space.id, name=payload.name)
+    create_data = apply_retrieval_defaults_to_payload(payload.model_dump())
+    if create_data.get("kb_type") == "lightrag":
+        create_data["graph_db_enabled"] = True
+        config = dict(create_data.get("config") or {})
+        lightrag_cfg = dict(config.get("lightrag") or {})
+        lightrag_cfg.setdefault("default_query_mode", "mix")
+        config["lightrag"] = lightrag_cfg
+        create_data["config"] = config
     knowledge_base = KnowledgeBase(
         enterprise_space_id=current_space.id,
-        **payload.model_dump(),
+        **create_data,
         status="active",
         milvus_collection_name="",
     )
     db.add(knowledge_base)
     db.flush()
     knowledge_base.milvus_collection_name = build_collection_name(knowledge_base.enterprise_space_id, knowledge_base.id)
+    if knowledge_base.vector_db_enabled or knowledge_base.kb_type == "lightrag":
+        try:
+            resolve_knowledge_base_milvus_dimension(
+                db,
+                knowledge_base=knowledge_base,
+                persist=False,
+            )
+        except AppError:
+            pass
     db.commit()
     db.refresh(knowledge_base)
     return knowledge_base
@@ -162,6 +230,33 @@ def update_knowledge_base(
         )
     for field, value in update_data.items():
         setattr(knowledge_base, field, value)
+    if "config" in update_data:
+        cfg = update_data.get("config")
+        if isinstance(cfg, dict):
+            pdf_parser = cfg.get("pdf_parser")
+            if pdf_parser is not None:
+                allowed = {"opendataloader", "mineru", "docling"}
+                if str(pdf_parser).strip().lower() not in allowed:
+                    raise AppError(
+                        status_code=400,
+                        code="INVALID_PDF_PARSER",
+                        message=f"pdf_parser 须为 {', '.join(sorted(allowed))} 之一",
+                    )
+    if "config" in update_data and knowledge_base.kb_type == "lightrag":
+        from app.services.lightrag_engine import invalidate_lightrag_instance
+
+        invalidate_lightrag_instance(knowledge_base.id)
+    if "embedding_model_id" in update_data and (
+        knowledge_base.vector_db_enabled or knowledge_base.kb_type == "lightrag"
+    ):
+        try:
+            resolve_knowledge_base_milvus_dimension(
+                db,
+                knowledge_base=knowledge_base,
+                persist=False,
+            )
+        except AppError:
+            pass
     db.commit()
     db.refresh(knowledge_base)
     return knowledge_base
@@ -345,6 +440,10 @@ def query_documents(
     keyword: str | None = Query(default=None),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=10, ge=1, le=100),
+    sort: str | None = Query(
+        default=None,
+        description="created_desc | created_asc | name_asc | updated_desc",
+    ),
 ) -> dict:
     return list_documents(
         db,
@@ -354,6 +453,7 @@ def query_documents(
         keyword=keyword,
         page=page,
         page_size=page_size,
+        sort=sort,
     )
 
 
@@ -399,21 +499,25 @@ def parse_document_endpoint(
 
 
 @router.post("/{kb_id}/documents/{document_id}/parse-stream")
-def parse_document_stream(
+async def parse_document_stream(
+    request: Request,
     kb_id: int,
     document_id: int,
     current_space: CurrentSpace,
     membership: RequireMembership,
     embedding_model_id: int | None = Query(default=None),
+    force: bool = Query(default=False),
 ) -> StreamingResponse:
     """Server-Sent Events：解析过程中实时输出日志，完成后在 data 中附带 document。"""
     return StreamingResponse(
-        iter_document_process_sse_events(
+        _stream_document_process_sse(
+            request,
             space_id=current_space.id,
             kb_id=kb_id,
             document_id=document_id,
             embedding_model_id=embedding_model_id,
             mode="parse",
+            force=force,
         ),
         media_type="text/event-stream",
         headers={
@@ -586,21 +690,25 @@ def reindex_document_endpoint(
 
 
 @router.post("/{kb_id}/documents/{document_id}/reindex-stream")
-def reindex_document_stream(
+async def reindex_document_stream(
+    request: Request,
     kb_id: int,
     document_id: int,
     current_space: CurrentSpace,
     membership: RequireMembership,
     embedding_model_id: int | None = Query(default=None),
+    force: bool = Query(default=False),
 ) -> StreamingResponse:
     """Server-Sent Events：重建索引时实时输出日志。"""
     return StreamingResponse(
-        iter_document_process_sse_events(
+        _stream_document_process_sse(
+            request,
             space_id=current_space.id,
             kb_id=kb_id,
             document_id=document_id,
             embedding_model_id=embedding_model_id,
             mode="reindex",
+            force=force,
         ),
         media_type="text/event-stream",
         headers={
@@ -608,6 +716,23 @@ def reindex_document_stream(
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+@router.post("/{kb_id}/documents/{document_id}/cancel-process", response_model=KnowledgeDocumentResponse)
+def cancel_document_process_endpoint(
+    kb_id: int,
+    document_id: int,
+    current_space: CurrentSpace,
+    membership: RequireMembership,
+    db: Session = Depends(get_db),
+) -> dict:
+    """取消进行中的文档解析/重建任务。"""
+    return cancel_document_process(
+        db,
+        space_id=current_space.id,
+        kb_id=kb_id,
+        document_id=document_id,
     )
 
 
@@ -654,6 +779,27 @@ def search_documents(
     db: Session = Depends(get_db),
 ) -> dict:
     return search_knowledge_base(db, space_id=current_space.id, kb_id=kb_id, payload=payload)
+
+
+@router.post("/{kb_id}/graph-search", response_model=GraphSearchResponse)
+def graph_search(
+    kb_id: int,
+    payload: GraphSearchRequest,
+    current_space: CurrentSpace,
+    membership: RequireMembership,
+    db: Session = Depends(get_db),
+) -> GraphSearchResponse:
+    kb = get_knowledge_base_or_error(db, space_id=current_space.id, kb_id=kb_id)
+    ensure_lightrag_kb(kb)
+    data = query_graph_kb(
+        db,
+        knowledge_base=kb,
+        query=payload.query,
+        mode=payload.mode,
+        top_k=payload.top_k,
+        include_references=payload.include_references,
+    )
+    return GraphSearchResponse(**data)
 
 
 @router.post("/{kb_id}/chunking/preview", response_model=KnowledgeDocumentChunkingPreviewResponse)

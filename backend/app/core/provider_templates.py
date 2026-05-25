@@ -77,6 +77,18 @@ PROVIDER_TEMPLATES: list[dict[str, Any]] = [
         "discovery_adapter": "qwen_native",
     },
     {
+        "provider_code": "dashscope_coding",
+        "provider_name": "阿里云 Coding Plan",
+        "deployment_type": "public",
+        "default_base_url": "https://coding.dashscope.aliyuncs.com/v1",
+        "supported_types": ["llm", "vlm"],
+        "auth_type": "bearer",
+        "auth_fields": [
+            {"key": "api_key", "label": "Coding Plan API Key (sk-sp-)", "type": "password", "required": True},
+        ],
+        "discovery_adapter": "dashscope_coding",
+    },
+    {
         "provider_code": "moonshot",
         "provider_name": "月之暗面",
         "deployment_type": "public",
@@ -147,6 +159,8 @@ PROVIDER_CODE_ALIASES = {
     "openai-compatible": "custom_openai",
     "bailian": "qwen",
     "kimi": "moonshot",
+    "coding-plan": "dashscope_coding",
+    "dashscope-coding": "dashscope_coding",
 }
 
 SUPPORTED_PROVIDER_CODES = set(PROVIDER_TEMPLATE_MAP) | set(PROVIDER_CODE_ALIASES)

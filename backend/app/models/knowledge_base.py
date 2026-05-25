@@ -16,7 +16,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import TSVECTOR
+from sqlalchemy.dialects.postgresql import ENUM as PGEnum, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -34,6 +34,9 @@ class KnowledgeDocumentStatus(enum.Enum):
     CHUNKING = "chunking"
     INDEXING = "indexing"
     INDEXED = "indexed"
+    GRAPH_INDEXING = "graph_indexing"
+    GRAPH_INDEXED = "graph_indexed"
+    GRAPH_FAILED = "graph_failed"
     FAILED = "failed"
     DELETED = "deleted"
 
@@ -42,6 +45,19 @@ class KnowledgeChunkVectorStatus(enum.Enum):
     PENDING = "pending"
     INDEXED = "indexed"
     FAILED = "failed"
+
+
+class KnowledgeBaseType(enum.Enum):
+    CLASSIC = "classic"
+    LIGHTRAG = "lightrag"
+
+
+KB_TYPE_ENUM = PGEnum(
+    KnowledgeBaseType.CLASSIC.value,
+    KnowledgeBaseType.LIGHTRAG.value,
+    name="knowledge_base_kb_type",
+    create_type=False,
+)
 
 
 class KnowledgeBase(Base):
@@ -57,6 +73,11 @@ class KnowledgeBase(Base):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default=KnowledgeBaseStatus.ACTIVE.value, nullable=False)
+    kb_type: Mapped[str] = mapped_column(
+        KB_TYPE_ENUM,
+        default=KnowledgeBaseType.CLASSIC.value,
+        nullable=False,
+    )
     vector_db_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     graph_db_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     embedding_model_id: Mapped[int | None] = mapped_column(
@@ -68,6 +89,7 @@ class KnowledgeBase(Base):
     default_top_k: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
     default_score_threshold: Mapped[float | None] = mapped_column(Numeric(10, 6), nullable=True)
     milvus_collection_name: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+    # 创建时应由 resolve_knowledge_base_milvus_dimension 写入；1536 仅为 ORM/历史迁移占位。
     milvus_dimension: Mapped[int] = mapped_column(Integer, default=1536, nullable=False)
     milvus_metric_type: Mapped[str] = mapped_column(String(20), default="COSINE", nullable=False)
     config: Mapped[dict | None] = mapped_column(JSON, nullable=True)

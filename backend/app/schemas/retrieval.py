@@ -33,13 +33,17 @@ class KnowledgeSearchRequest(BaseModel):
         default=None,
         ge=0,
         le=1,
-        description="相似度下限（0~1）。混合模式：先按融合分过滤再取 top_k；关键词/向量模式在返回前过滤。",
+        description=(
+            "相似度下限（0~1）。混合模式：先对向量/全文各路候选分别归一化并按阈值过滤，"
+            "再按权重融合；未开启时混合检索仍会用内置相对阈值预过滤弱命中。"
+            "单路模式：对返回分数直接过滤（向量原始分通常远小于 1，建议仅混合模式使用）。"
+        ),
     )
     vector_weight: float | None = Field(
         default=None,
         ge=0,
         le=1,
-        description="混合检索时向量分支权重 w，全文关键词权重为 1-w；缺省为 0.5",
+        description="混合检索时向量分支权重 w，全文关键词权重为 1-w；缺省为 0.3",
     )
     document_ids: list[int] | None = None
 

@@ -10,6 +10,13 @@ declare module '*.vue' {
   export default component
 }
 
+declare module 'vue-router' {
+  interface RouteMeta {
+    /** 允许未携带 token 访问（如登录页、嵌入入口） */
+    public?: boolean
+  }
+}
+
 interface ImportMetaEnv {
   readonly VITE_API_BASE_URL?: string
   /** 普通请求超时（毫秒），默认 30000 */

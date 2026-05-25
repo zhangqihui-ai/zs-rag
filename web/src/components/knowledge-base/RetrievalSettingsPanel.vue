@@ -37,7 +37,11 @@ import {
 } from '../../api/knowledge-base'
 import AppIcon from '../AppIcon.vue'
 import RetrievalConfigForm, { type RetrievalFormState } from './RetrievalConfigForm.vue'
-import { retrievalFormFromKnowledgeBase, type StoredRetrievalConfig } from './retrieval-form'
+import {
+  buildRetrievalUpdatePayload,
+  retrievalFormFromKnowledgeBase,
+  validateRetrievalForm,
+} from './retrieval-form'
 
 const props = defineProps<{ knowledgeBase: KnowledgeBase }>()
 const emit = defineEmits<{ (e: 'saved', value: KnowledgeBase): void }>()
@@ -54,32 +58,8 @@ function resetFromKnowledgeBase() {
   message.value = ''
 }
 
-function validate(): string | null {
-  const f = form.value
-  if (f.top_k < 1 || f.top_k > 50 || !Number.isFinite(f.top_k)) {
-    return 'Top K 取值范围为 1~50。'
-  }
-  if (f.score_threshold_enabled) {
-    if (f.score_threshold < 0 || f.score_threshold > 1 || !Number.isFinite(f.score_threshold)) {
-      return 'Score 阈值取值范围为 0~1。'
-    }
-  }
-  if (f.mode === 'hybrid') {
-    if (f.hybrid_strategy === 'weight') {
-      if (f.vector_weight < 0 || f.vector_weight > 1 || !Number.isFinite(f.vector_weight)) {
-        return '向量相似度权重取值范围为 0~1。'
-      }
-    } else if (!f.rerank_model_id) {
-      return '请选择一个 Rerank 模型或切换到权重设置。'
-    }
-  } else if (f.rerank_enabled && !f.rerank_model_id) {
-    return '已启用 Rerank，请选择一个 Rerank 模型。'
-  }
-  return null
-}
-
 async function save() {
-  const err = validate()
+  const err = validateRetrievalForm(form.value)
   if (err) {
     message.value = err
     messageType.value = 'err'
@@ -88,29 +68,7 @@ async function save() {
   saving.value = true
   message.value = ''
   try {
-    const f = form.value
-    const prev = (props.knowledgeBase.config || {}) as Record<string, unknown>
-    const retrievalStored: StoredRetrievalConfig = {
-      vector_weight: f.vector_weight,
-      hybrid_strategy: f.hybrid_strategy,
-      rerank_enabled: f.rerank_enabled,
-      rerank_model_id:
-        f.mode === 'hybrid'
-          ? f.hybrid_strategy === 'rerank'
-            ? f.rerank_model_id
-            : null
-          : f.rerank_enabled
-            ? f.rerank_model_id
-            : null,
-      score_threshold_enabled: f.score_threshold_enabled,
-    }
-    const nextConfig = { ...prev, retrieval: retrievalStored } as Record<string, unknown>
-    const payload = {
-      default_retrieval_mode: f.mode,
-      default_top_k: Math.round(f.top_k),
-      default_score_threshold: f.score_threshold_enabled ? f.score_threshold : null,
-      config: nextConfig,
-    }
+    const payload = buildRetrievalUpdatePayload(form.value, props.knowledgeBase.config)
     const updated = await knowledgeBaseApi.update(props.knowledgeBase.id, payload)
     message.value = '检索设置已保存。'
     messageType.value = 'ok'

@@ -4,10 +4,11 @@
       class="page-shell chat-view"
       :class="{
         'page-shell--kb-dropdown-open': settingsFloatingOpen,
+        'page-shell--embed-panel': isEmbedPanelMode,
       }"
     >
-      <!-- Grid View：对话列表 -->
-      <div v-if="!chatStore.activeConversationId" class="chat-grid-view">
+      <!-- Grid View：对话列表（嵌入精简模式不展示） -->
+      <div v-if="!chatStore.activeConversationId && !isEmbedPanelMode" class="chat-grid-view">
         <div class="chat-grid-header">
           <div class="chat-grid-title">
             <AppIcon name="chat" :size="24" style="color: var(--brand-primary);" />
@@ -73,6 +74,15 @@
         </div>
       </div>
 
+      <!-- 嵌入精简模式：未选中对话时占位（避免露出完整聊天首页） -->
+      <div v-else-if="!chatStore.activeConversationId && isEmbedPanelMode" class="chat-embed-panel-fallback">
+        <EmptyState
+          title="暂无法展示嵌入对话"
+          description="请使用带 conversation_id 的嵌入链接，并确认嵌入密钥仍有效。"
+          icon="chat"
+        />
+      </div>
+
       <!-- Detail View -->
       <div
         v-else
@@ -85,9 +95,10 @@
           :class="{
             'chat-layout--settings-open': settingsDrawerOpen && chatStore.activeSessionId,
             'chat-layout--kb-dropdown-open': settingsFloatingOpen,
+            'chat-layout--embed-panel': isEmbedPanelMode,
           }"
         >
-          <aside class="surface-card conversation-rail">
+          <aside v-if="!isEmbedPanelMode" class="surface-card conversation-rail">
           <div class="rail-back-nav">
             <button type="button" class="rail-back-btn" @click="chatStore.leaveConversation()">
               <AppIcon name="chat" :size="16" />
@@ -256,10 +267,6 @@
                   <div v-else class="header-model-empty">暂无可选模型，请在管理后台启用 LLM 或到模型管理同步</div>
                 </div>
               </div>
-              <button type="button" class="btn-multi-model-compare" @click="onMultiModelCompareClick">
-                <AppIcon name="arrow-up-right" :size="16" />
-                多模型对比
-              </button>
               <button
                 type="button"
                 class="btn-chat-settings"
@@ -403,7 +410,11 @@
         <section class="surface-card chat-main" v-else>
           <EmptyState
             title="尚未选择或创建对话"
-            description="请从左侧点击「聊天」返回首页，再创建或进入对话。"
+            :description="
+              isEmbedPanelMode
+                ? '嵌入链接无效或会话尚未加载，请刷新页面或联系管理员检查 conversation_id。'
+                : '请从左侧点击「聊天」返回首页，再创建或进入对话。'
+            "
             icon="chat"
           />
         </section>
@@ -421,12 +432,12 @@
               </button>
             </div>
           <div class="chat-side-actions">
-            <button type="button" class="btn btn-embed-site" @click="showEmbedModal = true">
+            <button v-if="!isEmbedPanelMode" type="button" class="btn btn-embed-site" @click="showEmbedModal = true">
               <AppIcon name="send" :size="16" />
               嵌入网站
             </button>
-            <button type="button" class="btn btn-access-api" @click="showAccessModal = true">
-              接入
+            <button type="button" class="btn btn-access-api" @click="openApiAccessModal">
+              API 接入
             </button>
           </div>
           <section v-if="activeConfig" class="surface-card chat-system-prompt-card">
@@ -489,6 +500,21 @@
                   @change="onChatTopKCommit"
                 />
               </div>
+            </div>
+
+            <div v-if="activeConfig && hasLightragKbSelected" class="field chat-lightrag-mode-field">
+              <span class="field-label">图检索模式（LightRAG）</span>
+              <select
+                class="select"
+                :value="activeConfig.lightrag_query_mode || 'mix'"
+                @change="onLightragModeChange"
+              >
+                <option value="mix">mix（推荐）</option>
+                <option value="naive">naive</option>
+                <option value="local">local</option>
+                <option value="global">global</option>
+                <option value="hybrid">hybrid</option>
+              </select>
             </div>
 
             <div v-if="activeConfig" class="field chat-citation-toggle-field">
@@ -774,30 +800,142 @@
 
       <!-- 嵌入网站 -->
       <div v-if="showEmbedModal" class="modal-overlay" @click.self="showEmbedModal = false">
-        <div class="modal-content modal-wide">
-          <div class="modal-header">
-            <h3>嵌入网站</h3>
-            <button class="btn btn-text" type="button" @click="showEmbedModal = false">
+        <div class="modal-content modal-wide modal-embed">
+          <div class="modal-header modal-header--embed">
+            <div>
+              <h3>嵌入到网站中</h3>
+              <p class="embed-modal-lead">选择一种方式将聊天应用嵌入到你的网站中</p>
+            </div>
+            <button class="btn btn-text" type="button" aria-label="关闭" @click="showEmbedModal = false">
               <AppIcon name="close" :size="20" />
             </button>
           </div>
-          <div class="modal-body access-modal-body">
-            <p class="access-intro">
-              将下方地址或 iframe 代码嵌入企业内网门户；访问者需已登录且能加载本应用（注意同源策略与 Cookie）。
+          <div class="modal-body access-modal-body embed-modal-body">
+            <div class="embed-security-warning">
+              <strong>安全提示：</strong>嵌入 API Key 与登录 JWT 具备同等接口访问能力，滥用可能导致<strong>模型调用费用</strong>等损失。<strong>强烈建议</strong>由后端安全存储密钥，通过服务端渲染或网关反向代理注入
+              <code>Authorization: Bearer …</code>，避免将完整 Key 写入公开前端仓库、静态资源或长期存放在访客浏览器中。
+            </div>
+
+            <div class="embed-method-grid" role="radiogroup" aria-label="嵌入方式">
+              <button
+                type="button"
+                class="embed-method-card"
+                :class="{ 'embed-method-card--active': embedMethod === 'iframe' }"
+                role="radio"
+                :aria-checked="embedMethod === 'iframe'"
+                @click="embedMethod = 'iframe'"
+              >
+                <span v-if="embedMethod === 'iframe'" class="embed-method-selected-mark" aria-hidden="true">
+                  <AppIcon name="check" :size="14" />
+                </span>
+                <div class="embed-method-thumb embed-method-thumb--iframe" aria-hidden="true">
+                  <div class="emb-browser-chrome">
+                    <span class="emb-dot" /><span class="emb-dot" /><span class="emb-dot" />
+                  </div>
+                  <div class="emb-browser-body">
+                    <span class="emb-sidebar" />
+                    <span class="emb-chat-pane" />
+                  </div>
+                </div>
+                <span class="embed-method-title">页面内 iframe</span>
+                <span class="embed-method-desc">在页面任意位置嵌入完整对话页</span>
+              </button>
+              <button
+                type="button"
+                class="embed-method-card"
+                :class="{ 'embed-method-card--active': embedMethod === 'bubble' }"
+                role="radio"
+                :aria-checked="embedMethod === 'bubble'"
+                @click="embedMethod = 'bubble'"
+              >
+                <span v-if="embedMethod === 'bubble'" class="embed-method-selected-mark" aria-hidden="true">
+                  <AppIcon name="check" :size="14" />
+                </span>
+                <div class="embed-method-thumb embed-method-thumb--bubble" aria-hidden="true">
+                  <div class="emb-browser-chrome emb-browser-chrome--mini">
+                    <span class="emb-dot" /><span class="emb-dot" /><span class="emb-dot" />
+                  </div>
+                  <div class="emb-page-canvas">
+                    <span class="emb-line" /><span class="emb-line emb-line--short" /><span class="emb-line" />
+                  </div>
+                  <span class="emb-bubble-fab" />
+                </div>
+                <span class="embed-method-title">悬浮气泡</span>
+                <span class="embed-method-desc">右下角气泡按钮，点击展开对话窗口</span>
+              </button>
+            </div>
+
+            <div class="embed-key-panel">
+              <div v-if="embedConversationId" class="access-block embed-key-block">
+                <div class="access-block-head">
+                  <span class="access-label">聊天 ID</span>
+                  <button type="button" class="btn btn-text btn-copy" @click.stop="copyEmbedChatId">复制</button>
+                </div>
+                <pre class="access-pre">{{ embedConversationId }}</pre>
+                <p class="embed-field-hint">用于对外 API（如 <code>ZS_RAG_CHAT_ID</code>、OpenAI 路径中的 chat_id）</p>
+              </div>
+
+              <p v-if="embedKeyEnsureLoading" class="embed-key-meta embed-key-meta--inline">正在准备嵌入密钥…</p>
+              <p v-if="embedKeyEnsureError" class="embed-key-meta embed-key-meta--error">{{ embedKeyEnsureError }}</p>
+
+              <div class="embed-key-toolbar">
+                <button
+                  type="button"
+                  class="btn btn-secondary"
+                  :disabled="embedKeyEnsureLoading"
+                  @click="rotateEmbedApiKey"
+                >
+                  轮换密钥
+                </button>
+                <span v-if="embedApiKeyPlaintext" class="embed-key-hint">
+                  密钥仅此窗口展示一次，请复制保存。
+                </span>
+              </div>
+
+              <div v-if="embedApiKeyPlaintext" class="access-block embed-key-block">
+                <div class="access-block-head">
+                  <span class="access-label">嵌入 API Key（Authorization: Bearer）</span>
+                  <button type="button" class="btn btn-text btn-copy" @click.stop="copyText(embedApiKeyPlaintext || '')">
+                    复制
+                  </button>
+                </div>
+                <pre class="access-pre">{{ embedApiKeyPlaintext }}</pre>
+              </div>
+            </div>
+
+            <p class="embed-snippet-hint">
+              <template v-if="embedMethod === 'iframe'">
+                将以下 iframe 粘贴到目标位置。URL 已包含 <code>api_key</code> 与当前企业空间 <code>space</code>；接口请求头为
+                <code>Authorization: Bearer &lt;同一密钥&gt;</code>。示例中占位符请替换为轮换后的真实密钥或由后端注入。
+              </template>
+              <template v-else>
+                将以下代码放在 <code>&lt;/body&gt;</code> 前；<code>src</code> 指向嵌入入口并携带 <code>api_key</code> /
+                <code>space</code>。
+              </template>
             </p>
+            <div class="access-block embed-snippet-block">
+              <div class="access-block-head">
+                <span class="access-label">嵌入代码</span>
+                <button type="button" class="btn btn-text btn-copy" @click="copyText(currentEmbedSnippet)">
+                  复制
+                </button>
+              </div>
+              <pre class="access-pre embed-snippet-pre">{{ currentEmbedSnippet }}</pre>
+            </div>
+
             <div class="access-block">
               <div class="access-block-head">
-                <span class="access-label">对话页 URL</span>
+                <span class="access-label">站内对话工作台（需已登录）</span>
                 <button type="button" class="btn btn-text btn-copy" @click="copyText(chatPageUrl)">复制</button>
               </div>
               <pre class="access-pre">{{ chatPageUrl }}</pre>
             </div>
             <div class="access-block">
               <div class="access-block-head">
-                <span class="access-label">iframe 示例</span>
-                <button type="button" class="btn btn-text btn-copy" @click="copyText(embedIframeSnippet)">复制</button>
+                <span class="access-label">嵌入入口（含 api_key / space 查询参数）</span>
+                <button type="button" class="btn btn-text btn-copy" @click="copyText(embedFullChatEmbedUrl)">复制</button>
               </div>
-              <pre class="access-pre">{{ embedIframeSnippet }}</pre>
+              <pre class="access-pre">{{ embedFullChatEmbedUrl }}</pre>
             </div>
           </div>
         </div>
@@ -805,47 +943,400 @@
 
       <!-- 接入信息 -->
       <div v-if="showAccessModal" class="modal-overlay" @click.self="showAccessModal = false">
-        <div class="modal-content modal-wide">
+        <div class="modal-content modal-wide modal-api-access">
           <div class="modal-header">
-            <h3>接入信息</h3>
-            <button class="btn btn-text" type="button" @click="showAccessModal = false">
-              <AppIcon name="close" :size="20" />
-            </button>
+            <div>
+              <h3>API 接入</h3>
+              <p class="modal-subtitle">{{ apiAccessModalSubtitle }}</p>
+            </div>
+            <div class="modal-header-actions">
+              <button
+                v-if="apiAccessMode === 'zs-rag'"
+                type="button"
+                class="btn btn-text btn-download-doc"
+                :disabled="chatApiDocDownloading"
+                @click="onDownloadChatApiDoc"
+              >
+                {{ chatApiDocDownloading ? '下载中…' : '下载接入文档' }}
+              </button>
+              <button
+                v-else
+                type="button"
+                class="btn btn-text btn-download-doc"
+                :disabled="chatApiDocDownloading"
+                @click="onDownloadOpenAiExampleDoc"
+              >
+                {{ chatApiDocDownloading ? '下载中…' : '下载 OpenAI 示例' }}
+              </button>
+              <button class="btn btn-text" type="button" @click="showAccessModal = false">
+                <AppIcon name="close" :size="20" />
+              </button>
+            </div>
           </div>
-          <div class="modal-body access-modal-body">
-            <p class="access-intro">
-              以下说明面向当前选中会话的实时对话与相关 REST；请在请求中携带企业空间与登录态。
-            </p>
+          <div class="modal-body access-modal-body" @click="closeApiAccessDropdowns">
+            <div class="api-access-mode-field" @click.stop>
+              <span class="api-access-mode-label">接入方式</span>
+              <div
+                class="api-access-mode-picker"
+                :class="{ 'api-access-mode-picker--open': apiAccessModeMenuOpen }"
+              >
+                <button
+                  type="button"
+                  class="api-access-mode-trigger"
+                  :aria-expanded="apiAccessModeMenuOpen"
+                  aria-haspopup="listbox"
+                  aria-label="选择接入方式"
+                  @click.stop="toggleApiAccessModeMenu"
+                >
+                  <span class="api-access-mode-trigger-label">{{ apiAccessModeLabel }}</span>
+                  <AppIcon
+                    name="chevron-down"
+                    :size="14"
+                    class="api-access-mode-chevron"
+                    :class="{ 'is-open': apiAccessModeMenuOpen }"
+                  />
+                </button>
+                <div
+                  v-if="apiAccessModeMenuOpen"
+                  class="api-access-mode-dropdown"
+                  role="presentation"
+                  @click.stop
+                >
+                  <div class="api-access-mode-list scrollbar-pill" role="listbox" aria-label="接入方式列表">
+                    <button
+                      v-for="opt in apiAccessModeOptions"
+                      :key="opt.value"
+                      type="button"
+                      role="option"
+                      class="api-access-mode-option"
+                      :class="{ 'is-current': apiAccessMode === opt.value }"
+                      :aria-selected="apiAccessMode === opt.value"
+                      @click="pickApiAccessMode(opt.value)"
+                    >
+                      <span class="api-access-mode-option-name">{{ opt.label }}</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
 
-            <h4 class="access-section-title">页面 URL</h4>
-            <pre class="access-pre">{{ chatPageUrl }}</pre>
+            <template v-if="apiAccessMode === 'openai'">
+              <div class="openai-access-id-panel">
+                <div class="access-block embed-key-block">
+                  <div class="access-block-head">
+                    <span class="access-label">base_url<span class="openai-field-tag">（必填）</span></span>
+                    <button type="button" class="btn btn-text btn-copy" @click.stop="copyText(openAiBaseUrlDisplay)">
+                      复制
+                    </button>
+                  </div>
+                  <pre class="access-pre">{{ openAiBaseUrlDisplay }}</pre>
+                </div>
+                <div class="access-block embed-key-block">
+                  <div class="access-block-head">
+                    <span class="access-label">API Key<span class="openai-field-tag">（必填）</span></span>
+                    <button
+                      type="button"
+                      class="btn btn-text btn-copy"
+                      :disabled="!embedApiKeyPlaintext"
+                      @click.stop="copyText(embedApiKeyPlaintext || '')"
+                    >
+                      复制
+                    </button>
+                  </div>
+                  <pre class="access-pre">{{ openAiApiKeyDisplay }}</pre>
+                  <p v-if="embedKeyEnsureError" class="embed-field-hint embed-field-hint--error">
+                    {{ embedKeyEnsureError }}
+                  </p>
+                  <p v-else-if="!embedApiKeyPlaintext && !embedKeyEnsureLoading" class="embed-field-hint">
+                    用于 <code>Authorization: Bearer</code>；也可在「嵌入网站」中轮换密钥。
+                  </p>
+                </div>
+                <div class="access-block embed-key-block">
+                  <div class="access-block-head">
+                    <span class="access-label">chat_id<span class="openai-field-tag">（必填）</span></span>
+                    <button type="button" class="btn btn-text btn-copy" @click.stop="copyText(openAiParamChatId)">
+                      复制
+                    </button>
+                  </div>
+                  <pre class="access-pre">{{ openAiParamChatId }}</pre>
+                </div>
+                <div class="access-block embed-key-block">
+                  <div class="access-block-head">
+                    <span class="access-label">session_id<span class="openai-field-tag openai-field-tag--optional">（非必须）</span></span>
+                    <button type="button" class="btn btn-text btn-copy" @click.stop="copyText(openAiParamSessionId)">
+                      复制
+                    </button>
+                  </div>
+                  <pre class="access-pre">{{ openAiParamSessionId }}</pre>
+                </div>
+              </div>
 
-            <h4 class="access-section-title">流式对话（HTTP SSE）</h4>
-            <p class="access-muted">
-              使用 <strong>POST</strong> 提交本轮用户输入，响应为 <code>text/event-stream</code>；每条事件为
-              <code>data: &lt;json&gt;</code>，与原先 WebSocket 推送的 JSON 结构一致（<code>assistant_delta</code> /
-              <code>assistant_done</code>）。
-            </p>
-            <pre class="access-pre">{{ sseStreamUrlExample }}</pre>
+              <section class="openai-access-example" @click.stop="openAiClientLangMenuOpen = false">
+                <div class="openai-access-example-head">
+                  <span class="openai-access-example-title">
+                    <AppIcon name="arrow-up-right" :size="14" class="openai-access-example-icon" />
+                    Create chat completion
+                  </span>
+                  <div class="openai-access-example-actions">
+                    <div class="openai-access-tabs" role="tablist" aria-label="流式或非流式">
+                      <button
+                        type="button"
+                        role="tab"
+                        class="openai-access-tab"
+                        :class="{ 'is-active': openAiCurlStream }"
+                        :aria-selected="openAiCurlStream"
+                        @click="openAiCurlStream = true"
+                      >
+                        流式
+                      </button>
+                      <button
+                        type="button"
+                        role="tab"
+                        class="openai-access-tab"
+                        :class="{ 'is-active': !openAiCurlStream }"
+                        :aria-selected="!openAiCurlStream"
+                        @click="openAiCurlStream = false"
+                      >
+                        非流式
+                      </button>
+                    </div>
+                    <div
+                      class="openai-access-lang-picker"
+                      :class="{ 'openai-access-lang-picker--open': openAiClientLangMenuOpen }"
+                      @click.stop
+                    >
+                      <button
+                        type="button"
+                        class="openai-access-lang-trigger"
+                        :aria-expanded="openAiClientLangMenuOpen"
+                        aria-haspopup="listbox"
+                        aria-label="选择客户端语言"
+                        @click.stop="toggleOpenAiClientLangMenu"
+                      >
+                        <span class="openai-access-lang-trigger-label">{{ openAiClientLangLabel }}</span>
+                        <AppIcon
+                          name="chevron-down"
+                          :size="12"
+                          class="openai-access-lang-chevron"
+                          :class="{ 'is-open': openAiClientLangMenuOpen }"
+                        />
+                      </button>
+                      <div
+                        v-if="openAiClientLangMenuOpen"
+                        class="openai-access-lang-dropdown"
+                        role="presentation"
+                        @click.stop
+                      >
+                        <div class="openai-access-lang-list scrollbar-pill" role="listbox" aria-label="客户端语言">
+                          <button
+                            v-for="opt in openAiClientLangOptions"
+                            :key="opt.value"
+                            type="button"
+                            role="option"
+                            class="openai-access-lang-option"
+                            :class="{ 'is-current': openAiClientLang === opt.value }"
+                            :aria-selected="openAiClientLang === opt.value"
+                            @click="pickOpenAiClientLang(opt.value)"
+                          >
+                            {{ opt.label }}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      class="btn btn-text btn-copy openai-access-copy-btn"
+                      title="复制"
+                      aria-label="复制代码"
+                      @click="copyText(openAiCodeExample)"
+                    >
+                      <AppIcon name="copy" :size="16" />
+                    </button>
+                  </div>
+                </div>
+                <pre class="access-pre access-pre--code openai-access-code">{{ openAiCodeExample }}</pre>
+                <div class="api-access-response-section">
+                  <div class="api-access-response-head">
+                    <span class="api-access-response-label">响应示例</span>
+                    <span class="api-access-response-meta">{{ openAiCurlStream ? 'SSE' : 'JSON' }}</span>
+                    <button
+                      type="button"
+                      class="btn btn-text btn-copy openai-access-copy-btn"
+                      title="复制响应示例"
+                      @click="copyText(openAiResponseExample)"
+                    >
+                      <AppIcon name="copy" :size="16" />
+                    </button>
+                  </div>
+                  <pre class="access-pre access-pre--code api-access-response-body">{{ openAiResponseExample }}</pre>
+                </div>
+              </section>
+              <ul class="openai-access-notes">
+                <li><code>chat_id</code> 必须填写（已体现在 <code>base_url</code> 路径中）。</li>
+                <li><code>session_id</code> 可不传；推荐传入，以复用平台的多轮对话上下文管理。</li>
+              </ul>
+              <p class="openai-access-doc-link">
+                官方文档：
+                <a
+                  href="https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="openai-access-link"
+                >Create chat completion</a>
+              </p>
+            </template>
 
-            <h4 class="access-section-title">请求体（JSON）</h4>
-            <pre class="access-pre">{{ sseBodyExample }}</pre>
+            <template v-else>
+              <div class="openai-access-id-panel">
+                <div class="access-block embed-key-block">
+                  <div class="access-block-head">
+                    <span class="access-label">chat_id<span class="openai-field-tag">（必填）</span></span>
+                    <button type="button" class="btn btn-text btn-copy" @click.stop="copyText(openAiParamChatId)">
+                      复制
+                    </button>
+                  </div>
+                  <pre class="access-pre">{{ openAiParamChatId }}</pre>
+                </div>
+                <div class="access-block embed-key-block">
+                  <div class="access-block-head">
+                    <span class="access-label">API Key<span class="openai-field-tag">（必填）</span></span>
+                    <button
+                      type="button"
+                      class="btn btn-text btn-copy"
+                      :disabled="!embedApiKeyPlaintext"
+                      @click.stop="copyText(embedApiKeyPlaintext || '')"
+                    >
+                      复制
+                    </button>
+                  </div>
+                  <pre class="access-pre">{{ openAiApiKeyDisplay }}</pre>
+                  <p v-if="embedKeyEnsureError" class="embed-field-hint embed-field-hint--error">
+                    {{ embedKeyEnsureError }}
+                  </p>
+                </div>
+                <div class="access-block embed-key-block">
+                  <div class="access-block-head">
+                    <span class="access-label">session_id<span class="openai-field-tag openai-field-tag--optional">（非必须）</span></span>
+                    <button type="button" class="btn btn-text btn-copy" @click.stop="copyText(openAiParamSessionId)">
+                      复制
+                    </button>
+                  </div>
+                  <pre class="access-pre">{{ openAiParamSessionId }}</pre>
+                </div>
+              </div>
 
-            <h4 class="access-section-title">REST 接口示例</h4>
-            <ul class="access-list">
-              <li><code>GET {{ apiBaseUrl }}/api/v1/chats/sessions/{{ sessionIdPlaceholder }}/messages</code> — 历史消息</li>
-              <li><code>GET {{ apiBaseUrl }}/api/v1/chats/sessions/{{ sessionIdPlaceholder }}/config</code> — 对话（chat）级模型配置</li>
-              <li><code>GET {{ apiBaseUrl }}/api/v1/chats</code> — 对话列表</li>
-              <li><code>GET {{ apiBaseUrl }}/api/v1/chats/{{ chatIdPlaceholder }}/sessions</code> — 会话列表</li>
-              <li><code>POST {{ apiBaseUrl }}/api/v1/chat/completions</code> — OpenAI 形态补全（流式/非流式）</li>
-            </ul>
+              <section class="zs-rag-access-api">
+                <h4 class="access-section-title">1. 对话级（不携带 session_id）</h4>
+                <p class="access-muted">
+                  站内 SSE：<code>POST /api/v1/chats/{chat_id}/stream</code>。自动建会话；请从
+                  <code>assistant_done</code> 事件中复制 <code>session_id</code> 供接口 2 使用。
+                </p>
+                <div class="openai-access-example">
+                  <div class="openai-access-example-head">
+                    <span class="openai-access-example-title">
+                      <span class="api-method api-method--post">POST</span>
+                      <code class="zs-rag-access-path">{{ zsRagChatLevelPath }}</code>
+                    </span>
+                    <button
+                      type="button"
+                      class="btn btn-text btn-copy openai-access-copy-btn"
+                      title="复制 curl"
+                      @click="copyText(zsRagChatLevelCurl)"
+                    >
+                      <AppIcon name="copy" :size="16" />
+                    </button>
+                  </div>
+                  <pre class="access-pre access-pre--code openai-access-code">{{ zsRagChatLevelCurl }}</pre>
+                  <div class="api-access-response-section">
+                    <div class="api-access-response-head">
+                      <span class="api-access-response-label">响应示例</span>
+                      <span class="api-access-response-meta">SSE</span>
+                      <button
+                        type="button"
+                        class="btn btn-text btn-copy openai-access-copy-btn"
+                        title="复制响应示例"
+                        @click="copyText(zsRagChatLevelResponseExample)"
+                      >
+                        <AppIcon name="copy" :size="16" />
+                      </button>
+                    </div>
+                    <pre class="access-pre access-pre--code api-access-response-body">{{ zsRagChatLevelResponseExample }}</pre>
+                  </div>
+                </div>
+              </section>
 
-            <h4 class="access-section-title">所需认证信息</h4>
-            <pre class="access-pre">Authorization: Bearer &lt;登录后获得的 access_token&gt;
-X-Enterprise-Space: &lt;企业空间 slug，缺省可为 default&gt;</pre>
+              <section class="zs-rag-access-api">
+                <h4 class="access-section-title">2. 会话级（绑定当前 session_id）</h4>
+                <p class="access-muted">
+                  绑定当前 <code>session_id</code>：流式 <code>…/stream</code>，非流式 <code>…/complete</code>，请求体均为
+                  <code>{"content":"..."}</code>。
+                </p>
+                <div class="openai-access-example">
+                  <div class="openai-access-example-head">
+                    <span class="openai-access-example-title">
+                      <span class="api-method api-method--post">POST</span>
+                      <code class="zs-rag-access-path">{{ zsRagSessionApiPath }}</code>
+                    </span>
+                    <div class="openai-access-example-actions">
+                      <div class="openai-access-tabs" role="tablist" aria-label="流式或非流式">
+                        <button
+                          type="button"
+                          role="tab"
+                          class="openai-access-tab"
+                          :class="{ 'is-active': zsRagSessionStream }"
+                          :aria-selected="zsRagSessionStream"
+                          @click="zsRagSessionStream = true"
+                        >
+                          流式
+                        </button>
+                        <button
+                          type="button"
+                          role="tab"
+                          class="openai-access-tab"
+                          :class="{ 'is-active': !zsRagSessionStream }"
+                          :aria-selected="!zsRagSessionStream"
+                          @click="zsRagSessionStream = false"
+                        >
+                          非流式
+                        </button>
+                      </div>
+                      <button
+                        type="button"
+                        class="btn btn-text btn-copy openai-access-copy-btn"
+                        title="复制 curl"
+                        @click="copyText(zsRagSessionCurlExample)"
+                      >
+                        <AppIcon name="copy" :size="16" />
+                      </button>
+                    </div>
+                  </div>
+                  <pre class="access-pre access-pre--code openai-access-code">{{ zsRagSessionCurlExample }}</pre>
+                  <div class="api-access-response-section">
+                    <div class="api-access-response-head">
+                      <span class="api-access-response-label">响应示例</span>
+                      <span class="api-access-response-meta">{{ zsRagSessionStream ? 'SSE' : 'JSON' }}</span>
+                      <button
+                        type="button"
+                        class="btn btn-text btn-copy openai-access-copy-btn"
+                        title="复制响应示例"
+                        @click="copyText(zsRagSessionResponseExample)"
+                      >
+                        <AppIcon name="copy" :size="16" />
+                      </button>
+                    </div>
+                    <pre class="access-pre access-pre--code api-access-response-body">{{ zsRagSessionResponseExample }}</pre>
+                  </div>
+                </div>
+              </section>
 
-            <h4 class="access-section-title">SSE 事件示例</h4>
-            <pre class="access-pre">{{ sseEventsExample }}</pre>
+              <p class="openai-access-doc-link">
+                完整说明见
+                <button type="button" class="btn btn-text btn-link-inline" @click="onDownloadChatApiDoc">
+                  下载接入文档
+                </button>
+              </p>
+            </template>
+
           </div>
         </div>
       </div>
@@ -864,10 +1355,39 @@ import KnowledgeBaseMultiSelect from '../components/knowledge-base/KnowledgeBase
 
 import { useChatStore } from '../stores/chat'
 import { streamChatCompletion } from '../lib/chat-sse'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { knowledgeBaseApi, type KnowledgeBase, type KnowledgeChunk } from '../api/knowledge-base'
+import {
+  defaultRetrievalFormState,
+  syncTopKToKnowledgeBases,
+  topKFromKnowledgeBases,
+} from '../components/knowledge-base/retrieval-form'
 import { modelApi, defaultModelApi, type DefaultModelOption, type ModelItem, type ProviderModelsGroup } from '../api/model-management'
-import type { ChatSession, ChatMessage, ChatCitation } from '../api/chat'
+import {
+  chatEmbedApiKeyApi,
+  type ChatSession,
+  type ChatMessage,
+  type ChatCitation,
+} from '../api/chat'
+import { useAuthStore } from '../stores/auth'
+import {
+  buildOpenAiAccessCurl,
+  buildOpenAiAccessPython,
+  buildOpenAiChatCompletionsBaseUrl,
+  buildOpenAiNonStreamResponseExample,
+  buildOpenAiStreamResponseExample,
+  buildZsRagChatLevelCurl,
+  buildZsRagCompleteResponseExample,
+  buildZsRagSessionCompletionCurl,
+  buildZsRagSessionStreamCurl,
+  buildZsRagSseResponseExample,
+  type OpenAiClientLang,
+  downloadChatApiDoc,
+  downloadOpenAiExampleDoc,
+  type ApiAccessMode,
+  type ChatApiAccessContext,
+} from '../lib/chat-api-access'
+import { copyToClipboard } from '../lib/copy-to-clipboard'
 
 type AssistantSeg = { k: 't'; v: string } | { k: 'r'; n: number }
 
@@ -930,7 +1450,15 @@ function citationRefTitle(refNum: number, message: ChatMessage): string {
 }
 
 const chatStore = useChatStore()
+const authStore = useAuthStore()
+const route = useRoute()
 const router = useRouter()
+
+/** URL ?embed_panel=1：iframe 内仅展示对话主区（隐藏平台导航与「会话」侧栏） */
+const isEmbedPanelMode = computed(() => {
+  const ep = route.query.embed_panel
+  return ep === '1' || ep === 'true'
+})
 
 const citationModalOpen = ref(false)
 const citationModalCitation = ref<ChatCitation | null>(null)
@@ -997,10 +1525,20 @@ function goCitationDocumentPage() {
     return
   }
   closeCitationModal()
+  const query: Record<string, string> = {}
+  if (c.chunk_index != null) {
+    query.focus_chunk_index = String(c.chunk_index)
+  }
+  if (c.page_no != null) {
+    query.focus_page_no = String(c.page_no)
+  }
+  if (c.chunk_id != null) {
+    query.focus_chunk_id = String(c.chunk_id)
+  }
   void router.push({
     name: 'knowledge-document-detail',
     params: { kbId: String(kbId), docId: String(docId) },
-    query: c.chunk_index != null ? { focus_chunk_index: String(c.chunk_index) } : {},
+    query,
   })
 }
 
@@ -1192,7 +1730,122 @@ const deleteConfirmName = ref('')
 const isDeleting = ref(false)
 
 const showEmbedModal = ref(false)
+const embedMethod = ref<'iframe' | 'bubble'>('iframe')
+const embedApiKeyPlaintext = ref<string | null>(null)
+const embedKeyEnsureLoading = ref(false)
+const embedKeyEnsureError = ref('')
+
+const embedConversationId = computed(() => {
+  const id = chatStore.activeConversationId
+  return id != null ? String(id) : ''
+})
 const showAccessModal = ref(false)
+const apiAccessMode = ref<ApiAccessMode>('zs-rag')
+const apiAccessModeMenuOpen = ref(false)
+const openAiCurlStream = ref(true)
+const zsRagSessionStream = ref(true)
+const openAiClientLang = ref<OpenAiClientLang>('http')
+const openAiClientLangMenuOpen = ref(false)
+
+const openAiClientLangOptions = [
+  { value: 'http' as const, label: 'HTTP' },
+  { value: 'python' as const, label: 'Python' },
+] as const
+
+const openAiClientLangLabel = computed(
+  () => openAiClientLangOptions.find((o) => o.value === openAiClientLang.value)?.label ?? 'HTTP',
+)
+
+const apiAccessModeOptions = [
+  { value: 'zs-rag' as const, label: 'zs-rag 接口方式' },
+  { value: 'openai' as const, label: 'OpenAI API 格式' },
+] as const
+
+const apiAccessModeLabel = computed(
+  () =>
+    apiAccessModeOptions.find((o) => o.value === apiAccessMode.value)?.label ?? 'zs-rag 接口方式',
+)
+const chatApiDocDownloading = ref(false)
+
+async function ensureEmbedApiKey(opts?: { noConversationMessage?: string }) {
+  embedKeyEnsureError.value = ''
+  const cid = chatStore.activeConversationId
+  if (!cid) {
+    embedApiKeyPlaintext.value = null
+    if (opts?.noConversationMessage) {
+      embedKeyEnsureError.value = opts.noConversationMessage
+    }
+    return
+  }
+
+  const storageKey = `zs_rag_embed_api_key:${authStore.currentSpaceSlug || 'default'}:${cid}`
+  const cached =
+    typeof sessionStorage !== 'undefined' ? sessionStorage.getItem(storageKey) : null
+  embedApiKeyPlaintext.value = cached?.trim() ? cached : null
+
+  embedKeyEnsureLoading.value = true
+  try {
+    const { data } = await chatEmbedApiKeyApi.ensureOrCreate({
+      conversation_id: cid,
+      regenerate: false,
+    })
+    if (data.api_key) {
+      embedApiKeyPlaintext.value = data.api_key
+      if (typeof sessionStorage !== 'undefined') {
+        sessionStorage.setItem(storageKey, data.api_key)
+      }
+    } else if (!embedApiKeyPlaintext.value) {
+      const { data: again } = await chatEmbedApiKeyApi.ensureOrCreate({
+        conversation_id: cid,
+        issue_new_for_share: true,
+      })
+      if (again.api_key) {
+        embedApiKeyPlaintext.value = again.api_key
+        if (typeof sessionStorage !== 'undefined') {
+          sessionStorage.setItem(storageKey, again.api_key)
+        }
+      }
+    }
+  } catch {
+    embedKeyEnsureError.value = '无法准备嵌入 API Key，请确认已登录且对本对话有权限。'
+  } finally {
+    embedKeyEnsureLoading.value = false
+  }
+}
+
+watch(showEmbedModal, async (open) => {
+  if (!open) return
+  await ensureEmbedApiKey({
+    noConversationMessage: '请先进入一则对话，并在右侧打开「嵌入网站」。',
+  })
+})
+
+async function rotateEmbedApiKey() {
+  const cid = chatStore.activeConversationId
+  if (!cid) return
+
+  embedKeyEnsureLoading.value = true
+  embedKeyEnsureError.value = ''
+  const storageKey = `zs_rag_embed_api_key:${authStore.currentSpaceSlug || 'default'}:${cid}`
+  try {
+    const { data } = await chatEmbedApiKeyApi.ensureOrCreate({
+      conversation_id: cid,
+      regenerate: true,
+    })
+    embedApiKeyPlaintext.value = data.api_key ?? null
+    if (typeof sessionStorage !== 'undefined') {
+      if (data.api_key) {
+        sessionStorage.setItem(storageKey, data.api_key)
+      } else {
+        sessionStorage.removeItem(storageKey)
+      }
+    }
+  } catch {
+    embedKeyEnsureError.value = '轮换密钥失败，请稍后重试。'
+  } finally {
+    embedKeyEnsureLoading.value = false
+  }
+}
 
 const vFocus = {
   mounted: (el: HTMLElement) => el.focus()
@@ -1228,8 +1881,8 @@ const openDeleteSession = (session: { id: string; title: string }) => {
   deleteModalOpen.value = true
 }
 
-const closeDeleteModal = () => {
-  if (isDeleting.value) return
+const closeDeleteModal = (force = false) => {
+  if (!force && isDeleting.value) return
   deleteModalOpen.value = false
   deleteTarget.value = null
   deleteConfirmName.value = ''
@@ -1251,7 +1904,7 @@ const confirmDelete = async () => {
     } else {
       await chatStore.deleteSession(deleteTarget.value.id)
     }
-    closeDeleteModal()
+    closeDeleteModal(true)
   } catch (e) {
     console.error('Delete failed', e)
   } finally {
@@ -1395,24 +2048,65 @@ const chatKnowledgeBaseIds = computed({
     return activeConfig.value?.knowledge_base_ids ?? []
   },
   set(ids: number[]) {
-    updateConfig('knowledge_base_ids', ids)
+    void updateConfig('knowledge_base_ids', ids)
   },
 })
 
+const hasLightragKbSelected = computed(() => {
+  const ids = new Set(chatKnowledgeBaseIds.value)
+  return kbs.value.some((kb) => ids.has(kb.id) && kb.kb_type === 'lightrag')
+})
+
+async function onLightragModeChange(evt: Event) {
+  const value = (evt.target as HTMLSelectElement).value as 'naive' | 'local' | 'global' | 'hybrid' | 'mix'
+  await updateConfig('lightrag_query_mode', value)
+}
+
 const RETRIEVAL_TOP_K_HELP =
-  '各知识库仍按知识库检索设置召回候选；此处为合并排序后写入对话上下文的上限（1–50）。多库时分数统一排序后再截断。'
+  '与知识库「检索设置 / 检索测试」中的 Top K 相同：单库时召回条数一致；多库时为合并排序后写入上下文的上限。修改后会同步保存到已选知识库。'
+
+const DEFAULT_CHAT_TOP_K = defaultRetrievalFormState().top_k
 
 function clampChatRetrievalTopK(n: number): number {
-  if (!Number.isFinite(n)) return 8
+  if (!Number.isFinite(n)) return DEFAULT_CHAT_TOP_K
   return Math.min(50, Math.max(1, Math.round(n)))
 }
 
-const chatTopK = ref(8)
+const chatTopK = ref(DEFAULT_CHAT_TOP_K)
+const skipTopKFromKbWatch = ref(false)
+let prevKbIdsKey = ''
 
 watch(
   () => activeConfig.value?.retrieval_top_k,
   (v) => {
-    chatTopK.value = clampChatRetrievalTopK(v ?? 8)
+    if (skipTopKFromKbWatch.value) {
+      return
+    }
+    chatTopK.value = clampChatRetrievalTopK(v ?? DEFAULT_CHAT_TOP_K)
+  },
+  { immediate: true },
+)
+
+watch(
+  () => activeConfig.value?.knowledge_base_ids,
+  async (ids) => {
+    const key = (ids ?? []).join(',')
+    if (key === prevKbIdsKey) {
+      return
+    }
+    prevKbIdsKey = key
+    if (!activeConfig.value || !ids?.length || kbs.value.length === 0) {
+      return
+    }
+    const want = topKFromKnowledgeBases(ids, kbs.value)
+    const cur = clampChatRetrievalTopK(activeConfig.value.retrieval_top_k ?? DEFAULT_CHAT_TOP_K)
+    if (want === cur) {
+      return
+    }
+    skipTopKFromKbWatch.value = true
+    chatTopK.value = want
+    await updateConfig('retrieval_top_k', want)
+    skipTopKFromKbWatch.value = false
   },
   { immediate: true },
 )
@@ -1426,11 +2120,10 @@ const chatTopKSliderStyle = computed(() => {
   return { '--progress': `${pct.toFixed(2)}%` } as Record<string, string>
 })
 
-/** 须与后端 `chat_service.DEFAULT_CHAT_SYSTEM_PROMPT` 保持一致 */
+/** 与后端 `DEFAULT_CHAT_SYSTEM_PROMPT_GENERAL` 一致；未保存自定义时后端按本轮是否有检索片段在通用/RAG 模板间选择 */
 const DEFAULT_CHAT_SYSTEM_PROMPT =
-  '你是一个智能助手，请总结知识库的内容来回答问题，请列举知识库中的数据详细回答。' +
-  '当所有知识库内容都与问题无关时，你的回答必须包括「知识库中未找到您要的答案！」这句话。' +
-  '回答需要考虑聊天历史。\n以下是知识库：\n{knowledge}\n以上是知识库。'
+  '你是一个乐于助人的智能助手。请结合聊天历史自然回答用户问题。\n' +
+  '当前对话未选择知识库，或本轮检索未返回任何参考片段：请按通用对话方式回复，不必强行关联知识库或编造文档来源。'
 
 const systemPromptDraft = ref('')
 
@@ -1501,13 +2194,13 @@ function toggleSidePanelModelMenu() {
   sidePanelModelMenuOpen.value = !sidePanelModelMenuOpen.value
 }
 
-function pickSidePanelModel(m: ModelItem) {
-  updateConfig('model_name', m)
+async function pickSidePanelModel(m: ModelItem) {
+  await updateConfig('model_name', m)
   sidePanelModelMenuOpen.value = false
 }
 
-function pickHeaderModel(m: ModelItem) {
-  updateConfig('model_name', m)
+async function pickHeaderModel(m: ModelItem) {
+  await updateConfig('model_name', m)
   headerModelMenuOpen.value = false
   sidePanelModelMenuOpen.value = false
 }
@@ -1542,46 +2235,231 @@ const chatPageUrl = computed(() =>
   typeof window !== 'undefined' ? `${window.location.origin}/chat` : '/chat',
 )
 
-const embedIframeSnippet = computed(
-  () =>
-    `<iframe src="${chatPageUrl.value}" title="知识对话" width="100%" height="720" frameborder="0" allow="clipboard-read; clipboard-write"></iframe>`,
+const chatEmbedPageUrl = computed(() =>
+  typeof window !== 'undefined' ? `${window.location.origin}/chat/embed` : '/chat/embed',
 )
 
-const sseStreamUrlExample = computed(() => {
-  const base = apiBaseUrl.value
-  const sid = chatStore.activeSessionId
-  if (sid != null) {
-    return `POST ${base}/api/v1/chats/sessions/${sid}/stream`
+/** 带 api_key、space、可选 conversation_id 的嵌入入口完整 URL（用于 iframe / 气泡 src） */
+const embedFullChatEmbedUrl = computed(() => {
+  const base = chatEmbedPageUrl.value
+  const space = encodeURIComponent(authStore.currentSpaceSlug || 'default')
+  const k = embedApiKeyPlaintext.value?.trim()
+  const cid = chatStore.activeConversationId?.trim()
+  const convSuffix = cid ? `&conversation_id=${encodeURIComponent(cid)}` : ''
+  const panelSuffix = '&embed_panel=1'
+  if (k) {
+    return `${base}?api_key=${encodeURIComponent(k)}&space=${space}${convSuffix}${panelSuffix}`
   }
-  return `POST ${base}/api/v1/chats/sessions/<session_id>/stream`
+  return `${base}?api_key=YOUR_EMBED_API_KEY&space=${space}${convSuffix}${panelSuffix}`
 })
 
-const sseBodyExample = `{
-  "content": "用户本轮输入的纯文本"
-}`
-
-const sseEventsExample = `data: {"type":"assistant_delta","content":"片段"}
-
-data: {"type":"assistant_done","id":"550e8400-e29b-41d4-a716-446655440000","session_id":"6ba7b810-9dad-11d1-80b4-00c04fd430c8","role":"assistant","content":"完整回复","created_at":"2026-01-01T00:00:00"}`
-
-const sessionIdPlaceholder = computed(() =>
-  chatStore.activeSessionId != null ? String(chatStore.activeSessionId) : '<session_id>',
+const embedWidgetScriptUrl = computed(() =>
+  typeof window !== 'undefined'
+    ? `${window.location.origin}/embed/zs-rag-chat-widget.js`
+    : '/embed/zs-rag-chat-widget.js',
 )
 
-const chatIdPlaceholder = computed(() =>
-  chatStore.activeConversationId != null ? String(chatStore.activeConversationId) : '<chat_id>',
+const embedIframeSnippet = computed(() => {
+  const u = embedFullChatEmbedUrl.value
+  return `<iframe
+ src="${u}"
+ title="知识对话"
+ style="width: 100%; height: 100%; min-height: 700px"
+ frameborder="0"
+ allow="microphone; clipboard-read; clipboard-write">
+</iframe>`
+})
+
+const embedBubbleSnippet = computed(() => {
+  const u = embedFullChatEmbedUrl.value
+  const scr = embedWidgetScriptUrl.value
+  return [
+    '<script>',
+    'window.zsRagChatEmbedConfig = {',
+    `  src: '${u}', // api_key / space 须与嵌入入口一致；服务端代理 Bearer 时不要写死在前端`,
+    '  // bubbleColor: "#1C64F2",',
+    '  // panelWidth: "24rem",',
+    '  // panelHeight: "40rem",',
+    '  // allowMicrophone: true,',
+    '}',
+    '<\/script>',
+    `<script src="${scr}" defer><\/script>`,
+    '<style>',
+    '  #zs-rag-chat-embed-button {',
+    '    background-color: #1C64F2 !important;',
+    '  }',
+    '  #zs-rag-chat-embed-window {',
+    '    width: 24rem !important;',
+    '    height: 40rem !important;',
+    '  }',
+    '</style>',
+  ].join('\n')
+})
+
+const currentEmbedSnippet = computed(() =>
+  embedMethod.value === 'iframe' ? embedIframeSnippet.value : embedBubbleSnippet.value,
 )
 
-function copyText(text: string) {
+const chatApiAccessCtx = computed<ChatApiAccessContext>(() => ({
+  apiBaseUrl: apiBaseUrl.value,
+  chatId: chatStore.activeConversationId != null ? String(chatStore.activeConversationId) : '',
+  sessionId: chatStore.activeSessionId != null ? String(chatStore.activeSessionId) : '',
+  spaceSlug: authStore.currentSpaceSlug || 'default',
+}))
+
+const apiAccessModalSubtitle = computed(() => {
+  if (apiAccessMode.value === 'openai') {
+    return 'OpenAI 兼容 Chat Completions（与官方 SDK / curl 用法一致）'
+  }
+  return 'zs-rag 原生接入：对话级自动建会话 + 会话级多轮（共 2 个接口）'
+})
+
+const zsRagChatLevelPath = computed(() => {
+  const base = chatApiAccessCtx.value.apiBaseUrl.replace(/\/$/, '')
+  const chatId = chatApiAccessCtx.value.chatId.trim() || '<chat_id>'
+  return `${base}/api/v1/chats/${chatId}/stream`
+})
+
+const zsRagSessionApiPath = computed(() => {
+  const base = chatApiAccessCtx.value.apiBaseUrl.replace(/\/$/, '')
+  const sid = chatApiAccessCtx.value.sessionId.trim() || '<session_id>'
+  if (zsRagSessionStream.value) {
+    return `${base}/api/v1/chats/sessions/${sid}/stream`
+  }
+  return `${base}/api/v1/chats/sessions/${sid}/complete`
+})
+
+const zsRagChatLevelCurl = computed(() => buildZsRagChatLevelCurl(chatApiAccessCtx.value))
+
+const zsRagSessionCurlExample = computed(() => {
+  const ctx = chatApiAccessCtx.value
+  if (zsRagSessionStream.value) {
+    return buildZsRagSessionStreamCurl(ctx)
+  }
+  return buildZsRagSessionCompletionCurl(ctx)
+})
+
+const zsRagChatLevelResponseExample = computed(() =>
+  buildZsRagSseResponseExample(chatApiAccessCtx.value, { newSession: true }),
+)
+
+const zsRagSessionResponseExample = computed(() => {
+  const ctx = chatApiAccessCtx.value
+  if (zsRagSessionStream.value) {
+    return buildZsRagSseResponseExample(ctx)
+  }
+  return buildZsRagCompleteResponseExample(ctx)
+})
+
+const openAiBaseUrlDisplay = computed(() =>
+  buildOpenAiChatCompletionsBaseUrl(chatApiAccessCtx.value.apiBaseUrl, chatApiAccessCtx.value.chatId),
+)
+
+const openAiParamChatId = computed(() => chatApiAccessCtx.value.chatId.trim() || '<chat_id>')
+const openAiParamSessionId = computed(() => chatApiAccessCtx.value.sessionId.trim() || '<session_id>')
+
+const openAiApiKeyDisplay = computed(() => {
+  const key = embedApiKeyPlaintext.value?.trim()
+  if (key) return key
+  if (embedKeyEnsureLoading.value) return '正在准备 API Key…'
+  return '<API Key>'
+})
+
+const openAiCodeExample = computed(() => {
+  const ctx = chatApiAccessCtx.value
+  const stream = openAiCurlStream.value
+  if (openAiClientLang.value === 'python') {
+    return buildOpenAiAccessPython(ctx, { stream })
+  }
+  return buildOpenAiAccessCurl(ctx, { stream })
+})
+
+const openAiResponseExample = computed(() => {
+  const ctx = chatApiAccessCtx.value
+  return openAiCurlStream.value
+    ? buildOpenAiStreamResponseExample(ctx)
+    : buildOpenAiNonStreamResponseExample(ctx)
+})
+
+function closeApiAccessDropdowns() {
+  apiAccessModeMenuOpen.value = false
+  openAiClientLangMenuOpen.value = false
+}
+
+function toggleOpenAiClientLangMenu() {
+  openAiClientLangMenuOpen.value = !openAiClientLangMenuOpen.value
+}
+
+function pickOpenAiClientLang(lang: OpenAiClientLang) {
+  openAiClientLang.value = lang
+  openAiClientLangMenuOpen.value = false
+}
+
+function toggleApiAccessModeMenu() {
+  apiAccessModeMenuOpen.value = !apiAccessModeMenuOpen.value
+}
+
+function pickApiAccessMode(mode: ApiAccessMode) {
+  apiAccessMode.value = mode
+  apiAccessModeMenuOpen.value = false
+  if (mode === 'openai' && showAccessModal.value) {
+    void ensureEmbedApiKey()
+  }
+}
+
+function openApiAccessModal() {
+  apiAccessMode.value = 'zs-rag'
+  apiAccessModeMenuOpen.value = false
+  openAiClientLang.value = 'http'
+  openAiClientLangMenuOpen.value = false
+  zsRagSessionStream.value = true
+  showAccessModal.value = true
+}
+
+watch(showAccessModal, (open) => {
+  if (!open) {
+    apiAccessModeMenuOpen.value = false
+    openAiClientLangMenuOpen.value = false
+    return
+  }
+  void ensureEmbedApiKey()
+})
+
+async function copyText(text: string) {
   if (!text) return
-  void navigator.clipboard.writeText(text).then(
-    () => {
-      alert('已复制到剪贴板')
-    },
-    () => {
-      alert('复制失败，请手动选择文本')
-    },
-  )
+  const ok = await copyToClipboard(text)
+  if (!ok) {
+    alert('复制失败，请手动选择文本')
+  }
+}
+
+function copyEmbedChatId() {
+  if (!embedConversationId.value) return
+  copyText(embedConversationId.value)
+}
+
+async function onDownloadChatApiDoc() {
+  if (chatApiDocDownloading.value) return
+  chatApiDocDownloading.value = true
+  try {
+    await downloadChatApiDoc(chatApiAccessCtx.value)
+  } catch (e) {
+    alert(e instanceof Error ? e.message : '下载失败')
+  } finally {
+    chatApiDocDownloading.value = false
+  }
+}
+
+async function onDownloadOpenAiExampleDoc() {
+  if (chatApiDocDownloading.value) return
+  chatApiDocDownloading.value = true
+  try {
+    await downloadOpenAiExampleDoc()
+  } catch (e) {
+    alert(e instanceof Error ? e.message : '下载失败')
+  } finally {
+    chatApiDocDownloading.value = false
+  }
 }
 
 const searchQuery = ref('')
@@ -1875,6 +2753,20 @@ onMounted(async () => {
     fetchEmbeddingModels(),
     fetchEmbeddingSpaceDefault(),
   ])
+  const q = route.query.conversation_id
+  const cid = typeof q === 'string' ? q : Array.isArray(q) && typeof q[0] === 'string' ? q[0] : ''
+  if (cid) {
+    const exists = chatStore.conversations.some((c) => c.id === cid)
+    if (exists) {
+      await chatStore.selectConversation(cid)
+    }
+    const nextQuery: Record<string, string> = {}
+    const ep = route.query.embed_panel
+    if (ep === '1' || ep === 'true') {
+      nextQuery.embed_panel = '1'
+    }
+    await router.replace({ path: '/chat', query: nextQuery })
+  }
 })
 
 onBeforeUnmount(() => {
@@ -1951,12 +2843,6 @@ const openCreateChatModal = async () => {
   showCreateModal.value = true
   await nextTick()
   createInputRef.value?.focus()
-}
-
-async function onMultiModelCompareClick() {
-  openSettingsDrawer()
-  await nextTick()
-  document.getElementById('chat-panel-model-config')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
 const handleCreate = async () => {
@@ -2064,7 +2950,7 @@ const handleSend = async () => {
   scrollChatToBottom()
 }
 
-const updateConfig = (key: string, value: any) => {
+const updateConfig = async (key: string, value: any) => {
   if (activeConfig.value) {
     if (key === 'model_name') {
       let selected: ModelItem | undefined
@@ -2074,14 +2960,14 @@ const updateConfig = (key: string, value: any) => {
         selected = parseModelOptionValue(value)
       }
       if (selected) {
-        chatStore.updateConfiguration({
+        await chatStore.updateConfiguration({
           model_id: selected.id,
           model_name: selected.model_name,
           model_provider: selected.provider_code,
         })
       }
     } else {
-      chatStore.updateConfiguration({ [key]: value })
+      await chatStore.updateConfiguration({ [key]: value })
     }
   }
 }
@@ -2090,10 +2976,23 @@ function onChatTopKCommit() {
   if (!activeConfig.value) return
   const v = clampChatRetrievalTopK(chatTopK.value)
   chatTopK.value = v
-  const prev = clampChatRetrievalTopK(activeConfig.value.retrieval_top_k ?? 8)
-  if (v !== prev) {
-    updateConfig('retrieval_top_k', v)
+  const prev = clampChatRetrievalTopK(activeConfig.value.retrieval_top_k ?? DEFAULT_CHAT_TOP_K)
+  if (v === prev) {
+    return
   }
+  void (async () => {
+    await updateConfig('retrieval_top_k', v)
+    const ids = activeConfig.value?.knowledge_base_ids ?? []
+    if (ids.length > 0 && kbs.value.length > 0) {
+      const refreshed = await syncTopKToKnowledgeBases(ids, v, kbs.value)
+      for (const kb of refreshed) {
+        const i = kbs.value.findIndex((k) => k.id === kb.id)
+        if (i >= 0) {
+          kbs.value[i] = kb
+        }
+      }
+    }
+  })()
 }
 
 </script>
@@ -2433,6 +3332,280 @@ function onChatTopKCommit() {
   flex-direction: column;
 }
 
+.modal-embed {
+  max-width: 820px;
+}
+
+.embed-modal-lead {
+  margin: 6px 0 0;
+  font-size: 0.88rem;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+.embed-security-warning {
+  margin: 0 0 18px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  background: rgba(245, 158, 11, 0.08);
+  font-size: 0.86rem;
+  line-height: 1.55;
+  color: var(--text-primary);
+}
+
+.embed-security-warning strong {
+  color: var(--danger-color, #b91c1c);
+}
+
+.embed-security-warning code {
+  font-size: 0.82rem;
+}
+
+.embed-method-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin: 0 0 20px;
+}
+
+.embed-method-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 14px 16px;
+  border: 2px solid var(--border-color);
+  border-radius: 16px;
+  background: linear-gradient(165deg, var(--bg-secondary) 0%, var(--bg-primary) 100%);
+  cursor: pointer;
+  text-align: left;
+  transition:
+    border-color 0.2s ease,
+    box-shadow 0.2s ease,
+    transform 0.2s ease;
+}
+
+.embed-method-card:hover {
+  border-color: rgba(28, 100, 242, 0.35);
+  transform: translateY(-2px);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.07);
+}
+
+.embed-method-card--active {
+  border-color: var(--brand-primary);
+  box-shadow:
+    0 0 0 3px var(--brand-primary-light),
+    0 14px 32px rgba(28, 100, 242, 0.14);
+}
+
+.embed-method-selected-mark {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  background: var(--brand-primary);
+  color: #fff;
+  box-shadow: 0 2px 10px rgba(28, 100, 242, 0.35);
+}
+
+.embed-method-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  padding-right: 30px;
+}
+
+.embed-method-desc {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+.embed-method-thumb {
+  position: relative;
+  height: 100px;
+  margin-bottom: 2px;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: linear-gradient(180deg, var(--bg-tertiary) 0%, var(--bg-secondary) 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45);
+}
+
+.emb-browser-chrome {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 18px;
+  padding: 0 8px;
+  background: rgba(0, 0, 0, 0.05);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.emb-browser-chrome--mini {
+  height: 14px;
+}
+
+.emb-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.embed-method-thumb--iframe .emb-browser-body {
+  display: flex;
+  height: calc(100% - 18px);
+  padding: 8px;
+  gap: 8px;
+}
+
+.emb-sidebar {
+  width: 18%;
+  flex-shrink: 0;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.emb-chat-pane {
+  flex: 1;
+  border-radius: 10px;
+  border: 1px solid rgba(28, 100, 242, 0.22);
+  background: linear-gradient(165deg, #e8f1fe 0%, #cfe2fd 50%, #dbeafe 100%);
+  box-shadow: 0 2px 10px rgba(28, 100, 242, 0.1);
+}
+
+.embed-method-thumb--bubble .emb-page-canvas {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  top: 22px;
+  bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 10px 40px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.4);
+}
+
+.emb-line {
+  height: 5px;
+  width: 100%;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.07);
+}
+
+.emb-line--short {
+  width: 62%;
+}
+
+.emb-bubble-fab {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 3;
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  background: linear-gradient(145deg, #3b82f6, #1c64f2);
+  box-shadow:
+    0 4px 16px rgba(28, 100, 242, 0.42),
+    0 0 0 3px rgba(255, 255, 255, 0.9);
+}
+
+.embed-key-panel {
+  margin-bottom: 20px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+}
+
+.embed-field-hint {
+  margin: 8px 0 0;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.embed-field-hint--error {
+  color: var(--danger-color);
+}
+
+.embed-field-hint code {
+  font-size: 0.76rem;
+}
+
+.embed-key-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.embed-key-meta {
+  margin: 0 0 10px;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+.embed-key-meta--inline {
+  margin-bottom: 8px;
+}
+
+.embed-key-meta--error {
+  margin-bottom: 10px;
+  color: var(--danger-color);
+}
+
+.embed-key-hint {
+  flex: 1;
+  min-width: 180px;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.embed-key-block {
+  margin-bottom: 0;
+}
+
+.embed-snippet-hint {
+  margin: 0 0 8px;
+  font-size: 0.84rem;
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
+
+.embed-snippet-hint code {
+  font-size: 0.8rem;
+}
+
+.embed-snippet-pre {
+  max-height: min(280px, 38vh);
+  overflow: auto;
+}
+
+.embed-snippet-block {
+  margin-bottom: 16px;
+}
+
+@media (max-width: 560px) {
+  .embed-method-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .access-modal-body {
   overflow-y: auto;
   flex: 1;
@@ -2444,6 +3617,283 @@ function onChatTopKCommit() {
   color: var(--text-secondary);
   line-height: 1.6;
   font-size: 0.9rem;
+}
+
+.openai-access-id-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.openai-access-id-panel .access-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.openai-field-tag {
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--danger-color, #dc2626);
+}
+
+.openai-field-tag--optional {
+  color: var(--text-secondary);
+}
+
+.openai-access-id-panel .embed-key-block {
+  margin-bottom: 0;
+}
+
+.openai-access-example {
+  margin-bottom: 18px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--bg-secondary);
+}
+
+.openai-access-example-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+}
+
+.openai-access-example-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.openai-access-example-icon {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+}
+
+.openai-access-example-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.openai-access-tabs {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+}
+
+.openai-access-tab {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.openai-access-tab.is-active {
+  background: var(--bg-primary, #fff);
+  color: var(--text-primary);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.openai-access-example .access-pre--code {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+
+.api-access-response-section {
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+}
+
+.api-access-response-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.api-access-response-label {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.api-access-response-meta {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+}
+
+.api-access-response-head .openai-access-copy-btn {
+  margin-left: auto;
+}
+
+.api-access-response-body {
+  margin: 0;
+  max-height: min(260px, 34vh);
+  overflow: auto;
+}
+
+.openai-access-code {
+  max-height: min(320px, 42vh);
+  overflow: auto;
+}
+
+.openai-access-lang-picker {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.openai-access-lang-picker--open {
+  z-index: 30;
+}
+
+.openai-access-lang-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  margin: 0;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.openai-access-lang-trigger:hover {
+  background: var(--bg-primary);
+}
+
+.openai-access-lang-trigger-label {
+  min-width: 3.2rem;
+  text-align: left;
+}
+
+.openai-access-lang-chevron {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  transition: transform 0.15s ease;
+}
+
+.openai-access-lang-chevron.is-open {
+  transform: rotate(180deg);
+}
+
+.openai-access-lang-dropdown {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 50;
+  min-width: 120px;
+}
+
+.openai-access-lang-list {
+  padding: 4px;
+  border-radius: 10px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary, #f8fafc);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+}
+
+.openai-access-lang-option {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 0.82rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.openai-access-lang-option:hover {
+  background: var(--bg-tertiary);
+}
+
+.openai-access-lang-option.is-current {
+  background: var(--bg-primary);
+  font-weight: 600;
+}
+
+.openai-access-copy-btn {
+  padding: 4px 6px !important;
+  min-width: 32px;
+}
+
+.openai-access-notes {
+  margin: 0;
+  padding-left: 1.2rem;
+  color: var(--text-secondary);
+  font-size: 0.84rem;
+  line-height: 1.55;
+}
+
+.openai-access-notes li + li {
+  margin-top: 6px;
+}
+
+.openai-access-doc-link {
+  margin: 12px 0 0;
+  font-size: 0.84rem;
+  color: var(--text-secondary);
+}
+
+.btn-link-inline {
+  padding: 0 !important;
+  font-size: inherit;
+  vertical-align: baseline;
+}
+
+.zs-rag-access-api {
+  margin-bottom: 20px;
+}
+
+.zs-rag-access-api .access-section-title {
+  margin-top: 0;
+}
+
+.zs-rag-access-path {
+  font-size: 0.78rem;
+  word-break: break-all;
+}
+
+.openai-access-example-title .api-method {
+  margin-right: 8px;
+}
+
+.openai-access-link {
+  color: var(--brand-primary);
+  text-decoration: none;
+}
+
+.openai-access-link:hover {
+  text-decoration: underline;
 }
 
 .access-block {
@@ -2500,6 +3950,231 @@ function onChatTopKCommit() {
   line-height: 1.5;
 }
 
+.modal-api-access .modal-header {
+  align-items: flex-start;
+}
+
+.modal-api-access .modal-header > div:first-child {
+  min-width: 0;
+  flex: 1;
+}
+
+.modal-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.btn-download-doc {
+  white-space: nowrap;
+}
+
+.modal-subtitle {
+  margin: 4px 0 0;
+  font-size: 0.82rem;
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+.api-access-mode-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.api-access-mode-label {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.api-access-mode-picker {
+  position: relative;
+  width: 100%;
+  max-width: 360px;
+}
+
+.api-access-mode-picker--open {
+  z-index: 20;
+}
+
+.api-access-mode-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 14px;
+  margin: 0;
+  border-radius: 999px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+  box-sizing: border-box;
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.api-access-mode-trigger:hover {
+  border-color: rgba(100, 116, 139, 0.45);
+  background: var(--bg-secondary);
+}
+
+.api-access-mode-trigger-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.api-access-mode-chevron {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  transition: transform 0.15s ease;
+}
+
+.api-access-mode-chevron.is-open {
+  transform: rotate(180deg);
+}
+
+.api-access-mode-dropdown {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 50;
+}
+
+.api-access-mode-list {
+  width: 100%;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 8px;
+  border-radius: 12px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary, #f8fafc);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.65),
+    0 10px 28px rgba(15, 23, 42, 0.12);
+}
+
+.api-access-mode-option {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 10px 12px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.api-access-mode-option:hover {
+  background: var(--brand-primary-light, rgba(37, 99, 235, 0.08));
+}
+
+.api-access-mode-option.is-current {
+  background: rgba(37, 99, 235, 0.12);
+}
+
+.api-access-mode-option-name {
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.access-muted-tight {
+  margin-top: 6px;
+  margin-bottom: 0;
+}
+
+.api-access-group {
+  margin-bottom: 8px;
+}
+
+.api-access-endpoint {
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+}
+
+.api-access-endpoint-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  margin-bottom: 6px;
+}
+
+.api-method {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  letter-spacing: 0.02em;
+}
+
+.api-method--get {
+  background: rgba(34, 197, 94, 0.15);
+  color: #16a34a;
+}
+
+.api-method--post {
+  background: rgba(59, 130, 246, 0.15);
+  color: #2563eb;
+}
+
+.api-method--put {
+  background: rgba(234, 179, 8, 0.18);
+  color: #ca8a04;
+}
+
+.api-method--delete {
+  background: rgba(239, 68, 68, 0.12);
+  color: #dc2626;
+}
+
+.api-access-path {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.76rem;
+  word-break: break-all;
+}
+
+.api-access-endpoint-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.api-access-summary {
+  margin: 0;
+  font-size: 0.84rem;
+  color: var(--text-primary);
+  line-height: 1.5;
+}
+
+.api-access-body {
+  margin-top: 10px;
+}
+
 .access-list {
   margin: 0;
   padding-left: 1.1rem;
@@ -2526,6 +4201,26 @@ function onChatTopKCommit() {
   height: 100%;
   max-height: 100%;
   overflow: hidden;
+}
+
+.page-shell.chat-view.page-shell--embed-panel {
+  gap: 0;
+}
+
+.chat-layout.chat-layout--embed-panel:not(.chat-layout--settings-open) {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.chat-layout.chat-layout--embed-panel.chat-layout--settings-open {
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 380px);
+}
+
+.chat-embed-panel-fallback {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
 }
 
 .chat-layout.chat-layout--kb-dropdown-open {
@@ -2662,30 +4357,6 @@ function onChatTopKCommit() {
   align-items: center;
   gap: 10px;
   flex-shrink: 0;
-}
-
-.btn-multi-model-compare {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex-shrink: 0;
-  padding: 6px 14px;
-  border-radius: 999px;
-  border: 1px solid rgba(37, 99, 235, 0.35);
-  background: var(--brand-primary-light);
-  color: var(--brand-primary);
-  font-size: 0.875rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition:
-    filter 0.15s ease,
-    border-color 0.15s ease,
-    background 0.15s ease;
-}
-
-.btn-multi-model-compare:hover {
-  filter: brightness(0.98);
-  border-color: var(--brand-primary);
 }
 
 .btn-chat-settings {
@@ -3822,6 +5493,14 @@ function onChatTopKCommit() {
   .chat-layout.chat-layout--settings-open {
     grid-template-columns: 280px minmax(0, 1fr) minmax(280px, 340px);
   }
+
+  .chat-layout.chat-layout--embed-panel:not(.chat-layout--settings-open) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .chat-layout.chat-layout--embed-panel.chat-layout--settings-open {
+    grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+  }
 }
 
 .modal-overlay {
@@ -3847,11 +5526,12 @@ function onChatTopKCommit() {
   flex-direction: column;
 }
 
-.modal-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 24px;
+.modal-header--embed {
+  align-items: flex-start;
+}
+
+.modal-header--embed .btn {
+  margin-top: 2px;
 }
 
 .modal-header h3 {

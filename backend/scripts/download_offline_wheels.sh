@@ -27,3 +27,8 @@ fi
   -r requirements-docker-local-extras.txt \
   -d offline_deps
 echo "Done. Wheels under $(pwd)/offline_deps (interpreter: $PY)"
+
+if [ "${SKIP_JRE_DOWNLOAD:-0}" != "1" ]; then
+  echo "Downloading offline JRE (Temurin 21) …"
+  FORCE_JRE_DOWNLOAD="${FORCE_JRE_DOWNLOAD:-0}" "$(dirname "$0")/download_offline_jre.sh"
+fi

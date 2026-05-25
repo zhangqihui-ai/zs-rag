@@ -90,6 +90,32 @@ def _substantive_terms(q: str) -> list[str]:
     return out
 
 
+def _expand_search_terms(terms: list[str]) -> list[str]:
+    """
+    长中文片段整段 phrase 几乎无法命中法条正文；拆成二字片段做 should 召回。
+    短词（≤4 字）保留原样以便精确匹配专名。
+    """
+    expanded: list[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        if re.fullmatch(r"[\u4e00-\u9fff]+", term) and len(term) > 4:
+            for i in range(len(term) - 1):
+                piece = term[i : i + 2]
+                if piece not in seen:
+                    seen.add(piece)
+                    expanded.append(piece)
+        elif term not in seen:
+            seen.add(term)
+            expanded.append(term)
+    return expanded
+
+
+def _minimum_should_match(term_count: int) -> int:
+    if term_count <= 2:
+        return 1
+    return min(3, max(2, term_count // 4))
+
+
 def _keyword_query_bool(
     *,
     query: str,
@@ -107,33 +133,40 @@ def _keyword_query_bool(
 
     terms = _substantive_terms(query)
     if not terms:
-        must = [
-            {
-                "multi_match": {
-                    "query": query.strip(),
-                    "fields": ["keyword_text^2", "content", "document_name"],
-                    "type": "phrase",
-                }
-            }
-        ]
-    else:
-        # CJK 经 standard 会切成单字；phrase 要求相邻词项，避免「混」「元」OR 误命中。
-        must = []
-        for term in terms:
-            must.append(
+        bool_query: dict[str, Any] = {
+            "must": [
                 {
                     "multi_match": {
-                        "query": term,
+                        "query": query.strip(),
                         "fields": ["keyword_text^2", "content", "document_name"],
                         "type": "phrase",
                     }
                 }
-            )
+            ],
+            "filter": filter_q,
+        }
+    else:
+        search_terms = _expand_search_terms(terms)
+        should = [
+            {
+                "multi_match": {
+                    "query": term,
+                    "fields": ["keyword_text^2", "content", "document_name"],
+                    "type": "phrase" if len(term) >= 2 else "best_fields",
+                }
+            }
+            for term in search_terms
+        ]
+        bool_query = {
+            "should": should,
+            "minimum_should_match": _minimum_should_match(len(search_terms)),
+            "filter": filter_q,
+        }
 
     return {
         "size": max(1, min(limit, 100)),
         "_source": ["chunk_uid", "chunk_id"],
-        "query": {"bool": {"must": must, "filter": filter_q}},
+        "query": {"bool": bool_query},
     }
 
 

@@ -17,8 +17,12 @@ xlrd==2.0.1
 setuptools<81
 marshmallow<4
 
-# Vector DB
-pymilvus==2.4.3
+# Vector DB（与 docker-compose milvus v2.5.x 对齐；LightRAG 需 list_databases）
+pymilvus==2.5.6
 
 # Graph DB
 neo4j==5.27.0
+
+# LightRAG graph knowledge base
+lightrag-hku>=1.4.0,<1.5
+opendataloader-pdf>=1.0.0

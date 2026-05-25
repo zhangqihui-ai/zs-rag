@@ -117,6 +117,40 @@ def _table_body_to_rows(body: str) -> list[list[str]]:
     return _markdown_table_to_rows(stripped)
 
 
+def _grid_to_markdown_table(rows: list[list[str]]) -> str:
+    """二维单元格网格 → GitHub 风格 Markdown 表格（不含 colspan）。"""
+    cleaned = [[c.strip() for c in row] for row in rows if any(c.strip() for c in row)]
+    if not cleaned:
+        return ""
+    width = max(len(r) for r in cleaned)
+    norm = [r + [""] * (width - len(r)) for r in cleaned]
+    lines = ["| " + " | ".join(r) + " |" for r in norm]
+    if len(norm) >= 2:
+        sep = "| " + " | ".join("---" for _ in range(width)) + " |"
+        lines.insert(1, sep)
+    return "\n".join(lines)
+
+
+def _grid_to_html_table(rows: list[list[str]], *, header_rows: int = 1) -> str:
+    """二维单元格网格 → HTML table（首行默认 th）。"""
+    import html as html_module
+
+    cleaned = [[c.strip() for c in row] for row in rows if any(c.strip() for c in row)]
+    if not cleaned:
+        return ""
+    width = max(len(r) for r in cleaned)
+    parts = ['<table>']
+    for ri, row in enumerate(cleaned):
+        parts.append("<tr>")
+        cells = row + [""] * (width - len(row))
+        for ci, cell in enumerate(cells):
+            tag = "th" if ri < header_rows else "td"
+            parts.append(f"<{tag}>{html_module.escape(cell)}</{tag}>")
+        parts.append("</tr>")
+    parts.append("</table>")
+    return "".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # 标题级别 → class 映射（和 document_parser.py 的 _HEADING_CLASSES 语义一致）
 # ---------------------------------------------------------------------------
@@ -222,7 +256,7 @@ class MineruResult:
         table_counter = 0
         heading_count = 0
 
-        for item in self.content_list:
+        for cl_index, item in enumerate(self.content_list):
             if not isinstance(item, dict):
                 continue
             typ = str(item.get("type") or "").lower()
@@ -295,16 +329,21 @@ class MineruResult:
                 if not isinstance(body, str):
                     continue
                 rows = _table_body_to_rows(body)
+                table_html = body.strip() if body.strip().startswith("<") else ""
+                if not table_html and rows:
+                    table_html = _grid_to_html_table(rows)
                 table_segments = build_table_segments_from_rows(
                     rows,
                     table_counter,
                     offset_ref,
                     parts,
                     current_heading_path,
+                    table_body_html=table_html or None,
                 )
                 for seg in table_segments:
                     meta = dict(seg.metadata or {})
                     meta["bbox"] = bbox
+                    meta["content_list_index"] = cl_index
                     seg.metadata = meta
                     if page_no is not None:
                         seg.page_no = page_no

@@ -152,6 +152,7 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       MILVUS_HOST: milvus
       MILVUS_PORT: 19530
+      MILVUS_DB_NAME: ${MILVUS_DB_NAME:-default}
       OPENSEARCH_URL: ${OPENSEARCH_URL:-http://opensearch:9200}
       OPENSEARCH_INDEX_CHUNKS: ${OPENSEARCH_INDEX_CHUNKS:-zs_rag_chunks}
       NEO4J_URI: bolt://neo4j:7687

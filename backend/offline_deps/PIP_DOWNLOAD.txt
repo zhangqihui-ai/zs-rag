@@ -20,20 +20,38 @@ cd backend
 
    python3.12 -m pip download -r requirements.txt -r requirements-docker-local-extras.txt -d offline_deps
 
-2. 将生成的 offline_deps/*.whl（及少量 .tar.gz）随仓库或制品一并拷贝到构建环境。
+   升级依赖后（例如 pymilvus 2.4.x → 2.5.6），建议先清理旧 wheel 再下载，避免离线
+   构建仍安装旧版本：
 
-3. 构建镜像：
+   rm -f offline_deps/pymilvus-*.whl offline_deps/grpcio-*.whl
+   ./scripts/download_offline_wheels.sh
 
+2. 关键版本（与 requirements.txt 一致，供离线包核对）：
+
+   - pymilvus==2.5.6   （对齐 docker-compose milvus v2.5.6；LightRAG 需 list_databases）
+   - lightrag-hku>=1.4.0,<1.5
+   - neo4j==5.27.0
+   - opendataloader-pdf>=1.0.0   （PDF 默认解析；需 JRE 11+，Docker 镜像已装 default-jre-headless）
+
+3. 将生成的 offline_deps/*.whl（及少量 .tar.gz）随仓库或制品一并拷贝到构建环境。
+   同目录下需包含 offline_deps/jre/temurin-21-jre.tar.gz（离线 JRE，避免构建时访问 deb.debian.org）：
+   ./scripts/download_offline_jre.sh
+   或随 download_offline_wheels.sh 一并下载（默认会自动拉 JRE）。
+
+4. 构建镜像（离线，无需 apt 外网；**Docker build context 必须是 backend 目录**）：
+
+   # 在仓库根目录：
+   docker build -f backend/Dockerfile.local --target development -t zs-rag-backend:dev backend
+
+   # 在 backend 目录内：
    docker build -f Dockerfile.local --target development -t zs-rag-backend:dev .
-   docker build -f Dockerfile.local --target production -t zs-rag-backend:prod .
 
-   若使用 docker compose，且构建阶段不能访问 PyPI（与默认 Dockerfile 中
-   pip install -r requirements.txt 失败时），请改用离线 Dockerfile：
+   docker compose（context 已是 ./backend）：
+   BACKEND_DOCKERFILE=Dockerfile.local docker compose up -d --build backend
 
-   BACKEND_DOCKERFILE=Dockerfile.local docker compose -f docker-compose.yml up -d --build
+   若构建机可访问国内 Debian 镜像但无法访问 deb.debian.org，在线 Dockerfile 可设：
+   APT_MIRROR=http://mirrors.aliyun.com/debian docker compose build backend
 
-   或在项目根目录 .env 中设置：BACKEND_DOCKERFILE=Dockerfile.local
-
-4. 在 macOS/Windows 上为 Linux 容器准备依赖时，建议在 Linux 容器或 CI 中执行
+5. 在 macOS/Windows 上为 Linux 容器准备依赖时，建议在 Linux 容器或 CI 中执行
    pip download，或使用与目标 manylinux 匹配的 --platform/--python-version，
    避免出现无法安装的二进制包。

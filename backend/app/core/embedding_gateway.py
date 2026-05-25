@@ -1,12 +1,35 @@
 from __future__ import annotations
 
+import logging
+import re
+from collections.abc import Callable
+
 from app.core.errors import AppError
 from app.core.provider_adapter import embed_texts
 from app.models.model_management import AIModel
 
+logger = logging.getLogger(__name__)
 
-EMBEDDING_BATCH_SIZE = 16
-EMBEDDING_BATCH_FALLBACK_MESSAGES = ("HTTP 错误：400",)
+# 通义 text-embedding-v4 等模型对单条 input 有长度上限；批量过大也易触发 400
+EMBEDDING_BATCH_SIZE = 8
+EMBEDDING_MAX_INPUT_CHARS = 8192
+EMBEDDING_BATCH_FALLBACK_MESSAGES = (
+    "HTTP 错误：400",
+    "HTTP 错误：413",
+    "HTTP 错误：422",
+    "请求过于频繁",
+)
+
+# 账户/鉴权类错误重试截断无意义，应直接失败并提示用户处理
+EMBEDDING_NON_RETRYABLE_MARKERS = (
+    "账户欠费",
+    "Arrearage",
+    "认证失败",
+    "API Key 无效",
+    "额度不足",
+    "insufficient_quota",
+    "无权调用",
+)
 
 
 def _ensure_embedding_model(model: AIModel) -> None:
@@ -30,31 +53,132 @@ def _parse_vectors(data: object) -> list[list[float]]:
     return vectors
 
 
-def _generate_embeddings_for_batch(model: AIModel, texts: list[str]) -> list[list[float]]:
-    result = embed_texts(model.provider, model.model_name, texts)
+def prepare_text_for_embedding(text: str, *, max_chars: int = EMBEDDING_MAX_INPUT_CHARS) -> str:
+    """清洗并截断送入 embedding API 的文本，避免 NUL/过长/空串导致厂商 400。"""
+    if not text:
+        return " "
+    s = text.replace("\x00", "")
+    # 去掉不可见控制字符（保留换行、制表）
+    s = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", s)
+    s = s.strip()
+    if not s:
+        return " "
+    if len(s) > max_chars:
+        s = s[:max_chars]
+    return s
+
+
+def _is_non_retryable_embedding_error(message: str) -> bool:
+    return any(token in message for token in EMBEDDING_NON_RETRYABLE_MARKERS)
+
+
+def _should_split_batch_on_error(message: str) -> bool:
+    if _is_non_retryable_embedding_error(message):
+        return False
+    return any(token in message for token in EMBEDDING_BATCH_FALLBACK_MESSAGES)
+
+
+def _raise_embedding_failed(message: str | None) -> None:
+    raise AppError(
+        status_code=502,
+        code="EMBEDDING_REQUEST_FAILED",
+        message=message or "embedding 请求失败",
+    )
+
+
+def _embed_prepared_batch(model: AIModel, texts: list[str]) -> ProviderResponse:
+    return embed_texts(model.provider, model.model_name, texts)
+
+
+def _generate_single_with_truncation_fallback(model: AIModel, text: str) -> list[float]:
+    """单条仍 400 时逐级缩短文本；最后退化为占位符 embedding。"""
+    limits = (
+        EMBEDDING_MAX_INPUT_CHARS,
+        4096,
+        2048,
+        1024,
+        512,
+        256,
+        64,
+    )
+    seen: set[str] = set()
+    for limit in limits:
+        candidate = prepare_text_for_embedding(text, max_chars=limit)
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        result = _embed_prepared_batch(model, [candidate])
+        if result.success:
+            batch_vectors = _parse_vectors(result.data)
+            if batch_vectors:
+                if limit < EMBEDDING_MAX_INPUT_CHARS:
+                    logger.warning(
+                        "embedding 单条降级成功（截断至 %s 字符，原长 %s）",
+                        limit,
+                        len(text),
+                    )
+                return batch_vectors[0]
+        if _is_non_retryable_embedding_error(result.message or ""):
+            _raise_embedding_failed(result.message)
+
+    placeholder = prepare_text_for_embedding(" ", max_chars=8)
+    result = _embed_prepared_batch(model, [placeholder])
     if result.success:
         batch_vectors = _parse_vectors(result.data)
-        if len(batch_vectors) != len(texts):
+        if batch_vectors:
+            logger.warning(
+                "embedding 单条使用占位向量（原长 %s，末次错误需查厂商配置）",
+                len(text),
+            )
+            return batch_vectors[0]
+
+    _raise_embedding_failed(result.message)
+
+
+def _generate_embeddings_for_batch(model: AIModel, texts: list[str]) -> list[list[float]]:
+    if not texts:
+        return []
+
+    prepared = [prepare_text_for_embedding(t) for t in texts]
+    result = _embed_prepared_batch(model, prepared)
+    if result.success:
+        batch_vectors = _parse_vectors(result.data)
+        if len(batch_vectors) != len(prepared):
             raise AppError(status_code=502, code="EMBEDDING_RESPONSE_INVALID", message="embedding 响应数量与请求不一致")
         return batch_vectors
 
-    if len(texts) > 1 and any(message in result.message for message in EMBEDDING_BATCH_FALLBACK_MESSAGES):
-        middle = max(len(texts) // 2, 1)
-        return _generate_embeddings_for_batch(model, texts[:middle]) + _generate_embeddings_for_batch(model, texts[middle:])
+    if len(prepared) > 1 and _should_split_batch_on_error(result.message):
+        middle = max(len(prepared) // 2, 1)
+        return _generate_embeddings_for_batch(model, prepared[:middle]) + _generate_embeddings_for_batch(
+            model, prepared[middle:]
+        )
 
-    raise AppError(status_code=502, code="EMBEDDING_REQUEST_FAILED", message=result.message)
+    if _is_non_retryable_embedding_error(result.message or ""):
+        _raise_embedding_failed(result.message)
+
+    if len(prepared) == 1:
+        return [_generate_single_with_truncation_fallback(model, texts[0])]
+
+    _raise_embedding_failed(result.message)
 
 
-
-def generate_embeddings(model: AIModel, texts: list[str]) -> list[list[float]]:
+def generate_embeddings(
+    model: AIModel,
+    texts: list[str],
+    *,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> list[list[float]]:
     _ensure_embedding_model(model)
     if not texts:
         return []
 
+    total = len(texts)
     vectors: list[list[float]] = []
-    for start in range(0, len(texts), EMBEDDING_BATCH_SIZE):
+    for start in range(0, total, EMBEDDING_BATCH_SIZE):
         batch = texts[start : start + EMBEDDING_BATCH_SIZE]
         vectors.extend(_generate_embeddings_for_batch(model, batch))
+        if on_progress is not None:
+            on_progress(min(start + len(batch), total), total)
 
     return vectors
 
@@ -64,3 +188,14 @@ def generate_query_embedding(model: AIModel, text: str) -> list[float]:
     if not vectors:
         raise AppError(status_code=502, code="EMBEDDING_RESPONSE_INVALID", message="未返回查询向量")
     return vectors[0]
+
+
+def probe_embedding_dimension(model: AIModel) -> int:
+    """调用 embedding 模型探测实际向量维度（用于 LightRAG / Milvus 对齐）。"""
+    vectors = generate_embeddings(model, ["dimension probe"])
+    if not vectors or not vectors[0]:
+        raise AppError(status_code=502, code="EMBEDDING_RESPONSE_INVALID", message="无法探测 embedding 维度")
+    dimension = len(vectors[0])
+    if dimension <= 0:
+        raise AppError(status_code=502, code="EMBEDDING_RESPONSE_INVALID", message="embedding 维度无效")
+    return dimension
