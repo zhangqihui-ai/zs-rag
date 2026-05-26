@@ -85,6 +85,17 @@
       <path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6" />
       <path d="M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6" />
     </template>
+    <template v-else-if="name === 'vector-db'">
+      <ellipse cx="10" cy="7" rx="5.5" ry="2.2" />
+      <path d="M4.5 7v3.5c0 1.2 2.5 2.2 5.5 2.2s5.5-1 5.5-2.2V7" />
+      <path d="M4.5 10.5V14c0 1.2 2.5 2.2 5.5 2.2s5.5-1 5.5-2.2v-3.5" />
+      <path d="M16.5 6.5 19 5" />
+      <path d="M16.5 9.5 20 9" />
+      <path d="M16.5 12.5 19 14" />
+      <circle cx="19.5" cy="4.8" r="1.1" fill="currentColor" stroke="none" />
+      <circle cx="20.8" cy="8.8" r="1.1" fill="currentColor" stroke="none" />
+      <circle cx="19.5" cy="14.8" r="1.1" fill="currentColor" stroke="none" />
+    </template>
     <template v-else-if="name === 'graph'">
       <circle cx="6" cy="8" r="2" />
       <circle cx="18" cy="6" r="2" />

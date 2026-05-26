@@ -70,6 +70,14 @@ class Settings(BaseSettings):
         default=3,
         description="LightRAG LLM 读超时等可重试错误的最大重试次数",
     )
+    embedding_timeout_sec: int = Field(
+        default=180,
+        description="Embedding API 单次批量请求读超时（秒）；私有 GPU 部署或大表格 chunk 建议 120–300",
+    )
+    embedding_max_retries: int = Field(
+        default=3,
+        description="Embedding 超时/网络错误最大重试次数",
+    )
     tiktoken_cache_dir: str | None = Field(
         default=None,
         description="tiktoken 离线缓存目录（对应环境变量 TIKTOKEN_CACHE_DIR）",

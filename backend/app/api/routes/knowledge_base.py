@@ -61,6 +61,8 @@ from app.services.knowledge_base_service import (
     resolve_knowledge_base_milvus_dimension,
 )
 from app.services.knowledge_document_service import (
+    DOCX_VIEW_CL_FILENAME,
+    DOCX_VIEW_MD_FILENAME,
     MINERU_VIEW_CL_FILENAME,
     MINERU_VIEW_MD_FILENAME,
     cancel_document_process,
@@ -242,6 +244,16 @@ def update_knowledge_base(
                         code="INVALID_PDF_PARSER",
                         message=f"pdf_parser 须为 {', '.join(sorted(allowed))} 之一",
                     )
+            parsers = cfg.get("parsers")
+            if isinstance(parsers, dict):
+                from app.core.parser_config import validate_parsers_patch
+
+                validate_parsers_patch(parsers)
+            enrichment = cfg.get("enrichment")
+            if isinstance(enrichment, dict):
+                from app.core.parser_config import validate_enrichment_patch
+
+                validate_enrichment_patch(enrichment)
     if "config" in update_data and knowledge_base.kb_type == "lightrag":
         from app.services.lightrag_engine import invalidate_lightrag_instance
 
@@ -655,6 +667,66 @@ def get_document_mineru_content_list(
         path,
         media_type="application/json; charset=utf-8",
         filename="mineru_content_list.json",
+        content_disposition_type="inline",
+    )
+
+
+@router.get("/{kb_id}/documents/{document_id}/docx-markdown")
+def get_document_docx_markdown(
+    kb_id: int,
+    document_id: int,
+    current_space: CurrentSpace,
+    membership: RequireMembership,
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    """Word 解析侧车 Markdown（docx_markdown.md）。"""
+    document = get_document_or_error(db, space_id=current_space.id, kb_id=kb_id, document_id=document_id)
+    if document.status == KnowledgeDocumentStatus.DELETED.value:
+        raise AppError(status_code=404, code="DOCUMENT_NOT_FOUND", message="文档不存在")
+    orig = resolve_original_file_path(document)
+    if not orig:
+        raise AppError(status_code=404, code="DOCUMENT_FILE_NOT_FOUND", message="原始文件不存在")
+    path = orig.parent / DOCX_VIEW_MD_FILENAME
+    if not path.is_file():
+        raise AppError(
+            status_code=404,
+            code="DOCX_MARKDOWN_NOT_FOUND",
+            message="暂无 Word Markdown：请使用当前版本重新解析或重建索引",
+        )
+    return FileResponse(
+        path,
+        media_type="text/markdown; charset=utf-8",
+        filename="docx.md",
+        content_disposition_type="inline",
+    )
+
+
+@router.get("/{kb_id}/documents/{document_id}/docx-content-list")
+def get_document_docx_content_list(
+    kb_id: int,
+    document_id: int,
+    current_space: CurrentSpace,
+    membership: RequireMembership,
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    """Word 解析 content_list JSON（docx_content_list.json）。"""
+    document = get_document_or_error(db, space_id=current_space.id, kb_id=kb_id, document_id=document_id)
+    if document.status == KnowledgeDocumentStatus.DELETED.value:
+        raise AppError(status_code=404, code="DOCUMENT_NOT_FOUND", message="文档不存在")
+    orig = resolve_original_file_path(document)
+    if not orig:
+        raise AppError(status_code=404, code="DOCUMENT_FILE_NOT_FOUND", message="原始文件不存在")
+    path = orig.parent / DOCX_VIEW_CL_FILENAME
+    if not path.is_file():
+        raise AppError(
+            status_code=404,
+            code="DOCX_CONTENT_LIST_NOT_FOUND",
+            message="暂无 Word JSON：请使用当前版本重新解析或重建索引",
+        )
+    return FileResponse(
+        path,
+        media_type="application/json; charset=utf-8",
+        filename="docx_content_list.json",
         content_disposition_type="inline",
     )
 

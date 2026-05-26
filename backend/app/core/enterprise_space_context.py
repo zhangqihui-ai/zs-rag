@@ -1,12 +1,14 @@
 from contextvars import ContextVar
+from datetime import datetime
 from typing import Annotated
-
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.authentication import decode_access_token
+from app.core.membership_roles import SPACE_ADMIN
+from app.core.security import get_security_settings
 from app.db.session import get_db
 from app.models.enterprise_space import EnterpriseSpace, Membership, User
 from app.services.chat_embed_api_key_service import (
@@ -114,6 +116,14 @@ def require_membership(
     ).scalar_one_or_none()
 
     if membership is None:
+        if user.is_admin:
+            return Membership(
+                id=0,
+                user_id=user.id,
+                enterprise_space_id=space.id,
+                role=SPACE_ADMIN,
+                created_at=datetime.utcnow(),
+            )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="您没有该企业空间的访问权限",
@@ -122,10 +132,66 @@ def require_membership(
     return membership
 
 
+def is_bootstrap_admin(user: User) -> bool:
+    """是否为 bootstrap 管理员账号（唯一可编辑 is_admin 的用户）。"""
+    return user.username == get_security_settings().admin_username
+
+
+def get_membership(user: User, space: EnterpriseSpace, db: Session) -> Membership | None:
+    """获取用户在指定企业空间的成员关系。"""
+    return db.execute(
+        select(Membership).where(
+            Membership.user_id == user.id,
+            Membership.enterprise_space_id == space.id,
+        )
+    ).scalar_one_or_none()
+
+
+def require_system_admin(user: Annotated[User, Depends(get_current_user)]) -> User:
+    """要求系统管理员权限。"""
+    if not user.is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="只有系统管理员可以执行此操作",
+        )
+    return user
+
+
+def require_space_admin(
+    user: Annotated[User, Depends(get_current_user)],
+    space: Annotated[EnterpriseSpace, Depends(get_enterprise_space_from_header)],
+    db: Annotated[Session, Depends(get_db)],
+) -> Membership:
+    """要求当前企业空间管理员或系统管理员权限。"""
+    if user.is_admin:
+        membership = get_membership(user, space, db)
+        if membership is not None:
+            return membership
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="您没有该企业空间的访问权限",
+        )
+
+    membership = get_membership(user, space, db)
+    if membership is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="您没有该企业空间的访问权限",
+        )
+    if membership.role != SPACE_ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="只有企业空间管理员可以执行此操作",
+        )
+    return membership
+
+
 # Dependency shortcuts
 CurrentUser = Annotated[User, Depends(get_current_user)]
 CurrentSpace = Annotated[EnterpriseSpace, Depends(get_enterprise_space_from_header)]
 RequireMembership = Annotated[Membership, Depends(require_membership)]
+RequireSystemAdmin = Annotated[User, Depends(require_system_admin)]
+RequireSpaceAdmin = Annotated[Membership, Depends(require_space_admin)]
 
 
 def get_current_user_optional(

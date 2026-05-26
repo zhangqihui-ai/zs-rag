@@ -79,6 +79,7 @@ def get_session(
     session_id: str,
     current_space: CurrentSpace,
     current_user: CurrentUser,
+    _: RequireMembership,
     db: Session = Depends(get_db),
 ):
     return chat_service.get_chat_session(
@@ -95,6 +96,7 @@ def update_session(
     payload: ChatSessionUpdate,
     current_space: CurrentSpace,
     current_user: CurrentUser,
+    _: RequireMembership,
     db: Session = Depends(get_db),
 ):
     return chat_service.update_chat_session(
@@ -111,6 +113,7 @@ def delete_session(
     session_id: str,
     current_space: CurrentSpace,
     current_user: CurrentUser,
+    _: RequireMembership,
     db: Session = Depends(get_db),
 ):
     chat_service.delete_chat_session(
@@ -126,6 +129,7 @@ def get_session_config(
     session_id: str,
     current_space: CurrentSpace,
     current_user: CurrentUser,
+    _: RequireMembership,
     db: Session = Depends(get_db),
 ):
     return chat_service.get_chat_configuration(
@@ -142,6 +146,7 @@ def update_session_config(
     payload: ChatConfigurationUpdate,
     current_space: CurrentSpace,
     current_user: CurrentUser,
+    _: RequireMembership,
     db: Session = Depends(get_db),
 ):
     return chat_service.update_chat_configuration(
@@ -158,6 +163,7 @@ def get_session_messages(
     session_id: str,
     current_space: CurrentSpace,
     current_user: CurrentUser,
+    _: RequireMembership,
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
@@ -178,6 +184,7 @@ async def session_stream_sse(
     payload: ChatStreamRequest,
     current_space: CurrentSpace,
     current_user: CurrentUser,
+    _: RequireMembership,
     db: Session = Depends(get_db),
 ):
     """兼容旧版 SSE：`assistant_delta` / `assistant_done`。"""
@@ -222,6 +229,7 @@ def session_complete_blocking(
     payload: ChatStreamRequest,
     current_space: CurrentSpace,
     current_user: CurrentUser,
+    _: RequireMembership,
     db: Session = Depends(get_db),
 ):
     """会话级非流式：返回 assistant_done 形态 JSON（含 session_id、content、citations）。"""
@@ -240,6 +248,7 @@ async def chat_conversation_stream_sse(
     payload: ChatStreamRequest,
     current_space: CurrentSpace,
     current_user: CurrentUser,
+    _: RequireMembership,
     db: Session = Depends(get_db),
 ):
     """对话级 SSE：自动新建会话；assistant_done 事件含 session_id，供后续会话级接口复用。"""
@@ -293,6 +302,7 @@ def create_chat(
     payload: ChatConversationCreate,
     current_space: CurrentSpace,
     current_user: CurrentUser,
+    _: RequireMembership,
     db: Session = Depends(get_db),
 ):
     return chat_service.create_chat_conversation(
@@ -307,6 +317,7 @@ def create_chat(
 def list_chats(
     current_space: CurrentSpace,
     current_user: CurrentUser,
+    _: RequireMembership,
     skip: int = 0,
     limit: int = 100,
     db: Session = Depends(get_db),
@@ -456,6 +467,7 @@ def list_chat_sessions(
     chat_id: ChatId,
     current_space: CurrentSpace,
     current_user: CurrentUser,
+    _: RequireMembership,
     db: Session = Depends(get_db),
 ):
     return chat_service.list_sessions_for_conversation(
@@ -476,6 +488,7 @@ def create_chat_session(
     payload: ChatSessionCreate,
     current_space: CurrentSpace,
     current_user: CurrentUser,
+    _: RequireMembership,
     db: Session = Depends(get_db),
 ):
     return chat_service.create_session_in_conversation(
@@ -492,6 +505,7 @@ def get_chat(
     chat_id: ChatId,
     current_space: CurrentSpace,
     current_user: CurrentUser,
+    _: RequireMembership,
     db: Session = Depends(get_db),
 ):
     return chat_service.get_chat_conversation(
@@ -508,6 +522,7 @@ def update_chat(
     payload: ChatConversationUpdate,
     current_space: CurrentSpace,
     current_user: CurrentUser,
+    _: RequireMembership,
     db: Session = Depends(get_db),
 ):
     return chat_service.update_chat_conversation(
@@ -524,6 +539,7 @@ def delete_chat(
     chat_id: ChatId,
     current_space: CurrentSpace,
     current_user: CurrentUser,
+    _: RequireMembership,
     db: Session = Depends(get_db),
 ):
     chat_service.delete_chat_conversation(

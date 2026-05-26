@@ -135,8 +135,11 @@ services:
   backend:
     build:
       context: ./backend
-      dockerfile: Dockerfile
+      dockerfile: ${BACKEND_DOCKERFILE:-Dockerfile}
       target: production
+      args:
+        APT_MIRROR: ${APT_MIRROR:-}
+    image: ${BACKEND_IMAGE:-zs-rag-backend:prod}
     container_name: zs-rag-backend
     environment:
       APP_NAME: ${APP_NAME:-zs-rag}
@@ -158,6 +161,8 @@ services:
       NEO4J_URI: bolt://neo4j:7687
       NEO4J_USERNAME: neo4j
       NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -177,9 +182,10 @@ services:
       context: ./web
       dockerfile: Dockerfile
       target: production
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000}
+    image: ${FRONTEND_IMAGE:-zs-rag-frontend:prod}
     container_name: zs-rag-frontend
-    environment:
-      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost/api}
     ports:
       - "${FRONTEND_PORT:-80}:80"
     depends_on:

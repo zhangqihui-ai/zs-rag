@@ -1,0 +1,39 @@
+# 生产环境私有镜像仓库覆盖（配合 docker-compose.prod.yml 离线部署）
+#
+# 目标机只需本文件 + docker-compose.prod.yml + .env，无需源码目录。
+#
+# 使用前在 .env 中设置：
+#   REGISTRY=192.168.252.252:5566
+#   IMAGE_NAMESPACE=zs-rag
+#
+# 启动：
+#   docker compose -f docker-compose.prod.yml -f docker-compose.prod.registry.yml pull
+#   docker compose -f docker-compose.prod.yml -f docker-compose.prod.registry.yml up -d --no-build
+#
+# 数据库迁移：
+#   docker compose -f docker-compose.prod.yml -f docker-compose.prod.registry.yml exec backend python -m alembic upgrade head
+
+services:
+  postgres:
+    image: ${REGISTRY}/${IMAGE_NAMESPACE}/postgres:16-alpine
+
+  etcd:
+    image: ${REGISTRY}/${IMAGE_NAMESPACE}/etcd:v3.5.18
+
+  minio:
+    image: ${REGISTRY}/${IMAGE_NAMESPACE}/minio:RELEASE.2025-01-20T14-49-07Z
+
+  milvus:
+    image: ${REGISTRY}/${IMAGE_NAMESPACE}/milvus:v2.4.15
+
+  neo4j:
+    image: ${REGISTRY}/${IMAGE_NAMESPACE}/neo4j:5.26-community
+
+  opensearch:
+    image: ${REGISTRY}/${IMAGE_NAMESPACE}/opensearch:3.6.0
+
+  backend:
+    image: ${REGISTRY}/${IMAGE_NAMESPACE}/backend:prod
+
+  frontend:
+    image: ${REGISTRY}/${IMAGE_NAMESPACE}/frontend:prod

@@ -11,7 +11,12 @@
     </div>
 
     <div class="space-selector-control">
-      <select :value="modelValue" class="space-select" :disabled="spaces.length === 0" @change="handleChange">
+      <select
+        :value="modelValue"
+        class="space-select"
+        :disabled="spaces.length <= 1"
+        @change="handleChange"
+      >
         <option v-if="spaces.length === 0" value="">暂无可用空间</option>
         <option v-for="space in spaces" :key="space.id" :value="space.slug">
           {{ space.name }}

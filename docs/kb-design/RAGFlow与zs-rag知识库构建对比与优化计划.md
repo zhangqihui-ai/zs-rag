@@ -206,7 +206,7 @@ flowchart LR
 |---|-----|------|------|
 | 1 | **PDF 按场景默认引擎** | 研报 / 多表 PDF 默认 MinerU；普通 PDF 用 ODL（KB 级或自动检测） | 部分具备（KB `pdf_parser` 配置） |
 | 2 | **表格双轨 chunk** | 检索保留 row / overview；展示 / 引用用 `table_body_html`；可选「整表 chunk」 | **进行中**（metadata + 前端已改） |
-| 3 | **Excel 解析升级** | sheet → HTML table（对齐 RAGFlow Spreadsheet），而非纯 TSV | 待做 |
+| 3 | **Excel 解析升级** | sheet → HTML table（对齐 RAGFlow Spreadsheet），而非纯 TSV | **已完成**（`html_table` 默认） |
 | 4 | **开放图片上传** | 白名单 + MinerU OCR，与 PDF 内图一致 | 待做 |
 
 ### P1 — 分块与入库增强
@@ -214,7 +214,7 @@ flowchart LR
 | # | 项 | 说明 |
 |---|-----|------|
 | 5 | **文档类型模板** | 轻量版 `parser_template`：report / manual / spreadsheet / general，映射 parser + chunking 预设 |
-| 6 | **入库 Transformer** | chunk 级 keywords / hypothetical questions 写入 metadata 与 OpenSearch |
+| 6 | **入库 Transformer** | chunk 级 keywords / hypothetical questions 写入 metadata 与 OpenSearch | **已完成**（可选开启） |
 | 7 | **Chunk 运维 API** | 编辑 chunk 内容 → 触发 re-embed（参考 RAGFlow `/set`） |
 
 ### P2 — 架构演进
@@ -238,28 +238,27 @@ flowchart LR
 
 ### Phase 1（1–2 周）— 解析与表格体验
 
-- [ ] 固化 PDF 引擎选择策略（KB 配置 + README / 前端提示：复杂 PDF 推荐 MinerU）
+- [x] 固化 PDF 引擎选择策略（KB `config.parsers` + 解析器面板提示：复杂 PDF 推荐 MinerU）
 - [x] 表格 HTML 展示与 `content_list_index` / `table_body_html` 入库（`mineru_gateway.py`、`opendataloader_gateway.py`、`mineruContentDisplay.ts`）
 - [x] ODL `rows/cells` 提取补全（`opendataloader_gateway.py`）
-- [ ] 在本文档或设计文档中维护「实现偏差说明」（相对 [知识库最小化设计文档.md](./知识库最小化设计文档.md)）
+- [x] 按文件类型解析器配置（`config.parsers` + `ParserSettingsPanel.vue`）
 
 ### Phase 2（2–4 周）— 结构化内容与分块模板
 
-- [ ] Excel → HTML / table segments
-- [ ] 引入 KB `parser_template`（report / manual / spreadsheet / general）映射 parser + chunking
+- [x] Excel → HTML / table segments（`html_table` 引擎 + `build_table_segments_from_rows`）
+- [ ] 引入 KB `parser_template`（report / manual / spreadsheet / general）映射 parser + chunking — **不做命名预设，已由 per-type parsers 覆盖**
 - [ ] 表格 chunk 策略：overview + rows + optional full-table chunk
 - [ ] 图片格式加入上传白名单
 
 ### Phase 3（1–2 月）— 入库增强与运维
 
-- [ ] 可选 LLM enrichment：keywords / questions 写入 chunk metadata + OpenSearch
-- [ ] Chunk 编辑 + re-index API
+- [x] 可选 LLM enrichment：keywords / questions 写入 chunk metadata + OpenSearch（`chunk_enrichment_service.py` + `EnrichmentSettingsPanel.vue`）
+- [ ] Chunk 编辑 + re-index API — **不做**
 - [ ] 解析进度结构化（progress 百分比对齐 RAGFlow 体验）
 
-### Phase 4（长期）— Pipeline 化
+### Phase 4（长期）— 已明确不做
 
-- [ ] 内部 Pipeline 抽象：Parser / Chunker / Enricher / Indexer 插件
-- [ ] 评估 RAPTOR / 跨语言检索是否需要
+- Pipeline 编排、RAPTOR、跨语言检索不在 zs-rag 路线内
 
 ---
 
@@ -269,10 +268,10 @@ flowchart LR
 |------|---------|--------|
 | 上传去重 | content_hash | 文件名 + 存储路径 |
 | PDF 默认 | DeepDoc / 模板 | OpenDataLoader |
-| Excel | HTML | TSV |
+| Excel | HTML | HTML（`html_table` 默认）/ TSV |
 | 表格展示 | chunk 内结构 | sidecar HTML + metadata |
-| 分块模板 | 14+ parser_id | general / parent_child |
-| 入库 LLM 增强 | 有 | 无 |
+| 分块模板 | 14+ parser_id | general / parent_child + per-type parsers |
+| 入库 LLM 增强 | 有 | 可选（keywords + questions） |
 | 向量 + 全文 | ES/Infinity | Milvus + OpenSearch |
 | 图 KB | GraphRAG | LightRAG |
 | Chunk 编辑 | 有 | 无 |

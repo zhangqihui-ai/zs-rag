@@ -376,6 +376,18 @@ export const knowledgeBaseApi = {
     })
     return typeof data === 'string' ? data : String(data)
   },
+  async getDocumentDocxMarkdown(kbId: number, documentId: number): Promise<string> {
+    const { data } = await http.get(`/knowledge-bases/${kbId}/documents/${documentId}/docx-markdown`, {
+      responseType: 'text',
+    })
+    return typeof data === 'string' ? data : String(data)
+  },
+  async getDocumentDocxContentListText(kbId: number, documentId: number): Promise<string> {
+    const { data } = await http.get(`/knowledge-bases/${kbId}/documents/${documentId}/docx-content-list`, {
+      responseType: 'text',
+    })
+    return typeof data === 'string' ? data : String(data)
+  },
   deleteDocument(kbId: number, documentId: number) {
     return unwrap<void>(http.delete(`/knowledge-bases/${kbId}/documents/${documentId}`))
   },

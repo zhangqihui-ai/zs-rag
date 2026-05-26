@@ -22,7 +22,7 @@ from app.core.document_parser import (
     parse_document,
     validate_parsed_document_for_indexing,
 )
-from app.db.session import SessionLocal
+from app.db.session import SessionLocal, ensure_db_connection
 from app.core.embedding_gateway import generate_embeddings
 from app.core.chunking_engine import (
     apply_general_chunking,
@@ -34,7 +34,7 @@ from app.core.chunking_engine import (
 )
 from app.core.errors import AppError
 from app.core.milvus_client import create_collection_if_not_exists, delete_vectors, drop_collection_if_exists, insert_vectors
-from app.core.text_chunker import ChunkCandidate, chunk_segments
+from app.core.text_chunker import ChunkCandidate, chunk_segments, segments_to_chunk_candidates
 from app.models.knowledge_base import (
     KnowledgeBase,
     KnowledgeBaseType,
@@ -69,6 +69,7 @@ SUPPORTED_EXTENSIONS = {"txt", "md", "pdf", "docx", "xlsx", "xlsm", "xls", "csv"
 settings = get_settings()
 
 MAX_PARSE_LOG_LINES = 2000
+CHUNK_DB_FLUSH_BATCH = 100
 
 _DOCUMENT_IN_PROGRESS_STATUSES = (
     KnowledgeDocumentStatus.PARSING.value,
@@ -90,16 +91,29 @@ _PHASE_PERCENT_RANGES: dict[str, tuple[float, float]] = {
 MINERU_VIEW_MD_FILENAME = "mineru_markdown.md"
 MINERU_VIEW_CL_FILENAME = "mineru_content_list.json"
 
+from app.core.docx_view_export import (
+    DOCX_VIEW_CL_FILENAME,
+    DOCX_VIEW_MD_FILENAME,
+    persist_docx_view_artifacts,
+)
 
-def _persist_mineru_view_artifacts(*, parsed, file_path: Path) -> None:
-    """将解析引擎 markdown / content_list 落盘，供前端「Markdown / JSON」视图读取。"""
+
+def _persist_parse_view_artifacts(*, parsed, file_path: Path) -> None:
+    """将解析引擎 markdown / content_list 落盘，供前端 Markdown / JSON / 表格视图读取。"""
     meta = parsed.metadata if isinstance(parsed.metadata, dict) else None
     if not meta:
         return
+    parent = file_path.parent
+
+    if parsed.parser_type == "docx":
+        view = persist_docx_view_artifacts(segments=parsed.segments or [], file_path_parent=parent)
+        meta["parse_view"] = view
+        meta["docx_view"] = view
+        return
+
     backend = meta.get("parser_backend")
     if backend not in {"mineru", "opendataloader"}:
         return
-    parent = file_path.parent
     md = meta.pop("_parse_markdown", None) or meta.pop("_mineru_markdown", None)
     cl = meta.pop("_parse_content_list", None) or meta.pop("_mineru_content_list", None)
     view: dict[str, bool] = {"markdown": False, "content_list": False}
@@ -113,13 +127,57 @@ def _persist_mineru_view_artifacts(*, parsed, file_path: Path) -> None:
     meta["mineru_view"] = view  # 兼容旧 metadata 读取
 
 
-def _pdf_parser_options_from_kb(knowledge_base: KnowledgeBase) -> tuple[str | None, bool | None]:
-    cfg = knowledge_base.config if isinstance(knowledge_base.config, dict) else {}
-    from app.core.opendataloader_gateway import resolve_pdf_parser, resolve_pdf_parser_hybrid
+def _persist_mineru_view_artifacts(*, parsed, file_path: Path) -> None:
+    """兼容旧调用名。"""
+    _persist_parse_view_artifacts(parsed=parsed, file_path=file_path)
 
-    parser = resolve_pdf_parser(cfg)
-    hybrid = resolve_pdf_parser_hybrid(cfg) if parser == "opendataloader" else None
-    return parser, hybrid
+
+def _parsed_uses_prebuilt_table_chunks(parsed) -> bool:
+    meta = parsed.metadata if isinstance(parsed.metadata, dict) else {}
+    if meta.get("chunking_strategy") == "table_segments":
+        return True
+    if meta.get("excel_engine") in {"html_table", "tsv"}:
+        return True
+    if parsed.parser_type in {"xlsx", "xlsm", "xls"}:
+        return True
+    segs = parsed.segments or []
+    if segs:
+        table_like = sum(1 for s in segs if (s.metadata or {}).get("block") == "table")
+        if table_like >= max(3, len(segs) // 2):
+            return True
+    return False
+
+
+def _too_many_chunks_message(parsed, count: int, limit: int) -> str:
+    meta = parsed.metadata if isinstance(parsed.metadata, dict) else {}
+    excel_engine = meta.get("excel_engine")
+    if excel_engine in {"html_table", "tsv"}:
+        return (
+            f"分块数量 {count} 超过上限 {limit}。"
+            "Excel 数据行过多，请减少工作表行数、拆分文件，或在解析器设置中改用 TSV 模式。"
+        )
+    backend = str(meta.get("parser_backend") or "")
+    if parsed.parser_type == "pdf" or backend:
+        return (
+            f"分块数量 {count} 异常偏高（政策类 PDF 通常在数百块以内），"
+            "可能因未正确提取正文（扫描件、复杂版式或兜底解析产生乱码）。"
+            "复杂 PDF 请在解析器中选择 MinerU，或启用 MINERU 服务后重新解析。"
+        )
+    return f"分块数量 {count} 超过上限 {limit}，请缩小文档或调整分块参数后重试。"
+
+
+def _parser_options_from_kb(knowledge_base: KnowledgeBase):
+    from app.core.parser_config import resolve_parsers
+
+    cfg = knowledge_base.config if isinstance(knowledge_base.config, dict) else {}
+    return resolve_parsers(cfg)
+
+
+def _enrichment_options_from_kb(knowledge_base: KnowledgeBase):
+    from app.core.parser_config import resolve_enrichment
+
+    cfg = knowledge_base.config if isinstance(knowledge_base.config, dict) else {}
+    return resolve_enrichment(cfg)
 
 
 def _clear_document_storage_dir(storage_path: str | None) -> None:
@@ -252,6 +310,20 @@ def _sanitize_pg_text(value: str | None, *, max_len: int | None = None) -> str:
     if max_len is not None and len(s) > max_len:
         s = s[:max_len]
     return s
+
+
+def _compact_chunk_metadata_for_storage(metadata: dict[str, Any] | None, *, content: str) -> dict[str, Any]:
+    """索引入库时压缩 metadata，避免 Excel 等表格重复存整表 HTML。"""
+    meta = dict(metadata or {})
+    html = meta.get("table_body_html")
+    if isinstance(html, str) and html:
+        if meta.get("table_role") == "overview":
+            meta.pop("table_body_html", None)
+        elif html == content.strip():
+            meta.pop("table_body_html", None)
+        elif len(html) > max(len(content) * 8, 65536):
+            meta.pop("table_body_html", None)
+    return meta
 
 
 def _document_chunk_uid(document_id: int, chunk_index: int) -> str:
@@ -576,13 +648,12 @@ def preview_document_chunking(
         raise AppError(status_code=404, code="DOCUMENT_FILE_NOT_FOUND", message="原始文档文件不存在")
 
     file_bytes = file_path.read_bytes()
-    pdf_parser, pdf_parser_hybrid = _pdf_parser_options_from_kb(knowledge_base)
+    parser_options = _parser_options_from_kb(knowledge_base)
     parsed = parse_document(
         document.file_name,
         file_bytes,
         log=None,
-        pdf_parser=pdf_parser,
-        pdf_parser_hybrid=pdf_parser_hybrid,
+        parser_options=parser_options,
     )
     parsed.segments = merge_leading_preamble_segments(parsed.segments, full_text=parsed.text)
     if not parsed.text.strip():
@@ -905,14 +976,13 @@ def _index_document(
         file_bytes = file_path.read_bytes()
         check_cancelled(cancel_event)
         _emit(f"已读入 {len(file_bytes)} 字节，调用解析器…")
-        pdf_parser, pdf_parser_hybrid = _pdf_parser_options_from_kb(knowledge_base)
+        parser_options = _parser_options_from_kb(knowledge_base)
         try:
             parsed = parse_document(
                 document.file_name,
                 file_bytes,
                 log=_emit,
-                pdf_parser=pdf_parser,
-                pdf_parser_hybrid=pdf_parser_hybrid,
+                parser_options=parser_options,
             )
             _persist_mineru_view_artifacts(parsed=parsed, file_path=file_path)
         except UnsupportedDocumentError as exc:
@@ -963,6 +1033,9 @@ def _index_document(
             meta_preview = meta_preview[:800] + "…"
         _emit(f"解析完成：parser_type={parsed.parser_type}，字符数={parsed.char_count}，原始分段数={len(parsed.segments)}")
         _emit(f"metadata: {meta_preview}")
+        db.commit()
+        ensure_db_connection(db)
+        db.refresh(document)
 
         _progress("chunking", message="状态：分块中（CHUNKING）")
         _emit("状态：分块中（CHUNKING）…")
@@ -974,43 +1047,55 @@ def _index_document(
             fallback_chunk_size=document.chunk_size,
             fallback_overlap=document.chunk_overlap,
         )
-        if chunking_cfg.mode == "parent_child":
-            _emit(
-                "分段模式：父子分段（子块用于索引），"
-                f"parent_mode={chunking_cfg.parent_child.parent_mode} "
-                f"child_delim={chunking_cfg.parent_child.child_delimiter!r} "
-                f"child_max={chunking_cfg.parent_child.child_max_length} "
-                f"child_overlap={chunking_cfg.parent_child.child_overlap}"
-            )
-            base_segments = apply_parent_child_chunking(segments=parsed.segments, cfg=chunking_cfg.parent_child)
-            chunk_size = chunking_cfg.parent_child.child_max_length
-            chunk_overlap = chunking_cfg.parent_child.child_overlap
-        else:
-            _emit(
-                "分段模式：通用分段，"
-                f"delim={chunking_cfg.general.delimiter!r} "
-                f"max={chunking_cfg.general.max_length} "
-                f"overlap={chunking_cfg.general.overlap}"
-            )
-            base_segments = apply_general_chunking(
-                segments=parsed.segments,
-                delimiter=chunking_cfg.general.delimiter,
-                collapse_whitespace=chunking_cfg.general.collapse_whitespace,
-            )
-            chunk_size = chunking_cfg.general.max_length
-            chunk_overlap = chunking_cfg.general.overlap
+        if _parsed_uses_prebuilt_table_chunks(parsed):
+            from app.core.document_parser import compact_table_segments_for_index
 
-        n_seg_before = len(base_segments)
-        if chunking_cfg.mode != "parent_child":
-            adapted_size, adapted_overlap = adapt_chunk_size_for_small_doc(base_segments, chunk_size, chunk_overlap)
-            if adapted_size != chunk_size:
-                _emit(f"小文档自适应：chunk_size {chunk_size}→{adapted_size}, overlap {chunk_overlap}→{adapted_overlap}")
-                chunk_size, chunk_overlap = adapted_size, adapted_overlap
-            base_segments = merge_adjacent_segments_by_budget(base_segments, chunk_size)
-            _emit(f"相邻段合并（字符预算={chunk_size}）：分段 {n_seg_before} → {len(base_segments)}，再按长度切块")
+            compacted = compact_table_segments_for_index(parsed.segments)
+            if len(compacted) < len(parsed.segments):
+                _emit(
+                    f"Excel 表格分段 {len(parsed.segments)} → {len(compacted)}（合并过密行块，跳过通用二次切块）"
+                )
+            else:
+                _emit("Excel 表格模式：解析阶段已分块，跳过通用二次切块")
+            chunk_candidates = segments_to_chunk_candidates(compacted)
         else:
-            _emit("父子模式：跳过相邻段预算合并，保留子段边界（与父块内 C-1、C-2… 预览一致）")
-        chunk_candidates = chunk_segments(base_segments, chunk_size, chunk_overlap)
+            if chunking_cfg.mode == "parent_child":
+                _emit(
+                    "分段模式：父子分段（子块用于索引），"
+                    f"parent_mode={chunking_cfg.parent_child.parent_mode} "
+                    f"child_delim={chunking_cfg.parent_child.child_delimiter!r} "
+                    f"child_max={chunking_cfg.parent_child.child_max_length} "
+                    f"child_overlap={chunking_cfg.parent_child.child_overlap}"
+                )
+                base_segments = apply_parent_child_chunking(segments=parsed.segments, cfg=chunking_cfg.parent_child)
+                chunk_size = chunking_cfg.parent_child.child_max_length
+                chunk_overlap = chunking_cfg.parent_child.child_overlap
+            else:
+                _emit(
+                    "分段模式：通用分段，"
+                    f"delim={chunking_cfg.general.delimiter!r} "
+                    f"max={chunking_cfg.general.max_length} "
+                    f"overlap={chunking_cfg.general.overlap}"
+                )
+                base_segments = apply_general_chunking(
+                    segments=parsed.segments,
+                    delimiter=chunking_cfg.general.delimiter,
+                    collapse_whitespace=chunking_cfg.general.collapse_whitespace,
+                )
+                chunk_size = chunking_cfg.general.max_length
+                chunk_overlap = chunking_cfg.general.overlap
+
+            n_seg_before = len(base_segments)
+            if chunking_cfg.mode != "parent_child":
+                adapted_size, adapted_overlap = adapt_chunk_size_for_small_doc(base_segments, chunk_size, chunk_overlap)
+                if adapted_size != chunk_size:
+                    _emit(f"小文档自适应：chunk_size {chunk_size}→{adapted_size}, overlap {chunk_overlap}→{adapted_overlap}")
+                    chunk_size, chunk_overlap = adapted_size, adapted_overlap
+                base_segments = merge_adjacent_segments_by_budget(base_segments, chunk_size)
+                _emit(f"相邻段合并（字符预算={chunk_size}）：分段 {n_seg_before} → {len(base_segments)}，再按长度切块")
+            else:
+                _emit("父子模式：跳过相邻段预算合并，保留子段边界（与父块内 C-1、C-2… 预览一致）")
+            chunk_candidates = chunk_segments(base_segments, chunk_size, chunk_overlap)
         if not chunk_candidates:
             _emit("分块结果为空")
             raise AppError(status_code=400, code="DOCUMENT_CHUNK_EMPTY", message="文档分块结果为空")
@@ -1023,15 +1108,37 @@ def _index_document(
             raise AppError(
                 status_code=400,
                 code="DOCUMENT_TOO_MANY_CHUNKS",
-                message=(
-                    f"分块数量 {len(chunk_candidates)} 异常偏高（政策类 PDF 通常在数百块以内），"
-                    "可能因未正确提取正文（扫描件、复杂版式或兜底解析产生乱码）。"
-                    "请在 .env 设置 MINERU_ENABLED=true 并启动 mineru 服务后重新解析。"
-                ),
+                message=_too_many_chunks_message(parsed, len(chunk_candidates), max_indexable_chunks),
             )
         _emit(f"分块完成：候选块数量 {len(chunk_candidates)}")
         _progress("chunking", current=1, total=1, message="分块完成")
+        _emit("分块阶段结束，提交数据库检查点…")
+        db.commit()
+        ensure_db_connection(db)
+        db.refresh(document)
 
+        enrichment_options = _enrichment_options_from_kb(knowledge_base)
+        if enrichment_options.enabled:
+            from app.services.chunk_enrichment_service import enrich_chunk_candidates
+
+            _progress("chunking", message="入库增强（LLM）…")
+            try:
+                enrich_chunk_candidates(
+                    db,
+                    knowledge_base=knowledge_base,
+                    candidates=chunk_candidates,
+                    options=enrichment_options,
+                    emit=_emit,
+                )
+            except AppError as exc:
+                _emit(f"入库增强失败：{exc.message}，将仅使用原文索引")
+            except Exception as exc:
+                _emit(f"入库增强异常：{exc}，将仅使用原文索引")
+            db.commit()
+            ensure_db_connection(db)
+            db.refresh(document)
+
+        _emit("准备写入分块：检查是否有残留记录…")
         existing_chunk_count = db.execute(
             select(func.count(KnowledgeChunk.id)).where(KnowledgeChunk.document_id == document.id)
         ).scalar_one()
@@ -1040,6 +1147,9 @@ def _index_document(
             _clear_document_chunks_and_vectors(db, knowledge_base=knowledge_base, document=document)
             document.chunk_count = 0
             db.flush()
+            db.commit()
+            ensure_db_connection(db)
+            db.refresh(document)
 
         chunk_records: list[KnowledgeChunk] = []
         vector_status = (
@@ -1047,46 +1157,57 @@ def _index_document(
             if knowledge_base.vector_db_enabled
             else KnowledgeChunkVectorStatus.INDEXED.value
         )
-        for candidate in chunk_candidates:
-            raw_content = candidate.content
-            content = _sanitize_pg_text(raw_content)
-            if not content.strip():
-                content = " "
-            preview = _sanitize_pg_text(candidate.content_preview, max_len=300)
-            if not preview:
-                preview = content[:300] if len(content) > 300 else content
-            elif len(preview) > 300:
-                preview = preview[:300]
-            heading_path = _sanitize_pg_text(candidate.heading_path, max_len=500) or None
-            if heading_path == "":
-                heading_path = None
-            keyword = content
-            chunk = KnowledgeChunk(
-                enterprise_space_id=document.enterprise_space_id,
-                knowledge_base_id=document.knowledge_base_id,
-                document_id=document.id,
-                chunk_uid=_document_chunk_uid(document.id, candidate.chunk_index),
-                chunk_index=candidate.chunk_index,
-                content=content,
-                content_preview=preview if preview else None,
-                char_count=len(content),
-                token_count=None,
-                start_offset=candidate.start_offset,
-                end_offset=candidate.end_offset,
-                page_no=candidate.page_no,
-                heading_path=heading_path,
-                keyword_text=keyword,
-                vector_status=vector_status,
-                vector_id=None,
-                metadata_json=candidate.metadata,
-            )
-            db.add(chunk)
-            chunk_records.append(chunk)
+        _emit(f"准备 flush {len(chunk_candidates)} 条分块到数据库…")
+        for batch_start in range(0, len(chunk_candidates), CHUNK_DB_FLUSH_BATCH):
+            batch = chunk_candidates[batch_start : batch_start + CHUNK_DB_FLUSH_BATCH]
+            for candidate in batch:
+                raw_content = candidate.content
+                content = _sanitize_pg_text(raw_content)
+                if not content.strip():
+                    content = " "
+                preview = _sanitize_pg_text(candidate.content_preview, max_len=300)
+                if not preview:
+                    preview = content[:300] if len(content) > 300 else content
+                elif len(preview) > 300:
+                    preview = preview[:300]
+                heading_path = _sanitize_pg_text(candidate.heading_path, max_len=500) or None
+                if heading_path == "":
+                    heading_path = None
+                keyword = candidate.enrichment_keyword_text or content
+                chunk_meta = _compact_chunk_metadata_for_storage(candidate.metadata, content=content)
+                if candidate.page_no is not None:
+                    chunk_meta["page_no"] = int(candidate.page_no)
+                chunk = KnowledgeChunk(
+                    enterprise_space_id=document.enterprise_space_id,
+                    knowledge_base_id=document.knowledge_base_id,
+                    document_id=document.id,
+                    chunk_uid=_document_chunk_uid(document.id, candidate.chunk_index),
+                    chunk_index=candidate.chunk_index,
+                    content=content,
+                    content_preview=preview if preview else None,
+                    char_count=len(content),
+                    token_count=None,
+                    start_offset=candidate.start_offset,
+                    end_offset=candidate.end_offset,
+                    page_no=candidate.page_no,
+                    heading_path=heading_path,
+                    keyword_text=keyword,
+                    vector_status=vector_status,
+                    vector_id=None,
+                    metadata_json=chunk_meta,
+                )
+                db.add(chunk)
+                chunk_records.append(chunk)
+            db.flush()
+            flushed = min(batch_start + len(batch), len(chunk_candidates))
+            _emit(f"分块 flush 进度 {flushed}/{len(chunk_candidates)}…")
 
         document.status = KnowledgeDocumentStatus.INDEXING.value
         document.chunk_count = len(chunk_records)
-        db.flush()
-        _emit(f"已写入数据库分块记录 {len(chunk_records)} 条（flush）")
+        db.commit()
+        ensure_db_connection(db)
+        db.refresh(document)
+        _emit(f"已写入数据库分块记录 {len(chunk_records)} 条（commit）")
 
         if knowledge_base.vector_db_enabled:
             _progress("embedding", current=0, total=len(chunk_records), message="准备生成向量")
@@ -1109,9 +1230,11 @@ def _index_document(
 
             vectors = generate_embeddings(
                 embedding_model,
-                [chunk.content for chunk in chunk_records],
+                [(c.keyword_text or c.content) for c in chunk_records],
                 on_progress=_embedding_progress,
             )
+            ensure_db_connection(db)
+            db.refresh(document)
             vector_dimension = len(vectors[0]) if vectors else 0
             if vector_dimension <= 0:
                 raise AppError(status_code=502, code="EMBEDDING_RESPONSE_INVALID", message="未返回有效向量")
@@ -1471,7 +1594,7 @@ def _reset_document_after_cancel(
         except AppError:
             pass
     document.status = KnowledgeDocumentStatus.UPLOADED.value
-    document.error_message = "用户已取消解析"
+    document.error_message = None
     document.chunk_count = 0
     document.parse_log_json = _build_parse_log_payload(log_kind, "error", lines)
     db.commit()

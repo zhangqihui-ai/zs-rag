@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import html as html_module
 import json
 import re
 from collections.abc import Callable
@@ -428,6 +429,7 @@ def _parse_image(
 # 章节标题识别（启发式）：优先依赖 Word Heading 样式；无样式回退到中文/数字特征。
 # 用"等级类（class）"而非绝对级别，避免章/节/条混杂时栈层级错乱。
 _CN_NUM = r"[一二三四五六七八九十百千]+"
+# 启发式标题：不含 item 级（「1、xxx」列表项），避免办事指南枚举被当成标题
 _HEADING_CLASSES: list[tuple[str, "re.Pattern[str]"]] = [
     # chapter（章）：第X章、一、背景介绍、第1章
     ("chapter", re.compile(rf"^第\s*{_CN_NUM}\s*[章节篇部].{{0,60}}$")),
@@ -436,9 +438,10 @@ _HEADING_CLASSES: list[tuple[str, "re.Pattern[str]"]] = [
     # section（节）：（一）xxx、1.1 xxx、1.2.3 xxx
     ("section", re.compile(rf"^[(（]\s*{_CN_NUM}\s*[)）].{{0,60}}$")),
     ("section", re.compile(r"^\d+(?:\.\d+){1,3}\s+.{0,60}$")),
-    # item（条/款）：1、xxx、2. xxx、3) xxx —— 严格限制长度避免把正文里的枚举列表误判
-    ("item", re.compile(r"^\d+\s*[、.．)）]\s*.{1,22}$")),
 ]
+
+# 列表项形如「1、xxx」「2. xxx」——不当标题，仅保留 Word Heading 3+ 样式识别 item
+_ENUM_LIST_LINE = re.compile(r"^\d+\s*[、.．)）]\s*")
 
 _CLASS_ORDER = {"chapter": 1, "section": 2, "item": 3}
 
@@ -467,6 +470,8 @@ def _detect_heading_class(text: str, style_name: str | None) -> str | None:
     if not t or len(t) > 60:
         return None
     t_norm = t.replace("\u3000", " ")
+    if _ENUM_LIST_LINE.match(t_norm):
+        return None
     for class_tag, regex in _HEADING_CLASSES:
         if regex.match(t_norm):
             return class_tag
@@ -554,6 +559,74 @@ def _docx_table_cell_text(cell: "DocxCell") -> str:
     return (cell.text or "").strip().replace("\n", " ")
 
 
+def _docx_page_break_count_in_element(el: Any) -> int:
+    """统计 OOXML 子树中的 Word 分页标记（lastRenderedPageBreak + 硬分页 w:br type=page）。"""
+    if docx_qn is None:
+        return 0
+    lrpb = docx_qn("w:lastRenderedPageBreak")
+    br_tag = docx_qn("w:br")
+    br_type = docx_qn("w:type")
+    count = 0
+    for child in el.iter():
+        if child is el:
+            continue
+        if child.tag == lrpb:
+            count += 1
+        elif child.tag == br_tag and child.get(br_type) == "page":
+            count += 1
+    return count
+
+
+def _docx_leading_page_breaks(paragraph: Any) -> int:
+    """段落第一个可见文字之前的分页符数量（Word 软分页常出现在段首）。"""
+    if docx_qn is None:
+        try:
+            return len(paragraph.rendered_page_breaks)
+        except Exception:
+            return 0
+    p_el = paragraph._element  # type: ignore[attr-defined]
+    lrpb = docx_qn("w:lastRenderedPageBreak")
+    br_tag = docx_qn("w:br")
+    br_type = docx_qn("w:type")
+    w_t = docx_qn("w:t")
+    count = 0
+    for child in p_el.iter():
+        if child is p_el:
+            continue
+        if child.tag == w_t and (child.text or "").strip():
+            break
+        if child.tag == lrpb:
+            count += 1
+        elif child.tag == br_tag and child.get(br_type) == "page":
+            count += 1
+    return count
+
+
+def _docx_apply_page_breaks_before_block(current_page: int, node: Any, *, kind: str) -> int:
+    """处理仅含分页符的空段落，或表格/段落前的分页增量。"""
+    if kind == "paragraph":
+        text = _docx_paragraph_plain_text(node).strip() or str(getattr(node, "text", "") or "").strip()
+        if text:
+            return current_page
+        return current_page + _docx_page_break_count_in_element(node._element)  # type: ignore[attr-defined]
+    return current_page
+
+
+def _docx_finalize_paragraph_page(current_page: int, paragraph: Any) -> tuple[int, int]:
+    """返回 (segment_page_no, next_current_page)。"""
+    leading = _docx_leading_page_breaks(paragraph)
+    page_no = current_page + leading
+    total_breaks = _docx_page_break_count_in_element(paragraph._element)  # type: ignore[attr-defined]
+    trailing = max(0, total_breaks - leading)
+    return page_no, page_no + trailing
+
+
+def _docx_finalize_table_page(current_page: int, table: Any) -> tuple[int, int]:
+    page_no = current_page
+    breaks = _docx_page_break_count_in_element(table._element)  # type: ignore[attr-defined]
+    return page_no, page_no + breaks
+
+
 def _is_plausible_header_row(cells: list[str]) -> bool:
     """启发式：若首行均不为空、且没有显著长于其他行的值，视为表头。"""
     if not cells or any(not c for c in cells):
@@ -571,6 +644,8 @@ def build_table_segments_from_rows(
     heading_path: str | None,
     *,
     table_body_html: str | None = None,
+    row_batch_size: int = 1,
+    page_no: int | None = None,
 ) -> list[ParsedSegment]:
     """
     通用"行 → 表格 ParsedSegment 列表"转换器：
@@ -605,6 +680,7 @@ def build_table_segments_from_rows(
             text=overview,
             start_offset=start,
             end_offset=end,
+            page_no=page_no,
             heading_path=heading_path,
             metadata={
                 "block": "table",
@@ -613,48 +689,119 @@ def build_table_segments_from_rows(
                 "table_header": header,
                 "table_row_count": len(data_rows),
                 "heading_path": heading_path,
-                **({"table_body_html": table_body_html} if table_body_html else {}),
+                **({"page_no": page_no, "page_idx": page_no - 1} if page_no is not None else {}),
             },
         )
     )
     parts.append(overview)
     offset_ref[0] = end + 1
 
-    row_meta_base: dict[str, Any] = {}
-    if table_body_html:
-        row_meta_base["table_body_html"] = table_body_html
+    batch_size = max(1, int(row_batch_size))
 
-    for ri, cells in enumerate(data_rows):
+    def _row_line(cells: list[str]) -> str:
         if header and len(cells) == len(header):
-            line = "；".join(f"{h}：{v}" for h, v in zip(header, cells) if v)
-        else:
-            line = " | ".join(c for c in cells if c)
-        line = line.strip()
-        if not line:
+            return "；".join(f"{h}：{v}" for h, v in zip(header, cells) if v).strip()
+        return " | ".join(c for c in cells if c).strip()
+
+    ri = 0
+    while ri < len(data_rows):
+        batch = data_rows[ri : ri + batch_size]
+        lines = [_row_line(cells) for cells in batch]
+        lines = [ln for ln in lines if ln]
+        if not lines:
+            ri += batch_size
             continue
+        line = "\n".join(lines)
+        row_end = ri + len(batch) - 1
         start = offset_ref[0]
         end = start + len(line)
+        html_rows = ([header] + batch) if header else batch
+        batch_html = _rows_to_html_table(html_rows) if html_rows else None
+        row_meta: dict[str, Any] = {
+            "block": "table",
+            "table_index": ti,
+            "table_role": "row",
+            "table_row_index": ri,
+            "table_row_index_end": row_end,
+            "table_row_batch_size": len(batch),
+            "table_header": header,
+            "heading_path": heading_path,
+        }
+        if batch_html:
+            row_meta["table_body_html"] = batch_html
+        if page_no is not None:
+            row_meta["page_no"] = page_no
+            row_meta["page_idx"] = page_no - 1
         segments.append(
             ParsedSegment(
                 text=line,
                 start_offset=start,
                 end_offset=end,
+                page_no=page_no,
                 heading_path=heading_path,
-                metadata={
-                    "block": "table",
-                    "table_index": ti,
-                    "table_role": "row",
-                    "table_row_index": ri,
-                    "table_header": header,
-                    "heading_path": heading_path,
-                    **row_meta_base,
-                },
+                metadata=row_meta,
             )
         )
         parts.append(line)
         offset_ref[0] = end + 1
+        ri += batch_size
 
     return segments
+
+
+def compact_table_segments_for_index(
+    segments: list[ParsedSegment],
+    *,
+    max_segments: int = 2400,
+) -> list[ParsedSegment]:
+    """索引前压缩过密的表格行 segment（兼容旧解析结果或未重启服务的情况）。"""
+    if len(segments) <= max_segments:
+        return segments
+
+    passthrough: list[ParsedSegment] = []
+    row_by_table: dict[int, list[ParsedSegment]] = {}
+
+    for seg in segments:
+        meta = seg.metadata or {}
+        if meta.get("block") == "table" and meta.get("table_role") == "row":
+            ti = int(meta.get("table_index") or 0)
+            row_by_table.setdefault(ti, []).append(seg)
+        else:
+            passthrough.append(seg)
+
+    merged_rows: list[ParsedSegment] = []
+    table_count = max(1, len(row_by_table))
+    per_table_budget = max(80, (max_segments - len(passthrough)) // table_count)
+
+    for _ti, row_segs in sorted(row_by_table.items()):
+        row_segs.sort(key=lambda s: (s.metadata or {}).get("table_row_index", 0))
+        n = len(row_segs)
+        batch = max(1, (n + per_table_budget - 1) // per_table_budget)
+        for i in range(0, n, batch):
+            group = row_segs[i : i + batch]
+            text = "\n".join(s.text for s in group if s.text.strip())
+            if not text.strip():
+                continue
+            first, last = group[0], group[-1]
+            meta = dict(first.metadata or {})
+            fmeta, lmeta = first.metadata or {}, last.metadata or {}
+            meta["table_row_index"] = fmeta.get("table_row_index", i)
+            meta["table_row_index_end"] = lmeta.get("table_row_index", i + len(group) - 1)
+            meta["table_row_batch_size"] = len(group)
+            merged_rows.append(
+                ParsedSegment(
+                    text=text,
+                    start_offset=first.start_offset,
+                    end_offset=last.end_offset,
+                    heading_path=first.heading_path,
+                    page_no=first.page_no,
+                    metadata=meta,
+                )
+            )
+
+    combined = passthrough + merged_rows
+    combined.sort(key=lambda s: s.start_offset if s.start_offset is not None else 0)
+    return combined
 
 
 def _docx_table_to_segments(
@@ -663,6 +810,8 @@ def _docx_table_to_segments(
     offset_ref: list[int],
     parts: list[str],
     heading_path: str | None,
+    *,
+    page_no: int | None = None,
 ) -> list[ParsedSegment]:
     """从 python-docx 的 Table 提取行，再交给通用的 build_table_segments_from_rows 处理。"""
     rows: list[list[str]] = []
@@ -670,7 +819,7 @@ def _docx_table_to_segments(
         cells = [_docx_table_cell_text(c) for c in row.cells]
         if any(cells):
             rows.append(cells)
-    return build_table_segments_from_rows(rows, ti, offset_ref, parts, heading_path)
+    return build_table_segments_from_rows(rows, ti, offset_ref, parts, heading_path, page_no=page_no)
 
 
 def _iter_docx_body_blocks(doc: Any):
@@ -701,6 +850,7 @@ def _parse_docx(file_bytes: bytes) -> ParsedDocument:
     heading_stack: list[tuple[str, str]] = []
     current_heading_path: str | None = None
     table_counter = 0
+    current_page = 1
 
     for kind, node in _iter_docx_body_blocks(doc):
         if kind == "paragraph":
@@ -708,7 +858,9 @@ def _parse_docx(file_bytes: bytes) -> ParsedDocument:
             if not t:
                 t = (node.text or "").strip()
             if not t:
+                current_page = _docx_apply_page_breaks_before_block(current_page, node, kind=kind)
                 continue
+            page_no, current_page = _docx_finalize_paragraph_page(current_page, node)
             style_name = None
             try:
                 style_name = node.style.name if node.style is not None else None  # type: ignore[attr-defined]
@@ -717,6 +869,7 @@ def _parse_docx(file_bytes: bytes) -> ParsedDocument:
             cls = _detect_heading_class(t, style_name)
             start = offset_ref[0]
             end = start + len(t)
+            page_meta = {"page_no": page_no, "page_idx": page_no - 1}
             if cls is not None:
                 current_heading_path = _update_heading_path(heading_stack, cls, t)
                 segments.append(
@@ -724,12 +877,14 @@ def _parse_docx(file_bytes: bytes) -> ParsedDocument:
                         text=t,
                         start_offset=start,
                         end_offset=end,
+                        page_no=page_no,
                         heading_path=current_heading_path,
                         metadata={
                             "block": "heading",
                             "heading_class": cls,
                             "heading_level": _CLASS_ORDER.get(cls, 3),
                             "heading_path": current_heading_path,
+                            **page_meta,
                         },
                     )
                 )
@@ -739,22 +894,26 @@ def _parse_docx(file_bytes: bytes) -> ParsedDocument:
                         text=t,
                         start_offset=start,
                         end_offset=end,
+                        page_no=page_no,
                         heading_path=current_heading_path,
                         metadata={
                             "block": "paragraph",
                             "heading_path": current_heading_path,
+                            **page_meta,
                         },
                     )
                 )
             parts.append(t)
             offset_ref[0] = end + 1
         elif kind == "table":
+            page_no, current_page = _docx_finalize_table_page(current_page, node)
             table_segments = _docx_table_to_segments(
                 node,
                 table_counter,
                 offset_ref,
                 parts,
                 current_heading_path,
+                page_no=page_no,
             )
             segments.extend(table_segments)
             table_counter += 1
@@ -782,99 +941,155 @@ def _parse_docx(file_bytes: bytes) -> ParsedDocument:
 
 
 def _parse_xlsx_xlsm(file_bytes: bytes, suffix: str, log: Callable[[str], None] | None = None) -> ParsedDocument:
-    if load_workbook is None:
-        raise UnsupportedDocumentError("未安装 openpyxl，无法解析 Excel 文档")
-
-    def _log(msg: str) -> None:
-        if log:
-            log(msg)
-
-    _log(f"Excel（{suffix}）：使用 openpyxl 只读模式打开，约 {len(file_bytes)} 字节")
-    wb = load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
-    try:
-        names = wb.sheetnames
-        _log(f"工作簿共 {len(names)} 个工作表：{', '.join(names[:20])}{'…' if len(names) > 20 else ''}")
-        segments: list[ParsedSegment] = []
-        parts: list[str] = []
-        offset = 0
-        for sheet in wb:
-            _log(f"工作表「{sheet.title}」：开始扫描行…")
-            rows_text: list[str] = []
-            row_count = 0
-            nonempty_rows = 0
-            for row in sheet.iter_rows(values_only=True):
-                row_count += 1
-                cells = [str(c).strip() if c is not None else "" for c in row]
-                if not any(cells):
-                    continue
-                nonempty_rows += 1
-                rows_text.append("\t".join(cells))
-                if row_count % 5000 == 0:
-                    _log(f"工作表「{sheet.title}」已扫描 {row_count} 行（其中非空 {nonempty_rows} 行）…")
-            sheet_body = "\n".join(rows_text).strip()
-            _log(f"工作表「{sheet.title}」：扫描结束，总行数 {row_count}，非空行 {nonempty_rows}，拼接文本长度 {len(sheet_body)}")
-            if not sheet_body:
-                _log(f"工作表「{sheet.title}」无有效单元格内容，跳过")
-                continue
-            block = f"## {sheet.title}\n{sheet_body}"
-            start = offset
-            end = offset + len(block)
-            segments.append(
-                ParsedSegment(
-                    text=block,
-                    start_offset=start,
-                    end_offset=end,
-                    heading_path=sheet.title,
-                    metadata={"sheet": sheet.title},
-                )
-            )
-            parts.append(block)
-            offset = end + 2
-        full_text = "\n\n".join(parts).strip()
-        label = "xlsx" if suffix == "xlsx" else "xlsm"
-        _log(f"Excel 解析汇总：合并文本长度 {len(full_text)}，分段数 {len(segments)}")
-        return ParsedDocument(
-            parser_type=label,
-            text=full_text,
-            char_count=len(full_text),
-            segments=segments
-            or [ParsedSegment(text=full_text, start_offset=0, end_offset=len(full_text), metadata={})],
-            metadata={"sheet_count": len(segments)},
-        )
-    finally:
-        wb.close()
+    return _parse_excel(file_bytes, suffix, engine="tsv", log=log)
 
 
 def _parse_xls(file_bytes: bytes, log: Callable[[str], None] | None = None) -> ParsedDocument:
-    if xlrd is None:
-        raise UnsupportedDocumentError("未安装 xlrd，无法解析 .xls 文件")
+    return _parse_excel(file_bytes, "xls", engine="tsv", log=log)
 
+
+def _cell_str(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _rows_to_html_table(rows: list[list[str]], *, caption: str | None = None) -> str:
+    if not rows:
+        return ""
+    parts = ["<table>"]
+    if caption:
+        parts.append(f"<caption>{html_module.escape(caption)}</caption>")
+    for ri, row in enumerate(rows):
+        parts.append("<tr>")
+        tag = "th" if ri == 0 else "td"
+        for cell in row:
+            parts.append(f"<{tag}>{html_module.escape(cell)}</{tag}>")
+        parts.append("</tr>")
+    parts.append("</table>")
+    return "".join(parts)
+
+
+def _read_xlsx_sheet_rows(sheet, log: Callable[[str], None] | None = None) -> list[list[str]]:
     def _log(msg: str) -> None:
         if log:
             log(msg)
 
-    _log(f"Excel（xls）：使用 xlrd 打开，约 {len(file_bytes)} 字节")
+    rows: list[list[str]] = []
+    row_count = 0
+    for row in sheet.iter_rows(values_only=True):
+        row_count += 1
+        cells = [_cell_str(c) for c in row]
+        if not any(cells):
+            continue
+        rows.append(cells)
+        if row_count % 5000 == 0:
+            _log(f"工作表「{sheet.title}」已扫描 {row_count} 行…")
+    return rows
+
+
+def _read_xls_sheet_rows(book, sheet_index: int, log: Callable[[str], None] | None = None) -> tuple[str, list[list[str]]]:
+    def _log(msg: str) -> None:
+        if log:
+            log(msg)
+
+    sheet = book.sheet_by_index(sheet_index)
+    rows: list[list[str]] = []
+    for ri in range(sheet.nrows):
+        values = sheet.row_values(ri)
+        cells = [_cell_str(c) for c in values]
+        if not any(cells):
+            continue
+        rows.append(cells)
+        if ri > 0 and ri % 5000 == 0:
+            _log(f"工作表「{sheet.name}」已读取 {ri} 行…")
+    return sheet.name, rows
+
+
+def _excel_row_batch_size(num_data_rows: int, *, max_row_segments: int = 400) -> int:
+    """大表按批合并行 segment，避免单行一块导致分块数爆炸。"""
+    if num_data_rows <= max_row_segments:
+        return 1
+    return max(1, (num_data_rows + max_row_segments - 1) // max_row_segments)
+
+
+def _table_data_row_count(row_matrix: list[list[str]]) -> int:
+    rows = [r for r in row_matrix if any(c.strip() for c in r)]
+    if len(rows) >= 2 and _is_plausible_header_row(rows[0]):
+        return len(rows) - 1
+    return len(rows)
+
+
+def _parse_excel_tsv(file_bytes: bytes, suffix: str, log: Callable[[str], None] | None = None) -> ParsedDocument:
+    if suffix in {"xlsx", "xlsm"}:
+        if load_workbook is None:
+            raise UnsupportedDocumentError("未安装 openpyxl，无法解析 Excel 文档")
+
+        def _log(msg: str) -> None:
+            if log:
+                log(msg)
+
+        _log(f"Excel（{suffix}，TSV）：openpyxl 只读，约 {len(file_bytes)} 字节")
+        wb = load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
+        try:
+            segments: list[ParsedSegment] = []
+            parts: list[str] = []
+            offset = 0
+            for sheet in wb:
+                rows_text: list[str] = []
+                for row in sheet.iter_rows(values_only=True):
+                    cells = [_cell_str(c) for c in row]
+                    if not any(cells):
+                        continue
+                    rows_text.append("\t".join(cells))
+                sheet_body = "\n".join(rows_text).strip()
+                if not sheet_body:
+                    continue
+                block = f"## {sheet.title}\n{sheet_body}"
+                start = offset
+                end = offset + len(block)
+                segments.append(
+                    ParsedSegment(
+                        text=block,
+                        start_offset=start,
+                        end_offset=end,
+                        heading_path=sheet.title,
+                        metadata={"sheet": sheet.title, "excel_engine": "tsv"},
+                    )
+                )
+                parts.append(block)
+                offset = end + 2
+            full_text = "\n\n".join(parts).strip()
+            label = "xlsx" if suffix == "xlsx" else "xlsm"
+            return ParsedDocument(
+                parser_type=label,
+                text=full_text,
+                char_count=len(full_text),
+                segments=segments
+                or [ParsedSegment(text=full_text, start_offset=0, end_offset=len(full_text), metadata={})],
+                metadata={"sheet_count": len(segments), "excel_engine": "tsv"},
+            )
+        finally:
+            wb.close()
+
+    if xlrd is None:
+        raise UnsupportedDocumentError("未安装 xlrd，无法解析 .xls 文件")
+
+    def _log_xls(msg: str) -> None:
+        if log:
+            log(msg)
+
+    _log_xls(f"Excel（xls，TSV）：约 {len(file_bytes)} 字节")
     book = xlrd.open_workbook(file_contents=file_bytes)
-    _log(f"工作簿共 {book.nsheets} 个工作表")
-    segments: list[ParsedSegment] = []
+    segments = []
     parts: list[str] = []
     offset = 0
     for si in range(book.nsheets):
-        sheet = book.sheet_by_index(si)
-        _log(f"工作表「{sheet.name}」：共 {sheet.nrows} 行 × {sheet.ncols} 列，开始读取…")
-        rows_text: list[str] = []
-        for ri in range(sheet.nrows):
-            values = sheet.row_values(ri)
-            cells = [str(c).strip() if c != "" else "" for c in values]
-            if not any(cells):
-                continue
-            rows_text.append("\t".join(cells))
-            if ri > 0 and ri % 5000 == 0:
-                _log(f"工作表「{sheet.name}」已读取 {ri} 行…")
+        title, row_matrix = _read_xls_sheet_rows(book, si, log=log)
+        rows_text = ["\t".join(r) for r in row_matrix]
         sheet_body = "\n".join(rows_text).strip()
         if not sheet_body:
             continue
-        title = sheet.name
         block = f"## {title}\n{sheet_body}"
         start = offset
         end = offset + len(block)
@@ -884,22 +1099,118 @@ def _parse_xls(file_bytes: bytes, log: Callable[[str], None] | None = None) -> P
                 start_offset=start,
                 end_offset=end,
                 heading_path=title,
-                metadata={"sheet": title},
+                metadata={"sheet": title, "excel_engine": "tsv"},
             )
         )
         parts.append(block)
         offset = end + 2
-        _log(f"工作表「{sheet.name}」：有效文本长度 {len(sheet_body)}")
     full_text = "\n\n".join(parts).strip()
-    _log(f"xls 解析汇总：合并文本长度 {len(full_text)}，分段数 {len(segments)}")
     return ParsedDocument(
         parser_type="xls",
         text=full_text,
         char_count=len(full_text),
-        segments=segments
-        or [ParsedSegment(text=full_text, start_offset=0, end_offset=len(full_text), metadata={})],
-        metadata={"sheet_count": len(segments)},
+        segments=segments or [ParsedSegment(text=full_text, start_offset=0, end_offset=len(full_text), metadata={})],
+        metadata={"sheet_count": len(segments), "excel_engine": "tsv"},
     )
+
+
+def _parse_excel_html_table(file_bytes: bytes, suffix: str, log: Callable[[str], None] | None = None) -> ParsedDocument:
+    def _log(msg: str) -> None:
+        if log:
+            log(msg)
+
+    segments: list[ParsedSegment] = []
+    parts: list[str] = []
+    offset_ref = [0]
+    table_index = 0
+
+    if suffix in {"xlsx", "xlsm"}:
+        if load_workbook is None:
+            raise UnsupportedDocumentError("未安装 openpyxl，无法解析 Excel 文档")
+        _log(f"Excel（{suffix}，HTML 表格）：openpyxl 只读，约 {len(file_bytes)} 字节")
+        wb = load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
+        try:
+            for sheet in wb:
+                row_matrix = _read_xlsx_sheet_rows(sheet, log=log)
+                if not row_matrix:
+                    _log(f"工作表「{sheet.title}」无有效内容，跳过")
+                    continue
+                table_html = _rows_to_html_table(row_matrix, caption=sheet.title)
+                row_batch = _excel_row_batch_size(_table_data_row_count(row_matrix))
+                if row_batch > 1 and log:
+                    _log(f"工作表「{sheet.title}」行数较多，按每 {row_batch} 行合并为 1 个检索块")
+                sheet_segments = build_table_segments_from_rows(
+                    row_matrix,
+                    table_index,
+                    offset_ref,
+                    parts,
+                    sheet.title,
+                    table_body_html=table_html,
+                    row_batch_size=row_batch,
+                )
+                for seg in sheet_segments:
+                    meta = dict(seg.metadata or {})
+                    meta["sheet"] = sheet.title
+                    meta["excel_engine"] = "html_table"
+                    seg.metadata = meta
+                segments.extend(sheet_segments)
+                table_index += 1
+        finally:
+            wb.close()
+    else:
+        if xlrd is None:
+            raise UnsupportedDocumentError("未安装 xlrd，无法解析 .xls 文件")
+        _log(f"Excel（xls，HTML 表格）：约 {len(file_bytes)} 字节")
+        book = xlrd.open_workbook(file_contents=file_bytes)
+        for si in range(book.nsheets):
+            title, row_matrix = _read_xls_sheet_rows(book, si, log=log)
+            if not row_matrix:
+                continue
+            table_html = _rows_to_html_table(row_matrix, caption=title)
+            row_batch = _excel_row_batch_size(_table_data_row_count(row_matrix))
+            if row_batch > 1 and log:
+                _log(f"工作表「{title}」行数较多，按每 {row_batch} 行合并为 1 个检索块")
+            sheet_segments = build_table_segments_from_rows(
+                row_matrix,
+                table_index,
+                offset_ref,
+                parts,
+                title,
+                table_body_html=table_html,
+                row_batch_size=row_batch,
+            )
+            for seg in sheet_segments:
+                meta = dict(seg.metadata or {})
+                meta["sheet"] = title
+                meta["excel_engine"] = "html_table"
+                seg.metadata = meta
+            segments.extend(sheet_segments)
+            table_index += 1
+
+    full_text = "\n".join(parts).strip()
+    if not full_text and segments:
+        full_text = "\n".join(s.text for s in segments)
+    parser_type = suffix if suffix in {"xlsx", "xlsm", "xls"} else "xlsx"
+    _log(f"Excel HTML 解析汇总：分段 {len(segments)}，文本长度 {len(full_text)}")
+    return ParsedDocument(
+        parser_type=parser_type,
+        text=full_text,
+        char_count=len(full_text),
+        segments=segments or [ParsedSegment(text="", start_offset=0, end_offset=0, metadata={})],
+        metadata={"sheet_count": table_index, "excel_engine": "html_table", "table_count": table_index, "chunking_strategy": "table_segments"},
+    )
+
+
+def _parse_excel(
+    file_bytes: bytes,
+    suffix: str,
+    *,
+    engine: str = "html_table",
+    log: Callable[[str], None] | None = None,
+) -> ParsedDocument:
+    if engine == "tsv":
+        return _parse_excel_tsv(file_bytes, suffix, log=log)
+    return _parse_excel_html_table(file_bytes, suffix, log=log)
 
 
 def _parse_csv(file_bytes: bytes) -> ParsedDocument:
@@ -944,10 +1255,24 @@ def parse_document(
     *,
     pdf_parser: str | None = None,
     pdf_parser_hybrid: bool | None = None,
+    parser_options: Any | None = None,
 ) -> ParsedDocument:
+    from app.core.parser_config import ParserOptions, resolve_parsers
+
     def _log(msg: str) -> None:
         if log:
             log(msg)
+
+    opts: ParserOptions | None = parser_options if isinstance(parser_options, ParserOptions) else None
+    if opts is None and (pdf_parser is not None or pdf_parser_hybrid is not None):
+        legacy_cfg: dict[str, Any] = {}
+        if pdf_parser is not None:
+            legacy_cfg["pdf_parser"] = pdf_parser
+        if pdf_parser_hybrid is not None:
+            legacy_cfg["pdf_parser_hybrid"] = pdf_parser_hybrid
+        opts = resolve_parsers(legacy_cfg)
+    elif opts is None:
+        opts = resolve_parsers(None)
 
     suffix = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
     _log(f"开始解析「{file_name}」，扩展名 .{suffix or '（无）'}，大小 {len(file_bytes)} 字节")
@@ -958,16 +1283,17 @@ def parse_document(
         )
 
     if suffix == "docx":
-        _log("使用 python-docx 解析 docx…")
+        _log(f"使用 {opts.docx_engine} 解析 docx…")
         doc = _parse_docx(file_bytes)
         _log(f"docx：字符数 {doc.char_count}，分段 {len(doc.segments)}")
         return doc
 
-    if suffix == "xlsx" or suffix == "xlsm":
-        return _parse_xlsx_xlsm(file_bytes, suffix, log=log)
-
-    if suffix == "xls":
-        return _parse_xls(file_bytes, log=log)
+    if suffix in {"xlsx", "xlsm", "xls"}:
+        excel_suffix = suffix
+        _log(f"Excel 解析引擎：{opts.excel_engine}")
+        doc = _parse_excel(file_bytes, excel_suffix, engine=opts.excel_engine, log=log)
+        _log(f"Excel：字符数 {doc.char_count}，分段 {len(doc.segments)}")
+        return doc
 
     if suffix == "csv":
         _log("按 CSV 规则解析…")
@@ -979,8 +1305,8 @@ def parse_document(
         doc = _parse_pdf(
             file_bytes,
             file_name=file_name,
-            pdf_parser=pdf_parser,
-            pdf_parser_hybrid=pdf_parser_hybrid,
+            pdf_parser=opts.pdf_engine,
+            pdf_parser_hybrid=opts.pdf_hybrid if opts.pdf_engine == "opendataloader" else None,
             log=log,
         )
         meta_for_log = {

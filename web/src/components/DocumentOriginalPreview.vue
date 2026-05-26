@@ -3,15 +3,29 @@
     <div v-if="loading" class="document-original-preview-loading">正在加载原文…</div>
     <div v-else-if="error" class="status-box error">{{ error }}</div>
     <iframe v-else-if="mode === 'iframe' && iframeUrl" class="document-original-iframe" title="原文预览" :src="iframeUrl" />
-    <div v-else-if="mode === 'html'" class="document-original-html" v-html="html" />
+    <div
+      v-else-if="mode === 'html'"
+      ref="htmlRootRef"
+      class="document-original-html"
+      v-html="html"
+      @scroll.passive="onHtmlScroll"
+    />
     <pre v-else-if="mode === 'text'" class="document-original-text">{{ text }}</pre>
   </div>
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch } from 'vue'
+import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import { getKnowledgeBaseErrorMessage, knowledgeBaseApi } from '../api/knowledge-base'
+import {
+  clearHtmlHighlights,
+  highlightAndScrollHtmlText,
+  installDocxPageSentinels,
+  pickVisibleDocxPage,
+  scrollDocxPageSentinel,
+  scrollHtmlToText,
+} from '../lib/htmlTextHighlight'
 
 const props = defineProps<{
   kbId: number
@@ -21,6 +35,17 @@ const props = defineProps<{
   mimeType: string | null
   /** PDF iframe 预览时跳转到指定页（1-based） */
   initialPage?: number | null
+  /** Word 等 HTML 原文：联动高亮并滚动到匹配段落 */
+  highlightQuery?: string | null
+  /** Word 页码同步滚动（1-based） */
+  syncPage?: number | null
+  /** 每页首段文本，用于插入页锚点 */
+  pageAnchorTexts?: Record<number, string> | null
+}>()
+
+const emit = defineEmits<{
+  'page-visible': [page: number]
+  'scroll-ratio': [ratio: number]
 }>()
 
 const loading = ref(true)
@@ -29,10 +54,86 @@ const mode = ref<'html' | 'iframe' | 'text'>('text')
 const html = ref('')
 const text = ref('')
 const iframeUrl = ref<string | null>(null)
+const htmlRootRef = ref<HTMLElement | null>(null)
+
+let ignorePageVisibleEmit = false
+let htmlScrollRaf = 0
+let currentVisiblePage: number | null = null
+
+async function refreshPageSentinels() {
+  await nextTick()
+  if (!htmlRootRef.value || !props.pageAnchorTexts || Object.keys(props.pageAnchorTexts).length === 0) {
+    return
+  }
+  installDocxPageSentinels(htmlRootRef.value, props.pageAnchorTexts)
+}
+
+async function applyHighlight() {
+  if (loading.value || mode.value !== 'html') {
+    return
+  }
+  await nextTick()
+  if (!props.highlightQuery?.trim()) {
+    clearHtmlHighlights(htmlRootRef.value)
+    return
+  }
+  highlightAndScrollHtmlText(htmlRootRef.value, props.highlightQuery)
+}
+
+async function scrollToText(query: string, options?: { highlight?: boolean }) {
+  if (loading.value || mode.value !== 'html') {
+    return false
+  }
+  await nextTick()
+  ignorePageVisibleEmit = true
+  const ok = scrollHtmlToText(htmlRootRef.value, query, options)
+  window.setTimeout(() => {
+    ignorePageVisibleEmit = false
+  }, 420)
+  return ok
+}
+
+async function scrollToPage(page: number) {
+  if (loading.value || mode.value !== 'html' || page < 1) {
+    return
+  }
+  await nextTick()
+  ignorePageVisibleEmit = true
+  scrollDocxPageSentinel(htmlRootRef.value, page, props.pageAnchorTexts)
+  currentVisiblePage = page
+  window.setTimeout(() => {
+    ignorePageVisibleEmit = false
+  }, 420)
+}
+
+function onHtmlScroll() {
+  if (mode.value !== 'html') {
+    return
+  }
+  const root = htmlRootRef.value
+  if (root) {
+    const max = root.scrollHeight - root.clientHeight
+    const ratio = max > 8 ? root.scrollTop / max : 0
+    emit('scroll-ratio', Math.min(1, Math.max(0, ratio)))
+  }
+  if (ignorePageVisibleEmit || mode.value !== 'html') {
+    return
+  }
+  cancelAnimationFrame(htmlScrollRaf)
+  htmlScrollRaf = requestAnimationFrame(() => {
+    const page = pickVisibleDocxPage(htmlRootRef.value)
+    if (page == null || page === currentVisiblePage) {
+      return
+    }
+    currentVisiblePage = page
+    emit('page-visible', page)
+  })
+}
 
 async function load() {
   loading.value = true
   error.value = ''
+  currentVisiblePage = null
   if (iframeUrl.value) {
     URL.revokeObjectURL(iframeUrl.value)
     iframeUrl.value = null
@@ -83,6 +184,35 @@ watch(
     void load()
   },
 )
+
+watch(
+  () => [html.value, loading.value, props.pageAnchorTexts],
+  () => {
+    void refreshPageSentinels()
+  },
+)
+
+watch(
+  () => [props.highlightQuery, html.value, loading.value],
+  () => {
+    void applyHighlight()
+  },
+)
+
+watch(
+  () => props.syncPage,
+  (page) => {
+    if (typeof page === 'number' && Number.isFinite(page) && page >= 1 && page !== currentVisiblePage) {
+      void scrollToPage(page)
+    }
+  },
+)
+
+defineExpose({
+  scrollToPage,
+  scrollToText,
+  getHtmlRoot: () => htmlRootRef.value,
+})
 
 onUnmounted(() => {
   if (iframeUrl.value) {
@@ -138,6 +268,27 @@ onUnmounted(() => {
 .document-original-html :deep(td) {
   border: 1px solid var(--border-color);
   padding: 4px 8px;
+}
+
+.document-original-html :deep(img) {
+  max-width: 100%;
+  height: auto;
+}
+
+.document-original-html :deep(mark.doc-original-highlight) {
+  background: color-mix(in srgb, var(--brand) 28%, #fef08a);
+  border-radius: 2px;
+  padding: 0 1px;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--brand) 35%, transparent);
+}
+
+.document-original-html :deep(.docx-page-sentinel) {
+  height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  pointer-events: none;
 }
 
 .document-original-text {

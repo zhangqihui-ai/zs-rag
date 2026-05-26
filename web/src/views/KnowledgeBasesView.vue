@@ -65,7 +65,19 @@
             @keydown.space.prevent="goDetail(kb.id)"
           >
             <div class="kb-tile-top">
-              <div class="kb-tile-avatar">{{ kb.name.slice(0, 1).toUpperCase() }}</div>
+              <div
+                :class="[
+                  'kb-tile-avatar',
+                  kbStorageKind(kb) === 'graph' ? 'kb-tile-avatar--graph' : 'kb-tile-avatar--vector',
+                ]"
+                :title="kbStorageLabel(kb)"
+                :aria-label="kbStorageLabel(kb)"
+              >
+                <AppIcon
+                  :name="kbStorageKind(kb) === 'graph' ? 'graph' : 'vector-db'"
+                  :size="kbStorageKind(kb) === 'graph' ? 22 : 20"
+                />
+              </div>
               <button class="tile-menu-trigger" type="button" @click.stop="toggleMenu(kb.id)">⋯</button>
               <div v-if="openMenuId === kb.id" class="tile-menu" @click.stop>
                 <button class="tile-menu-item" type="button" @click="handleEditFromMenu(kb)">修改</button>
@@ -77,6 +89,16 @@
 
             <h4>{{ kb.name }}</h4>
             <p class="kb-tile-desc">{{ kb.description || '该知识库暂无描述。' }}</p>
+            <div class="kb-tile-tags">
+              <span class="kb-tag kb-tag--embed" :title="embeddingLabelTitleForKb(kb)">
+                <AppIcon name="vector-db" :size="12" />
+                {{ embeddingShortLabelForKb(kb) }}
+              </span>
+              <span :class="['kb-tag', kbStorageKind(kb) === 'graph' ? 'kb-tag--graph' : 'kb-tag--vector']">
+                <AppIcon :name="kbStorageKind(kb) === 'graph' ? 'graph' : 'database'" :size="12" />
+                {{ kbEngineLabel(kb) }}
+              </span>
+            </div>
             <div class="kb-tile-meta-row">
               <span :class="['status-pill', kb.status === 'active' ? 'success' : 'warning']">{{ statusLabelMap[kb.status] || kb.status }}</span>
               <span class="kb-tile-date">{{ formatDate(kb.created_at) }}</span>
@@ -203,6 +225,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { getKnowledgeBaseErrorMessage, knowledgeBaseApi, type KnowledgeBase, type KnowledgeBasePayload } from '../api/knowledge-base'
+import { defaultModelApi, modelApi, type DefaultModelOption, type ModelItem } from '../api/model-management'
 import AppIcon from '../components/AppIcon.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Layout from '../components/Layout.vue'
@@ -216,6 +239,8 @@ const statusLabelMap: Record<string, string> = {
 const router = useRouter()
 
 const knowledgeBases = ref<KnowledgeBase[]>([])
+const embeddingModels = ref<ModelItem[]>([])
+const embeddingDefault = ref<DefaultModelOption | null>(null)
 const loading = ref(true)
 const error = ref('')
 
@@ -297,12 +322,80 @@ const refreshKnowledgeBases = async () => {
   loading.value = true
   error.value = ''
   try {
-    knowledgeBases.value = await knowledgeBaseApi.list()
+    const [kbs] = await Promise.all([knowledgeBaseApi.list(), loadEmbeddingContext()])
+    knowledgeBases.value = kbs
   } catch (value) {
     error.value = getKnowledgeBaseErrorMessage(value, '加载知识库失败')
   } finally {
     loading.value = false
   }
+}
+
+const embeddingModelById = computed(() => {
+  const map = new Map<number, ModelItem>()
+  for (const item of embeddingModels.value) {
+    map.set(item.id, item)
+  }
+  return map
+})
+
+async function loadEmbeddingContext() {
+  const [modelsResult, defaultsResult] = await Promise.allSettled([
+    modelApi.getModels({ model_type: 'embedding', is_enabled: true, view: 'flat' }),
+    defaultModelApi.getDefaults(),
+  ])
+  if (modelsResult.status === 'fulfilled' && Array.isArray(modelsResult.value)) {
+    embeddingModels.value = modelsResult.value as ModelItem[]
+  }
+  if (defaultsResult.status === 'fulfilled') {
+    embeddingDefault.value = defaultsResult.value.embedding ?? null
+  }
+}
+
+function resolveEmbeddingModel(kb: KnowledgeBase): ModelItem | null {
+  if (kb.embedding_model_id != null) {
+    return embeddingModelById.value.get(kb.embedding_model_id) ?? null
+  }
+  const defaultId = embeddingDefault.value?.model_id
+  if (defaultId != null) {
+    return embeddingModelById.value.get(defaultId) ?? null
+  }
+  return embeddingModels.value[0] ?? null
+}
+
+function embeddingShortLabelForKb(kb: KnowledgeBase): string {
+  const model = resolveEmbeddingModel(kb)
+  if (model?.model_name) {
+    return truncateLabel(model.model_name, 22)
+  }
+  if (kb.embedding_model_id != null) {
+    return `模型 #${kb.embedding_model_id}`
+  }
+  return '默认 Embedding'
+}
+
+function embeddingLabelTitleForKb(kb: KnowledgeBase): string | undefined {
+  const model = resolveEmbeddingModel(kb)
+  if (model) {
+    const suffix = kb.embedding_model_id != null ? '' : '（工作区默认）'
+    return `${model.model_name} @ ${model.provider_name}${suffix}`
+  }
+  if (kb.embedding_model_id != null) {
+    return `模型 ID ${kb.embedding_model_id}`
+  }
+  return '知识库未单独指定向量模型，使用工作区默认 Embedding'
+}
+
+function kbEngineLabel(kb: KnowledgeBase): string {
+  return kbStorageKind(kb) === 'graph' ? 'LightRAG' : 'Milvus'
+}
+
+function truncateLabel(text: string, maxLen: number): string {
+  const trimmed = text.trim()
+  if (trimmed.length <= maxLen) {
+    return trimmed
+  }
+  return `${trimmed.slice(0, maxLen - 1)}…`
 }
 
 const formatDate = (value: string) => {
@@ -315,6 +408,20 @@ const formatDate = (value: string) => {
 
 const goDetail = (kbId: number) => {
   router.push(`/knowledge-bases/${kbId}`)
+}
+
+function kbStorageKind(kb: KnowledgeBase): 'vector' | 'graph' {
+  if (kb.kb_type === 'lightrag') {
+    return 'graph'
+  }
+  if (kb.kb_type === 'classic') {
+    return 'vector'
+  }
+  return kb.graph_db_enabled && !kb.vector_db_enabled ? 'graph' : 'vector'
+}
+
+function kbStorageLabel(kb: KnowledgeBase): string {
+  return kbStorageKind(kb) === 'graph' ? '图知识库（LightRAG）' : '向量知识库（Milvus）'
 }
 
 const toggleMenu = (kbId: number) => {
@@ -556,7 +663,7 @@ onBeforeUnmount(() => {
 
 .kb-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(268px, 1fr));
   gap: 16px;
 }
 
@@ -565,12 +672,12 @@ onBeforeUnmount(() => {
   border: 1px solid var(--border-color);
   border-radius: 18px;
   background: var(--bg-tertiary);
-  padding: 16px;
+  padding: 18px;
   box-shadow: var(--card-shadow-xs);
   display: grid;
   align-content: start;
-  gap: 12px;
-  min-height: 176px;
+  gap: 10px;
+  min-height: 210px;
   cursor: pointer;
   transition: border-color 0.2s ease, transform 0.2s ease, background 0.2s ease;
 }
@@ -593,16 +700,68 @@ onBeforeUnmount(() => {
 }
 
 .kb-tile-avatar {
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, #ea580c 0%, #f97316 100%);
-  color: #fff;
-  font-weight: 700;
-  font-size: 1rem;
+  flex-shrink: 0;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+
+.kb-tile-avatar--vector {
+  background: linear-gradient(135deg, #1d4ed8 0%, #3b82f6 100%);
+  color: #eff6ff;
+}
+
+.kb-tile-avatar--graph {
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #b91c1c 0%, #ef4444 100%);
+  color: #fef2f2;
+}
+
+.kb-tile-tags {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.kb-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 5px 10px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  font-size: 0.76rem;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kb-tag--embed {
+  border-color: rgba(59, 130, 246, 0.35);
+  background: rgba(59, 130, 246, 0.08);
+  color: #2563eb;
+}
+
+.kb-tag--vector {
+  border-color: rgba(59, 130, 246, 0.28);
+  background: rgba(59, 130, 246, 0.06);
+  color: #1d4ed8;
+}
+
+.kb-tag--graph {
+  border-color: rgba(168, 85, 247, 0.35);
+  background: rgba(168, 85, 247, 0.1);
+  color: #7c3aed;
 }
 
 .tile-menu-trigger {
@@ -663,6 +822,7 @@ onBeforeUnmount(() => {
 
 .kb-tile-meta-row {
   margin-top: auto;
+  padding-top: 4px;
   display: flex;
   align-items: center;
   justify-content: space-between;

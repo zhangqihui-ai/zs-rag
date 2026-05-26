@@ -2,15 +2,19 @@ import { createRouter, createWebHistory } from 'vue-router'
 
 import ChatEmbedBootstrap from '../views/ChatEmbedBootstrap.vue'
 import ChatView from '../views/ChatView.vue'
+import EnterpriseSpacesView from '../views/EnterpriseSpacesView.vue'
 import HealthView from '../views/HealthView.vue'
 import HomeView from '../views/HomeView.vue'
 import KnowledgeBaseDetailView from '../views/KnowledgeBaseDetailView.vue'
 import KnowledgeBasesView from '../views/KnowledgeBasesView.vue'
 import KnowledgeDocumentDetailView from '../views/KnowledgeDocumentDetailView.vue'
 import LoginView from '../views/LoginView.vue'
+import NoSpaceAssignedView from '../views/NoSpaceAssignedView.vue'
 import ProvidersView from '../views/ProvidersView.vue'
 import RetrievalView from '../views/RetrievalView.vue'
 import SettingsView from '../views/SettingsView.vue'
+import UsersView from '../views/UsersView.vue'
+import { useAuthStore } from '../stores/auth'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -23,6 +27,16 @@ const router = createRouter({
         public: true,
         title: '登录',
         description: '进入 ZS-RAG 企业级知识平台。',
+      },
+    },
+    {
+      path: '/no-space',
+      name: 'no-space',
+      component: NoSpaceAssignedView,
+      meta: {
+        noSpaceAllowed: true,
+        title: '未分配企业空间',
+        description: '请联系管理员分配企业空间。',
       },
     },
     {
@@ -116,21 +130,65 @@ const router = createRouter({
         description: '管理主题偏好、工作台策略与系统默认项。',
       },
     },
+    {
+      path: '/admin/spaces',
+      name: 'admin-spaces',
+      component: EnterpriseSpacesView,
+      meta: {
+        requiresSystemAdmin: true,
+        title: '企业空间管理',
+        description: '创建、编辑企业空间并管理成员。',
+      },
+    },
+    {
+      path: '/admin/users',
+      name: 'admin-users',
+      component: UsersView,
+      meta: {
+        requiresSpaceAdmin: true,
+        title: '用户管理',
+        description: '创建与管理企业用户及空间分配。',
+      },
+    },
   ],
 })
 
-router.beforeEach((to, from, next) => {
+router.beforeEach(async (to, _from, next) => {
+  const authStore = useAuthStore()
   const token = localStorage.getItem('auth_token')
   const isLoginPage = to.path === '/login'
   const isPublic = Boolean(to.meta.public)
 
+  if (token && !authStore.initialized) {
+    await authStore.init()
+  }
+
   if (!token && !isLoginPage && !isPublic) {
     next('/login')
-  } else if (token && isLoginPage) {
-    next('/')
-  } else {
-    next()
+    return
   }
+
+  if (token && isLoginPage) {
+    next(authStore.postLoginRoute())
+    return
+  }
+
+  if (token && authStore.needsSpaceAssignment && !to.meta.noSpaceAllowed) {
+    next('/no-space')
+    return
+  }
+
+  if (to.meta.requiresSystemAdmin && !authStore.isSystemAdmin) {
+    next('/')
+    return
+  }
+
+  if (to.meta.requiresSpaceAdmin && !authStore.canManageUsers) {
+    next('/')
+    return
+  }
+
+  next()
 })
 
 export default router

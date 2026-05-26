@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.api.routes.chats import ChatId
-from app.core.enterprise_space_context import CurrentSpace, CurrentUser
+from app.core.enterprise_space_context import CurrentSpace, CurrentUser, RequireMembership
 from app.core.errors import AppError
 from app.core.openai_compat import (
     build_chat_completion_response,
@@ -132,6 +132,7 @@ async def chat_completions_legacy(
     payload: ChatCompletionsRequest,
     current_space: CurrentSpace,
     current_user: CurrentUser,
+    _: RequireMembership,
     db: Session = Depends(get_db),
 ):
     """
@@ -156,6 +157,7 @@ async def openai_chat_completions(
     payload: ChatCompletionsRequest,
     current_space: CurrentSpace,
     current_user: CurrentUser,
+    _: RequireMembership,
     db: Session = Depends(get_db),
 ):
     """

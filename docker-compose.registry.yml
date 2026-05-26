@@ -1,0 +1,45 @@
+# 私有镜像仓库覆盖配置（dev compose 离线部署，需挂载源码目录）
+#
+# 完全离线生产部署请改用 docker-compose.prod.registry.yml
+#
+# 使用前在 .env 中设置：
+#   REGISTRY=192.168.252.252:5566
+#   IMAGE_NAMESPACE=zs-rag
+#
+# 启动：
+#   docker compose -f docker-compose.yml -f docker-compose.registry.yml pull
+#   docker compose -f docker-compose.yml -f docker-compose.registry.yml up -d --no-build
+#
+# 可选 profile 同样在命令后追加，例如：
+#   docker compose -f docker-compose.yml -f docker-compose.registry.yml --profile mineru up -d --no-build
+
+services:
+  postgres:
+    image: ${REGISTRY}/${IMAGE_NAMESPACE}/postgres:16
+
+  etcd:
+    image: ${REGISTRY}/${IMAGE_NAMESPACE}/etcd:v3.5.5
+
+  minio:
+    image: ${REGISTRY}/${IMAGE_NAMESPACE}/minio:RELEASE.2025-09-07T16-13-09Z
+
+  milvus:
+    image: ${REGISTRY}/${IMAGE_NAMESPACE}/milvus:v2.5.6
+
+  neo4j:
+    image: ${REGISTRY}/${IMAGE_NAMESPACE}/neo4j:5.26
+
+  opensearch:
+    image: ${REGISTRY}/${IMAGE_NAMESPACE}/opensearch:3.6.0
+
+  backend:
+    image: ${REGISTRY}/${IMAGE_NAMESPACE}/backend:dev
+
+  frontend:
+    image: ${REGISTRY}/${IMAGE_NAMESPACE}/node:20-alpine
+
+  mineru:
+    image: ${REGISTRY}/${IMAGE_NAMESPACE}/mineru:cpu
+
+  opendataloader-hybrid:
+    image: ${REGISTRY}/${IMAGE_NAMESPACE}/python:3.12-slim

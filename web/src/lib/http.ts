@@ -30,7 +30,7 @@ http.interceptors.request.use((config) => {
 
   // 从 localStorage 获取当前企业空间
   const enterpriseSpace = localStorage.getItem('current_enterprise_space')
-  if (enterpriseSpace) {
+  if (enterpriseSpace && !config.headers['X-Enterprise-Space']) {
     config.headers['X-Enterprise-Space'] = enterpriseSpace
   }
 

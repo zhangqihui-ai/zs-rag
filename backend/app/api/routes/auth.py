@@ -1,12 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.core.authentication import create_access_token, verify_password
-from app.core.enterprise_space_context import CurrentUser
+from app.core.enterprise_space_context import CurrentUser, is_bootstrap_admin
 from app.db.session import get_db
-from app.models.enterprise_space import User
-from app.schemas.enterprise_space import Token, UserLogin, UserResponse
+from app.models.enterprise_space import Membership, User
+from app.schemas.enterprise_space import MembershipSummary, Token, UserDetailResponse, UserLogin
 
 router = APIRouter(tags=["authentication"])
 
@@ -36,6 +36,30 @@ def login(
     return Token(access_token=access_token)
 
 
-@router.get("/auth/me", response_model=UserResponse)
-def get_current_user_info(current_user: CurrentUser) -> User:
-    return current_user
+@router.get("/auth/me", response_model=UserDetailResponse)
+def get_current_user_info(current_user: CurrentUser, db: Session = Depends(get_db)) -> UserDetailResponse:
+    user = db.execute(
+        select(User)
+        .options(joinedload(User.memberships).joinedload(Membership.enterprise_space))
+        .where(User.id == current_user.id)
+    ).unique().scalar_one()
+
+    memberships = [
+        MembershipSummary(
+            enterprise_space_id=m.enterprise_space_id,
+            role=m.role,
+            space=m.enterprise_space,
+        )
+        for m in user.memberships
+    ]
+    return UserDetailResponse(
+        id=user.id,
+        username=user.username,
+        email=user.email,
+        is_active=user.is_active,
+        is_admin=user.is_admin,
+        created_at=user.created_at,
+        updated_at=user.updated_at,
+        memberships=memberships,
+        is_bootstrap_admin=is_bootstrap_admin(user),
+    )

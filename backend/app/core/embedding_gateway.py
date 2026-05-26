@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from collections.abc import Callable
 
+import httpx
+
+from app.core.config import get_settings
 from app.core.errors import AppError
-from app.core.provider_adapter import embed_texts
+from app.core.provider_adapter import ProviderResponse, embed_texts
 from app.models.model_management import AIModel
 
 logger = logging.getLogger(__name__)
@@ -29,6 +33,18 @@ EMBEDDING_NON_RETRYABLE_MARKERS = (
     "额度不足",
     "insufficient_quota",
     "无权调用",
+)
+
+EMBEDDING_RETRYABLE_MARKERS = (
+    "timed out",
+    "Timeout",
+    "ConnectTimeout",
+    "ReadTimeout",
+    "WriteTimeout",
+    "连接测试失败",
+    "Connection reset",
+    "Connection refused",
+    "RemoteProtocolError",
 )
 
 
@@ -78,6 +94,17 @@ def _should_split_batch_on_error(message: str) -> bool:
     return any(token in message for token in EMBEDDING_BATCH_FALLBACK_MESSAGES)
 
 
+def _is_retryable_embedding_error(message: str) -> bool:
+    if _is_non_retryable_embedding_error(message):
+        return False
+    return any(token in message for token in EMBEDDING_RETRYABLE_MARKERS)
+
+
+def _embedding_request_timeout() -> httpx.Timeout:
+    read_sec = float(get_settings().embedding_timeout_sec)
+    return httpx.Timeout(connect=30.0, read=read_sec, write=30.0, pool=30.0)
+
+
 def _raise_embedding_failed(message: str | None) -> None:
     raise AppError(
         status_code=502,
@@ -87,7 +114,29 @@ def _raise_embedding_failed(message: str | None) -> None:
 
 
 def _embed_prepared_batch(model: AIModel, texts: list[str]) -> ProviderResponse:
-    return embed_texts(model.provider, model.model_name, texts)
+    settings = get_settings()
+    timeout = _embedding_request_timeout()
+    max_retries = max(1, int(settings.embedding_max_retries))
+    last_result: ProviderResponse | None = None
+    for attempt in range(max_retries):
+        last_result = embed_texts(model.provider, model.model_name, texts, timeout=timeout)
+        if last_result.success:
+            return last_result
+        message = last_result.message or ""
+        if _is_non_retryable_embedding_error(message):
+            break
+        if attempt + 1 >= max_retries or not _is_retryable_embedding_error(message):
+            break
+        logger.warning(
+            "embedding batch retry %s/%s (batch_size=%s): %s",
+            attempt + 1,
+            max_retries,
+            len(texts),
+            message,
+        )
+        time.sleep(min(2**attempt, 8))
+    assert last_result is not None
+    return last_result
 
 
 def _generate_single_with_truncation_fallback(model: AIModel, text: str) -> list[float]:

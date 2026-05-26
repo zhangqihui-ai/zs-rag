@@ -6,6 +6,11 @@ from typing import Any, Literal
 
 from app.core.document_parser import ParsedSegment
 
+_CN_NUM = r"[一二三四五六七八九十百千]+"
+_ENUM_LIST_LINE = re.compile(r"^\d+\s*[、.．)）]\s*")
+_CN_CHAPTER_LINE = re.compile(rf"^(?:第\s*)?{_CN_NUM}\s*[、.．]")
+_CN_SECTION_LINE = re.compile(rf"^[(（]\s*{_CN_NUM}\s*[)）]")
+
 
 ChunkingMode = Literal["general", "parent_child"]
 ParentMode = Literal["paragraph", "full_document"]
@@ -258,6 +263,32 @@ def merge_leading_preamble_segments(
     return [merged, *segments[k:]]
 
 
+def heading_path_for_merge(heading_path: str | None) -> str | None:
+    """
+    相邻段合并用的章节 key：按「一、二、三、」/（一）/ 第X章 等节级分组；
+    忽略文档总标题栈中的上层路径，以及历史数据里误入 path 的列表项。
+    """
+    if not heading_path or not heading_path.strip():
+        return None
+    parts = [p.strip() for p in heading_path.split(" / ") if p.strip()]
+    if not parts:
+        return None
+    section_markers: list[str] = []
+    for part in parts:
+        if _ENUM_LIST_LINE.match(part):
+            continue
+        if (
+            _CN_CHAPTER_LINE.match(part)
+            or _CN_SECTION_LINE.match(part)
+            or re.match(r"^第\s*\d+\s*[章节篇部条款]", part)
+        ):
+            section_markers.append(part)
+    if section_markers:
+        return section_markers[-1]
+    filtered = [p for p in parts if not _ENUM_LIST_LINE.match(p)]
+    return filtered[-1] if filtered else parts[-1]
+
+
 def merge_adjacent_segments_by_budget(
     segments: list[ParsedSegment],
     budget: int,
@@ -280,20 +311,17 @@ def merge_adjacent_segments_by_budget(
     docx 按 Word 段落逐条产出 segment，易出现"块数≈段落数"。本函数把多段拼进同一字符预算再切，
     并在章节/标题/表格等天然边界处强制切断，避免跨章节语义混杂。
     """
-    if budget < 200 or len(segments) <= 1:
+    if budget < 80 or len(segments) <= 1:
         return segments
 
     def bucket_key(s: ParsedSegment) -> tuple[Any, ...]:
         m = s.metadata or {}
-        # 同章节内允许 heading/paragraph/table 合并，保留以下硬边界：
-        # - 跨页
-        # - 跨章节 (heading_path)
-        # - 父子分段模式下的父块边界
+        # 同章节内允许 heading/paragraph/table 合并；合并边界用节级 key（一、二、三、），非完整 path 栈
         return (
             s.page_no,
             m.get("chunking_mode"),
             m.get("parent_index"),
-            s.heading_path,
+            heading_path_for_merge(s.heading_path),
         )
 
     out: list[ParsedSegment] = []
@@ -311,6 +339,16 @@ def merge_adjacent_segments_by_budget(
             # 合并后的段元数据以第一段为准，但标记是合并块
             merged_meta = dict(first.metadata or {})
             merged_meta["merged_segment_count"] = len(bucket)
+            indices = [
+                int((s.metadata or {}).get("block_index"))
+                for s in bucket
+                if (s.metadata or {}).get("block_index") is not None
+            ]
+            if indices:
+                merged_meta["block_index"] = indices[0]
+                merged_meta["block_index_end"] = indices[-1]
+                if len(indices) > 1:
+                    merged_meta["block_indices"] = indices
             out.append(
                 ParsedSegment(
                     text=merged_text,

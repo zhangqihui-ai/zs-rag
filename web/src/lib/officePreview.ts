@@ -11,7 +11,16 @@ export function escapeHtml(s: string): string {
 export async function docxBlobToHtml(blob: Blob): Promise<string> {
   const mammoth = await import('mammoth')
   const arrayBuffer = await blob.arrayBuffer()
-  const result = await mammoth.convertToHtml({ arrayBuffer })
+  const result = await mammoth.convertToHtml(
+    { arrayBuffer },
+    {
+      convertImage: mammoth.images.imgElement((image) =>
+        image.read('base64').then((imageBuffer) => ({
+          src: `data:${image.contentType};base64,${imageBuffer}`,
+        })),
+      ),
+    },
+  )
   return result.value
 }
 

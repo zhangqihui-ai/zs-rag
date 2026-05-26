@@ -15,6 +15,7 @@ class ChunkCandidate:
     page_no: int | None = None
     heading_path: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    enrichment_keyword_text: str | None = None
 
     @property
     def char_count(self) -> int:
@@ -60,6 +61,34 @@ def _trim_content(raw: str, base_start: int) -> tuple[str, int, int]:
     start_offset = base_start + left_trim
     end_offset = base_start + len(raw) - max(total_trimmed - left_trim, 0)
     return right_trimmed, start_offset, end_offset
+
+
+def segments_to_chunk_candidates(segments: list[ParsedSegment]) -> list[ChunkCandidate]:
+    """解析阶段已按表格行/批切好段，直接 1:1 映射为索引块，避免二次切块膨胀。"""
+    chunks: list[ChunkCandidate] = []
+    for idx, segment in enumerate(segments):
+        text = segment.text
+        if not text.strip():
+            continue
+        metadata = dict(segment.metadata or {})
+        if segment.page_no is not None:
+            metadata.setdefault("page_no", segment.page_no)
+        if segment.heading_path:
+            metadata.setdefault("heading_path", segment.heading_path)
+        chunks.append(
+            ChunkCandidate(
+                content=text.strip(),
+                chunk_index=idx,
+                start_offset=segment.start_offset,
+                end_offset=segment.end_offset,
+                page_no=segment.page_no,
+                heading_path=segment.heading_path,
+                metadata=metadata,
+            )
+        )
+    for i, ch in enumerate(chunks):
+        ch.chunk_index = i
+    return chunks
 
 
 def chunk_segments(segments: list[ParsedSegment], chunk_size: int, chunk_overlap: int) -> list[ChunkCandidate]:

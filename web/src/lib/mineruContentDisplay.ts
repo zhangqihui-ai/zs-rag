@@ -50,6 +50,36 @@ function pipeContentToHtml(content: string, header?: string[]): string {
   return sanitizeTableHtml(gridToHtmlTable([row], 0))
 }
 
+function parseLabeledRow(line: string, header: string[]): string[] {
+  const pairs: Record<string, string> = {}
+  for (const part of line.split('；')) {
+    const idx = part.indexOf('：')
+    if (idx <= 0) {
+      continue
+    }
+    pairs[part.slice(0, idx).trim()] = part.slice(idx + 1).trim()
+  }
+  return header.map((h) => pairs[h] ?? '')
+}
+
+function labeledContentToHtml(content: string, header?: string[]): string {
+  if (!header?.length || !content.includes('：')) {
+    return ''
+  }
+  const lines = content
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+  if (!lines.length) {
+    return ''
+  }
+  const rows = lines.map((line) => parseLabeledRow(line, header))
+  if (!rows.some((row) => row.some((cell) => cell.length > 0))) {
+    return ''
+  }
+  return sanitizeTableHtml(gridToHtmlTable([header, ...rows], 1))
+}
+
 function tableIndexFromMetadata(m: Record<string, unknown>): number | null {
   const raw = m.table_index
   if (typeof raw === 'number' && Number.isFinite(raw)) {
@@ -287,6 +317,11 @@ export function chunkTableHtml(
     return ''
   }
 
+  // overview 仅用于检索摘要（列名 + 行数），不渲染整表 HTML
+  if (meta.table_role === 'overview') {
+    return ''
+  }
+
   const fromMeta = tableHtmlFromMetadata(meta)
   if (fromMeta) {
     return fromMeta
@@ -300,16 +335,17 @@ export function chunkTableHtml(
     }
   }
 
-  // overview 切片正文是「表格 N；列：…」描述，不能当表格数据渲染
-  if (meta.table_role === 'overview') {
-    return ''
-  }
-
   const header = Array.isArray(meta.table_header)
     ? meta.table_header.filter((h): h is string => typeof h === 'string')
     : undefined
-  if (meta.table_role === 'row' && chunk.content.includes('|')) {
-    return pipeContentToHtml(chunk.content, header)
+  if (meta.table_role === 'row') {
+    const fromLabeled = labeledContentToHtml(chunk.content, header)
+    if (fromLabeled) {
+      return fromLabeled
+    }
+    if (chunk.content.includes('|')) {
+      return pipeContentToHtml(chunk.content, header)
+    }
   }
   return ''
 }

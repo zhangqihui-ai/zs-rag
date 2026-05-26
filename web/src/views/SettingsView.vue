@@ -116,7 +116,7 @@
               </span>
               <div>
                 <strong>{{ authStore.currentUser?.username || '未登录用户' }}</strong>
-                <p>{{ authStore.currentUser?.is_admin ? '平台管理员' : '企业成员' }}</p>
+                <p>{{ authStore.roleLabel }}</p>
               </div>
             </div>
             <div class="context-card">

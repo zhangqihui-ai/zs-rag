@@ -53,6 +53,21 @@
                 @ready="onPdfViewerReady"
               />
               <DocumentOriginalPreview
+                v-else-if="isDocxDocument"
+                ref="docxOriginalPreviewRef"
+                :kb-id="kbId"
+                :document-id="document.id"
+                :file-name="document.file_name"
+                :file-ext="document.file_ext"
+                :mime-type="document.mime_type"
+                :initial-page="focusedPageNo"
+                :highlight-query="docxOriginalHighlightText"
+                :sync-page="docxSyncPage"
+                :page-anchor-texts="docxPageAnchorTexts"
+                @page-visible="onDocxPageVisible"
+                @scroll-ratio="onDocxOriginalScrollRatio"
+              />
+              <DocumentOriginalPreview
                 v-else
                 :kb-id="kbId"
                 :document-id="document.id"
@@ -86,9 +101,9 @@
                     role="tab"
                     :aria-selected="rightView === 'markdown'"
                     :class="['doc-view-mode-btn', { active: rightView === 'markdown' }]"
-                    :disabled="!mineruViewEnabled"
-                    :title="mineruViewDisabledTitle"
-                    @click="selectMineruMarkdown"
+                    :disabled="!parseViewEnabled"
+                    :title="parseViewDisabledTitle"
+                    @click="selectParseMarkdown"
                   >
                     Markdown
                   </button>
@@ -97,11 +112,21 @@
                     role="tab"
                     :aria-selected="rightView === 'json'"
                     :class="['doc-view-mode-btn', { active: rightView === 'json' }]"
-                    :disabled="!mineruViewEnabled"
-                    :title="mineruViewDisabledTitle"
-                    @click="selectMineruJson"
+                    :disabled="!parseViewEnabled"
+                    :title="parseViewDisabledTitle"
+                    @click="selectParseJson"
                   >
                     JSON
+                  </button>
+                  <button
+                    v-if="docxViewEnabled"
+                    type="button"
+                    role="tab"
+                    :aria-selected="rightView === 'tables'"
+                    :class="['doc-view-mode-btn', { active: rightView === 'tables' }]"
+                    @click="selectDocxTables"
+                  >
+                    表格
                   </button>
                 </div>
               </div>
@@ -166,6 +191,31 @@
               >
                 <div v-if="mineruMdLoading" class="loading-skeleton document-skeleton"></div>
                 <div v-else-if="mineruMdError" class="status-box error">{{ mineruMdError }}</div>
+                <div v-else-if="docxViewEnabled && docxMarkdownPages.length" class="doc-mineru-md-book">
+                  <section
+                    v-for="pg in docxMarkdownPages"
+                    :key="'dmdp-' + pg.pageIdx0"
+                    class="doc-mineru-md-page"
+                  >
+                    <div class="doc-mineru-page-rule" aria-hidden="true">
+                      <span class="doc-mineru-page-pill">第 {{ pg.pageNo }} 页</span>
+                    </div>
+                    <div
+                      v-for="ent in pg.entries"
+                      :key="'dmdb-' + ent.index"
+                      :id="'dv-block-' + ent.index"
+                      class="doc-mineru-md-block"
+                      :class="{ active: selectedMineruBlockIndex === ent.index }"
+                      role="button"
+                      tabindex="0"
+                      @click="selectParseBlock(ent.index)"
+                      @keydown.enter.prevent="selectParseBlock(ent.index)"
+                    >
+                      <span class="doc-mineru-block-type">{{ docxBlockTypeLabel(ent.item) }}</span>
+                      <div class="doc-mineru-block-md" v-html="docxBlockDisplayHtml(ent.item)" />
+                    </div>
+                  </section>
+                </div>
                 <div v-else-if="mineruMarkdownPages.length" class="doc-mineru-md-book">
                   <section v-for="pg in mineruMarkdownPages" :key="'mdp-' + pg.pageIdx0" class="doc-mineru-md-page">
                     <div class="doc-mineru-page-rule" aria-hidden="true">
@@ -204,6 +254,35 @@
                 <pre v-else class="doc-mineru-json-pre">{{ mineruJsonText }}</pre>
               </ScrollRowWithVSlider>
 
+              <ScrollRowWithVSlider
+                v-else-if="rightView === 'tables'"
+                scroll-class="doc-mineru-scroll doc-split-scroll-inner"
+              >
+                <div v-if="!docxTableBlocks.length" class="doc-split-empty doc-split-empty-fill">
+                  <p>本文档未识别到表格块。</p>
+                </div>
+                <div v-else class="doc-docx-tables-list">
+                  <article
+                    v-for="item in docxTableBlocks"
+                    :key="'tbl-' + item.block_index"
+                    :id="'dv-block-' + item.block_index"
+                    class="doc-docx-table-card"
+                    :class="{ active: selectedMineruBlockIndex === item.block_index }"
+                    role="button"
+                    tabindex="0"
+                    @click="selectParseBlock(item.block_index)"
+                    @keydown.enter.prevent="selectParseBlock(item.block_index)"
+                  >
+                    <header class="doc-docx-table-head">
+                      <span>表格 · 块 #{{ item.block_index + 1 }}</span>
+                      <span v-if="item.heading_path" class="doc-docx-table-path">{{ item.heading_path }}</span>
+                    </header>
+                    <div class="doc-chunk-table-wrap" v-html="tableBlockPreviewHtml(item)" />
+                    <pre class="doc-mineru-block-text">{{ docxBlockPlainText(item) }}</pre>
+                  </article>
+                </div>
+              </ScrollRowWithVSlider>
+
               <template v-else>
                 <div v-if="!hasChunksAvailable" class="doc-split-empty doc-split-empty-fill">
                   <p v-if="document.status === 'indexed' && document.chunk_count === 0">暂无切片数据。</p>
@@ -230,9 +309,15 @@
                           v-for="chunk in chunkItems"
                           :key="chunk.id"
                           class="doc-chunk-card"
-                          :class="{ 'doc-chunk-card--focused': chunk.chunk_index === focusedChunkIndex }"
+                          :class="{
+                            'doc-chunk-card--focused': chunk.chunk_index === focusedChunkIndex,
+                            'doc-chunk-card--block-active':
+                              selectedMineruBlockIndex != null && chunkMatchesDocxBlock(chunk, selectedMineruBlockIndex),
+                            'doc-chunk-card--linkable': isDocxDocument && docxViewEnabled,
+                          }"
                           :data-page-no="chunkPageNoAttr(chunk)"
                           :data-chunk-index="chunk.chunk_index"
+                          @click="onChunkCardClick(chunk)"
                         >
                           <div class="doc-chunk-card-head">
                             <AppIcon name="grip" class="doc-chunk-grip" :size="16" />
@@ -288,6 +373,22 @@ const DocumentPdfMineruLayout = defineAsyncComponent(() => import('../components
 import Layout from '../components/Layout.vue'
 import ScrollRowWithVSlider from '../components/ScrollRowWithVSlider.vue'
 import { groupMineruItemsByPage, chunkTableHtml, mineruBlockPlainText, mineruBlockTableHtml, mineruBlockIsTableRenderable, shouldShowMineruBlock, type MineruContentItem } from '../lib/mineruContentDisplay'
+import {
+  buildDocxPageAnchorTexts,
+  chunkMatchesDocxBlock,
+  chunkOriginalScrollProbe,
+  countDocxPages,
+  docxBlockDisplayHtml,
+  docxBlockPlainText,
+  docxBlockTypeLabel,
+  docxHighlightTextForBlock,
+  findDocxBlockForChunk,
+  groupDocxBlocksByPage,
+  isDocxTableBlock,
+  resolveChunkWordPage,
+  tableBlockPreviewHtml,
+  type DocxContentBlock,
+} from '../lib/docxContentDisplay'
 import { findMineruBlockForChunk, parseRouteFocusInt } from '../lib/documentCitationFocus'
 
 const route = useRoute()
@@ -310,7 +411,7 @@ const chunkKeyword = ref('')
 const chunkKeywordInput = ref('')
 const chunkDisplayMode = ref<'full' | 'preview'>('full')
 
-type RightView = 'chunks' | 'markdown' | 'json'
+type RightView = 'chunks' | 'markdown' | 'json' | 'tables'
 const rightView = ref<RightView>('chunks')
 const mineruMdText = ref('')
 const mineruMdLoading = ref(false)
@@ -322,6 +423,7 @@ const mineruJsonError = ref('')
 const mineruJsonLoaded = ref(false)
 
 const mineruContentList = ref<MineruContentItem[]>([])
+const docxContentList = ref<DocxContentBlock[]>([])
 const selectedMineruBlockIndex = ref<number | null>(null)
 const focusedChunkIndex = ref<number | null>(null)
 const focusedPageNo = ref<number | null>(null)
@@ -340,6 +442,11 @@ const pdfMineruLayoutRef = ref<{
   getPageNum: () => number
   focusBlock: (index: number | null) => Promise<void>
 } | null>(null)
+const docxOriginalPreviewRef = ref<{
+  scrollToPage: (page: number) => Promise<void>
+  scrollToText: (query: string, options?: { highlight?: boolean }) => Promise<boolean>
+  getHtmlRoot: () => HTMLElement | null
+} | null>(null)
 const chunkScrollSliderRef = ref<{
   getScrollEl: () => HTMLElement | null
   syncThumb: () => void
@@ -351,7 +458,14 @@ function getChunkListScrollEl(): HTMLElement | null {
 
 let ignoreChunkScrollForPdf = false
 let ignorePdfPageForChunkScroll = false
+let ignoreChunkScrollForDocx = false
+let ignoreDocxPageForChunkScroll = false
 let chunkScrollRaf = 0
+const docxSyncPage = ref<number | null>(null)
+const docxCurrentPage = ref<number | null>(null)
+const docxHighlightOverride = ref<string | null>(null)
+const lastSyncedChunkIndex = ref<number | null>(null)
+let docxScrollRatioRaf = 0
 
 function syncDocSplitFullscreen() {
   const doc = window.document
@@ -441,6 +555,9 @@ function docMetadata(): Record<string, unknown> | null {
 }
 
 const parseViewEnabled = computed(() => {
+  if (docxViewEnabled.value) {
+    return true
+  }
   const d = document.value
   if (!d) {
     return false
@@ -456,7 +573,7 @@ const parseViewEnabled = computed(() => {
   return meta?.parser_backend === 'mineru' || meta?.parser_backend === 'opendataloader'
 })
 
-const parseViewDisabledTitle = '仅 PDF/图片解析引擎输出的文档可使用 Markdown 与 JSON 视图'
+const parseViewDisabledTitle = '请先完成解析/重建索引；Word 需当前版本重新索引后才有 Markdown/JSON/表格视图'
 
 const mineruViewEnabled = parseViewEnabled
 const mineruViewDisabledTitle = parseViewDisabledTitle
@@ -471,12 +588,41 @@ const isPdfDocument = computed(() => {
   return (d.file_ext || '').toLowerCase() === 'pdf'
 })
 
-function chunkPageNoAttr(chunk: KnowledgeChunk): string | undefined {
-  const p = chunk.page_no
-  if (typeof p === 'number' && Number.isFinite(p) && p >= 1) {
-    return String(p)
+const isDocxDocument = computed(() => {
+  const d = document.value
+  if (!d) {
+    return false
   }
-  return undefined
+  return (d.file_ext || '').toLowerCase() === 'docx'
+})
+
+const docxViewEnabled = computed(() => isDocxDocument.value && docxContentList.value.length > 0)
+
+const docxTableBlocks = computed(() => docxContentList.value.filter(isDocxTableBlock))
+
+const docxMarkdownPages = computed(() => groupDocxBlocksByPage(docxContentList.value))
+
+const docxPageAnchorTexts = computed(() =>
+  docxViewEnabled.value ? buildDocxPageAnchorTexts(docxContentList.value) : null,
+)
+
+const hasMultipleDocxPages = computed(() => countDocxPages(docxContentList.value) > 1)
+
+const docxOriginalHighlightText = computed(() => {
+  if (docxHighlightOverride.value) {
+    return docxHighlightOverride.value
+  }
+  const idx = selectedMineruBlockIndex.value
+  if (idx == null || !docxContentList.value.length) {
+    return null
+  }
+  const block = docxContentList.value.find((b) => b.block_index === idx)
+  return block ? docxBlockPlainText(block) : null
+})
+
+function chunkPageNoAttr(chunk: KnowledgeChunk): string | undefined {
+  const p = resolveChunkWordPage(chunk, docxContentList.value)
+  return p != null ? String(p) : undefined
 }
 
 /** 根据当前视口内切片，取与阅读线最接近的一条的 PDF 页码（1-based） */
@@ -510,35 +656,211 @@ function pickVisibleChunkPageNo(container: HTMLElement): number | null {
   return best?.page ?? null
 }
 
-function onChunkListScroll() {
-  if (!isPdfDocument.value || rightView.value !== 'chunks') {
+function pickVisibleChunk(container: HTMLElement): KnowledgeChunk | null {
+  const cr = container.getBoundingClientRect()
+  if (cr.height < 8) {
+    return null
+  }
+  const anchorY = cr.top + Math.min(96, cr.height * 0.22)
+  const articles = container.querySelectorAll<HTMLElement>('.doc-chunk-card[data-chunk-index]')
+  let best: { dist: number; chunk: KnowledgeChunk } | null = null
+  for (const el of articles) {
+    const r = el.getBoundingClientRect()
+    if (r.bottom <= cr.top + 2 || r.top >= cr.bottom - 2) {
+      continue
+    }
+    const idx = Number(el.dataset.chunkIndex)
+    if (!Number.isFinite(idx)) {
+      continue
+    }
+    const chunk = chunkItems.value.find((c) => c.chunk_index === idx)
+    if (!chunk) {
+      continue
+    }
+    const mid = r.top + r.height / 2
+    const dist = Math.abs(mid - anchorY)
+    if (!best || dist < best.dist) {
+      best = { dist, chunk }
+    }
+  }
+  return best?.chunk ?? null
+}
+
+async function focusDocxFromChunk(chunk: KnowledgeChunk) {
+  if (!isDocxDocument.value || !docxViewEnabled.value) {
     return
   }
-  if (ignoreChunkScrollForPdf) {
+
+  lastSyncedChunkIndex.value = chunk.chunk_index
+  docxHighlightOverride.value = null
+
+  const blockIdx = findDocxBlockForChunk(chunk, docxContentList.value)
+  let probe: string | null = null
+
+  if (blockIdx != null) {
+    selectedMineruBlockIndex.value = blockIdx
+    probe = docxHighlightTextForBlock(docxContentList.value, blockIdx)
+  } else {
+    selectedMineruBlockIndex.value = null
+    probe = chunkOriginalScrollProbe(chunk, docxContentList.value)
+    if (probe) {
+      docxHighlightOverride.value = probe
+    }
+  }
+
+  if (!probe) {
+    return
+  }
+
+  const page = resolveChunkWordPage(chunk, docxContentList.value)
+  if (page != null && hasMultipleDocxPages.value) {
+    docxCurrentPage.value = page
+    docxSyncPage.value = page
+  }
+
+  ignoreDocxPageForChunkScroll = true
+  await docxOriginalPreviewRef.value?.scrollToText(probe)
+  window.setTimeout(() => {
+    ignoreDocxPageForChunkScroll = false
+  }, 420)
+}
+
+async function scrollChunkIntoViewByIndex(chunkIndex: number) {
+  const wantPage = desiredPageForChunkIndex(chunkIndex, chunkTotal.value)
+  if (wantPage !== chunkPage.value) {
+    chunkPage.value = wantPage
+    await loadChunks()
+  }
+  await nextTick()
+  const container = getChunkListScrollEl()
+  const card = container?.querySelector<HTMLElement>(`[data-chunk-index="${chunkIndex}"]`)
+  if (!card) {
+    return
+  }
+  ignoreChunkScrollForDocx = true
+  card.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  window.setTimeout(() => {
+    ignoreChunkScrollForDocx = false
+  }, 420)
+}
+
+function onChunkListScroll() {
+  if (rightView.value !== 'chunks') {
     return
   }
   cancelAnimationFrame(chunkScrollRaf)
   chunkScrollRaf = requestAnimationFrame(() => {
     const el = getChunkListScrollEl()
-    const pdf = pdfMineruLayoutRef.value
-    if (!el || !pdf?.goToPage || !pdf.getPageNum) {
+    if (!el) {
       return
     }
-    const p = pickVisibleChunkPageNo(el)
-    if (p == null) {
-      return
-    }
-    const cur = pdf.getPageNum()
-    if (cur === p) {
-      return
-    }
-    ignorePdfPageForChunkScroll = true
-    void pdf.goToPage(p).finally(() => {
-      requestAnimationFrame(() => {
-        ignorePdfPageForChunkScroll = false
+
+    if (isPdfDocument.value) {
+      const p = pickVisibleChunkPageNo(el)
+      if (p == null) {
+        return
+      }
+      if (ignoreChunkScrollForPdf) {
+        return
+      }
+      const pdf = pdfMineruLayoutRef.value
+      if (!pdf?.goToPage || !pdf.getPageNum) {
+        return
+      }
+      if (pdf.getPageNum() === p) {
+        return
+      }
+      ignorePdfPageForChunkScroll = true
+      void pdf.goToPage(p).finally(() => {
+        requestAnimationFrame(() => {
+          ignorePdfPageForChunkScroll = false
+        })
       })
+      return
+    }
+
+    if (isDocxDocument.value && docxViewEnabled.value) {
+      if (ignoreChunkScrollForDocx) {
+        return
+      }
+      const chunk = pickVisibleChunk(el)
+      if (!chunk) {
+        return
+      }
+      if (lastSyncedChunkIndex.value === chunk.chunk_index) {
+        return
+      }
+      lastSyncedChunkIndex.value = chunk.chunk_index
+      const page = resolveChunkWordPage(chunk, docxContentList.value)
+      if (page != null && hasMultipleDocxPages.value && page !== docxCurrentPage.value) {
+        docxCurrentPage.value = page
+        ignoreDocxPageForChunkScroll = true
+        void docxOriginalPreviewRef.value?.scrollToPage(page)
+        window.setTimeout(() => {
+          ignoreDocxPageForChunkScroll = false
+        }, 420)
+      }
+    }
+  })
+}
+
+function onDocxOriginalScrollRatio(ratio: number) {
+  if (!isDocxDocument.value || !docxViewEnabled.value || rightView.value !== 'chunks') {
+    return
+  }
+  if (ignoreChunkScrollForDocx || chunkTotal.value <= 0) {
+    return
+  }
+  if (hasMultipleDocxPages.value) {
+    return
+  }
+  cancelAnimationFrame(docxScrollRatioRaf)
+  docxScrollRatioRaf = requestAnimationFrame(() => {
+    const targetIdx = Math.min(
+      Math.max(0, chunkTotal.value - 1),
+      Math.round(ratio * Math.max(0, chunkTotal.value - 1)),
+    )
+    if (lastSyncedChunkIndex.value === targetIdx) {
+      return
+    }
+    lastSyncedChunkIndex.value = targetIdx
+    ignoreChunkScrollForDocx = true
+    void scrollChunkIntoViewByIndex(targetIdx).finally(() => {
+      window.setTimeout(() => {
+        ignoreChunkScrollForDocx = false
+      }, 420)
     })
   })
+}
+
+function onDocxPageVisible(page: number) {
+  if (!isDocxDocument.value || !docxViewEnabled.value || rightView.value !== 'chunks') {
+    return
+  }
+  if (ignoreDocxPageForChunkScroll || !hasMultipleDocxPages.value) {
+    return
+  }
+  if (docxCurrentPage.value === page) {
+    return
+  }
+  docxCurrentPage.value = page
+  const container = getChunkListScrollEl()
+  if (!container) {
+    return
+  }
+  const card = container.querySelector<HTMLElement>(`.doc-chunk-card[data-page-no="${page}"]`)
+  if (!card) {
+    return
+  }
+  ignoreChunkScrollForDocx = true
+  card.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  window.setTimeout(() => {
+    ignoreChunkScrollForDocx = false
+  }, 420)
+}
+
+function onChunkCardClick(chunk: KnowledgeChunk) {
+  void focusDocxFromChunk(chunk)
 }
 
 async function onPdfMineruPageChange(page: number) {
@@ -573,24 +895,39 @@ const rightPaneTitle = computed(() => {
   if (rightView.value === 'json') {
     return '解析 · JSON'
   }
+  if (rightView.value === 'tables') {
+    return '解析 · 表格'
+  }
   return '切片结果'
 })
 
 const rightPaneSub = computed(() => {
   if (rightView.value === 'markdown') {
+    if (docxViewEnabled.value) {
+      return '左侧为 Word 原文预览（含图片）；右侧按 Word 页码展示解析块，点击可联动高亮'
+    }
     if (mineruMarkdownPages.value.length) {
       return '按 content_list 分页展示；点击左侧 PDF 色块或右侧段落可双向联动高亮'
     }
     return '与解析引擎返回的 md_content 一致（侧车文件 mineru_markdown.md）'
   }
   if (rightView.value === 'json') {
+    if (docxViewEnabled.value) {
+      return '与 Word 解析 content_list 一致（侧车文件 docx_content_list.json）'
+    }
     return '与解析引擎返回的 content_list 一致（侧车文件 mineru_content_list.json）'
+  }
+  if (rightView.value === 'tables') {
+    return '从 content_list 筛选表格类块；点击可与左侧块、切片联动'
   }
   if (usesGraphSegmentPreview.value) {
     return '图知识库使用 LightRAG 图谱索引；此处展示 PDF 解析段落供预览（非经典向量切片）'
   }
   if (usesLightragChunkList.value) {
     return '图知识库 LightRAG 索引分块，用于实体抽取与图谱检索'
+  }
+  if (docxViewEnabled.value) {
+    return '点击切片定位左侧原文；滚动任一侧按正文/页码同步另一侧'
   }
   return '将用于嵌入和召回的切片段落'
 })
@@ -604,14 +941,37 @@ function resetMineruViewCache() {
   mineruJsonError.value = ''
   mineruJsonLoaded.value = false
   mineruContentList.value = []
+  docxContentList.value = []
   selectedMineruBlockIndex.value = null
+  docxSyncPage.value = null
+  docxCurrentPage.value = null
+  docxHighlightOverride.value = null
+  lastSyncedChunkIndex.value = null
 }
 
-async function loadMineruMarkdown() {
-  if (!mineruViewEnabled.value) {
+async function loadDocxContentList() {
+  if (!isDocxDocument.value) {
+    docxContentList.value = []
     return
   }
-  if (mineruContentList.value.length > 0) {
+  try {
+    const raw = await knowledgeBaseApi.getDocumentDocxContentListText(kbId.value, docId.value)
+    docxContentList.value = JSON.parse(raw) as DocxContentBlock[]
+  } catch {
+    docxContentList.value = []
+  }
+}
+
+async function loadParseMarkdown() {
+  if (!parseViewEnabled.value) {
+    return
+  }
+  if (isDocxDocument.value && docxContentList.value.length > 0) {
+    mineruMdError.value = ''
+    mineruMdLoaded.value = true
+    return
+  }
+  if (!isDocxDocument.value && mineruContentList.value.length > 0) {
     mineruMdError.value = ''
     mineruMdLoaded.value = true
     return
@@ -622,17 +982,27 @@ async function loadMineruMarkdown() {
   mineruMdLoading.value = true
   mineruMdError.value = ''
   try {
-    mineruMdText.value = await knowledgeBaseApi.getDocumentMineruMarkdown(kbId.value, docId.value)
+    if (isDocxDocument.value) {
+      mineruMdText.value = await knowledgeBaseApi.getDocumentDocxMarkdown(kbId.value, docId.value)
+    } else {
+      mineruMdText.value = await knowledgeBaseApi.getDocumentMineruMarkdown(kbId.value, docId.value)
+    }
     mineruMdLoaded.value = true
   } catch (e) {
-    mineruMdError.value = getKnowledgeBaseErrorMessage(e, '加载 MinerU Markdown 失败')
+    mineruMdError.value = getKnowledgeBaseErrorMessage(e, '加载 Markdown 失败')
   } finally {
     mineruMdLoading.value = false
   }
 }
 
-async function loadMineruJson() {
-  if (!mineruViewEnabled.value) {
+async function loadParseJson() {
+  if (!parseViewEnabled.value) {
+    return
+  }
+  if (docxContentList.value.length > 0) {
+    mineruJsonText.value = JSON.stringify(docxContentList.value, null, 2)
+    mineruJsonError.value = ''
+    mineruJsonLoaded.value = true
     return
   }
   if (mineruContentList.value.length > 0) {
@@ -647,7 +1017,12 @@ async function loadMineruJson() {
   mineruJsonLoading.value = true
   mineruJsonError.value = ''
   try {
-    const raw = await knowledgeBaseApi.getDocumentMineruContentListText(kbId.value, docId.value)
+    let raw: string
+    if (isDocxDocument.value) {
+      raw = await knowledgeBaseApi.getDocumentDocxContentListText(kbId.value, docId.value)
+    } else {
+      raw = await knowledgeBaseApi.getDocumentMineruContentListText(kbId.value, docId.value)
+    }
     try {
       mineruJsonText.value = JSON.stringify(JSON.parse(raw) as unknown, null, 2)
     } catch {
@@ -655,30 +1030,97 @@ async function loadMineruJson() {
     }
     mineruJsonLoaded.value = true
   } catch (e) {
-    mineruJsonError.value = getKnowledgeBaseErrorMessage(e, '加载 MinerU JSON 失败')
+    mineruJsonError.value = getKnowledgeBaseErrorMessage(e, '加载 JSON 失败')
   } finally {
     mineruJsonLoading.value = false
   }
 }
 
-function selectMineruBlock(index: number) {
-  selectedMineruBlockIndex.value = selectedMineruBlockIndex.value === index ? null : index
+async function loadMineruMarkdown() {
+  await loadParseMarkdown()
 }
 
-function selectMineruMarkdown() {
-  if (!mineruViewEnabled.value) {
+async function loadMineruJson() {
+  await loadParseJson()
+}
+
+function selectParseBlock(index: number) {
+  docxHighlightOverride.value = null
+  if (selectedMineruBlockIndex.value === index) {
+    selectedMineruBlockIndex.value = null
+    return
+  }
+  selectedMineruBlockIndex.value = index
+  const text = docxHighlightTextForBlock(docxContentList.value, index)
+  if (text) {
+    void docxOriginalPreviewRef.value?.scrollToText(text)
+  }
+  const block = docxContentList.value.find((b) => b.block_index === index)
+  const page =
+    typeof block?.page_no === 'number'
+      ? block.page_no
+      : typeof block?.page_idx === 'number'
+        ? block.page_idx + 1
+        : null
+  if (page != null) {
+    docxCurrentPage.value = page
+    docxSyncPage.value = page
+  }
+  if (rightView.value === 'chunks') {
+    void scrollChunkForDocxBlock(index)
+  }
+}
+
+async function scrollChunkForDocxBlock(blockIndex: number) {
+  await nextTick()
+  const container = getChunkListScrollEl()
+  if (!container) {
+    return
+  }
+  const cards = container.querySelectorAll<HTMLElement>('.doc-chunk-card')
+  for (const card of cards) {
+    const idx = Number(card.dataset.chunkIndex)
+    const chunk = chunkItems.value.find((c) => c.chunk_index === idx)
+    if (chunk && chunkMatchesDocxBlock(chunk, blockIndex)) {
+      card.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      return
+    }
+  }
+}
+
+function selectMineruBlock(index: number) {
+  selectParseBlock(index)
+}
+
+function selectParseMarkdown() {
+  if (!parseViewEnabled.value) {
     return
   }
   rightView.value = 'markdown'
-  void loadMineruMarkdown()
+  void loadParseMarkdown()
 }
 
-function selectMineruJson() {
-  if (!mineruViewEnabled.value) {
+function selectParseJson() {
+  if (!parseViewEnabled.value) {
     return
   }
   rightView.value = 'json'
-  void loadMineruJson()
+  void loadParseJson()
+}
+
+function selectDocxTables() {
+  if (!docxViewEnabled.value) {
+    return
+  }
+  rightView.value = 'tables'
+}
+
+function selectMineruMarkdown() {
+  selectParseMarkdown()
+}
+
+function selectMineruJson() {
+  selectParseJson()
 }
 
 const chunkTotalPages = computed(() => Math.max(1, Math.ceil(chunkTotal.value / chunkPageSize.value)))
@@ -855,6 +1297,7 @@ async function loadPage() {
     knowledgeBase.value = await knowledgeBaseApi.get(kbId.value)
     document.value = await knowledgeBaseApi.getDocument(kbId.value, docId.value)
     mineruContentList.value = []
+    docxContentList.value = []
     selectedMineruBlockIndex.value = null
     const d = document.value
     const meta = d?.metadata && typeof d.metadata === 'object' ? (d.metadata as Record<string, unknown>) : null
@@ -870,6 +1313,9 @@ async function loadPage() {
       } catch {
         mineruContentList.value = []
       }
+    }
+    if (d && (d.file_ext || '').toLowerCase() === 'docx') {
+      await loadDocxContentList()
     }
     if (hasChunksAvailable.value) {
       await resolveCitationFocusChunk()
@@ -1060,8 +1506,14 @@ async function applyCitationFocus() {
     await scrollFocusedChunkIntoView()
 
     let blockIdx: number | null = null
-    if (chunk && mineruContentList.value.length > 0) {
+    if (chunk && docxViewEnabled.value && docxContentList.value.length > 0) {
+      blockIdx = findDocxBlockForChunk(chunk, docxContentList.value)
+    } else if (chunk && mineruContentList.value.length > 0) {
       blockIdx = findMineruBlockForChunk(chunk, mineruContentList.value)
+    }
+
+    if (blockIdx != null) {
+      selectedMineruBlockIndex.value = blockIdx
     }
 
     await focusPdfOnCitation(page, blockIdx)
@@ -1096,11 +1548,20 @@ watch(mineruViewEnabled, (on) => {
 })
 
 watch([selectedMineruBlockIndex, rightView], async ([idx, rv]) => {
-  if (idx === null || rv !== 'markdown') {
+  if (idx === null) {
     return
   }
-  await nextTick()
-  window.document.getElementById(`mv-block-${idx}`)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  if (rv === 'chunks' && docxViewEnabled.value) {
+    await scrollChunkForDocxBlock(idx)
+  }
+  if (rv === 'markdown' || rv === 'tables') {
+    await nextTick()
+    window.document.getElementById(`dv-block-${idx}`)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  }
+  if (rv === 'markdown' && mineruMarkdownPages.value.length && !docxViewEnabled.value) {
+    await nextTick()
+    window.document.getElementById(`mv-block-${idx}`)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  }
 })
 
 watch(
@@ -1460,6 +1921,40 @@ watch(isPdfDocument, (pdf) => {
   word-break: break-word;
 }
 
+.doc-mineru-block-md :deep(.docx-block-h2) {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.doc-mineru-block-md :deep(.docx-block-h3) {
+  margin: 0;
+  font-size: 0.92rem;
+  font-weight: 650;
+  line-height: 1.5;
+}
+
+.doc-mineru-block-md :deep(.docx-block-p) {
+  margin: 0;
+  font-size: 0.88rem;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.doc-mineru-block-md :deep(table) {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+.doc-mineru-block-md :deep(th),
+.doc-mineru-block-md :deep(td) {
+  border: 1px solid var(--border-color);
+  padding: 3px 6px;
+}
+
 .doc-mineru-table-wrap,
 .doc-chunk-table-wrap {
   margin-top: 6px;
@@ -1726,6 +2221,55 @@ watch(isPdfDocument, (pdf) => {
 .doc-chunk-card--focused .doc-chunk-title-line {
   color: #b45309;
   font-weight: 700;
+}
+
+.doc-chunk-card--block-active {
+  border-color: rgba(37, 99, 235, 0.65);
+  background: color-mix(in srgb, rgba(37, 99, 235, 0.08) 60%, var(--bg-tertiary));
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.18);
+}
+
+.doc-chunk-card--linkable {
+  cursor: pointer;
+}
+
+.doc-chunk-card--linkable:hover {
+  border-color: color-mix(in srgb, var(--brand) 35%, var(--border-color));
+}
+
+.doc-docx-tables-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 4px 16px;
+}
+
+.doc-docx-table-card {
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 12px;
+  background: var(--bg-primary);
+  cursor: pointer;
+}
+
+.doc-docx-table-card.active {
+  border-color: rgba(37, 99, 235, 0.65);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+}
+
+.doc-docx-table-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+
+.doc-docx-table-path {
+  color: var(--text-tertiary);
+  font-size: 0.78rem;
 }
 
 .doc-chunk-card--flash {

@@ -68,7 +68,11 @@
         </div>
 
         <div class="app-header-actions">
-          <SpaceSelector v-model="currentSpaceSlug" :spaces="authStore.enterpriseSpaces" />
+          <SpaceSelector
+            v-if="authStore.hasAnySpace"
+            v-model="currentSpaceSlug"
+            :spaces="authStore.enterpriseSpaces"
+          />
 
           <button
             class="icon-button theme-button"
@@ -85,7 +89,7 @@
             </div>
             <div class="header-user-copy">
               <strong>{{ authStore.currentUser?.username || '未登录用户' }}</strong>
-              <span>{{ authStore.currentUser?.is_admin ? '平台管理员' : '企业成员' }}</span>
+              <span>{{ authStore.roleLabel }}</span>
             </div>
           </div>
 
@@ -131,14 +135,25 @@ const router = useRouter()
 const authStore = useAuthStore()
 const appStore = useAppStore()
 
-const navItems = [
-  { to: '/', label: '首页仪表盘', caption: '平台概览', icon: 'dashboard' },
-  { to: '/knowledge-bases', label: '知识库管理', caption: '资产配置', icon: 'knowledge' },
-  { to: '/retrieval', label: '知识检索', caption: '效果验证', icon: 'retrieval' },
-  { to: '/chat', label: '对话', caption: '知识助手', icon: 'chat' },
-  { to: '/providers', label: '模型管理', caption: '模型供给', icon: 'models' },
-  { to: '/settings', label: '系统设置', caption: '平台策略', icon: 'settings' },
-] as const
+const navItems = computed(() => {
+  const items = [
+    { to: '/', label: '首页仪表盘', caption: '平台概览', icon: 'dashboard' },
+    { to: '/knowledge-bases', label: '知识库管理', caption: '资产配置', icon: 'knowledge' },
+    { to: '/retrieval', label: '知识检索', caption: '效果验证', icon: 'retrieval' },
+    { to: '/chat', label: '对话', caption: '知识助手', icon: 'chat' },
+    { to: '/providers', label: '模型管理', caption: '模型供给', icon: 'models' },
+    { to: '/settings', label: '系统设置', caption: '平台策略', icon: 'settings' },
+  ] as Array<{ to: string; label: string; caption: string; icon: string }>
+
+  if (authStore.canManageSpaces) {
+    items.push({ to: '/admin/spaces', label: '企业空间管理', caption: '租户治理', icon: 'workspace' })
+  }
+  if (authStore.canManageUsers) {
+    items.push({ to: '/admin/users', label: '用户管理', caption: '成员与权限', icon: 'user' })
+  }
+
+  return items
+})
 
 const currentSpaceSlug = computed({
   get: () => authStore.currentSpaceSlug,

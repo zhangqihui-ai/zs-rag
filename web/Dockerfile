@@ -36,6 +36,10 @@ RUN npm ci
 # Copy source code
 COPY . .
 
+# 构建时注入 API 地址（离线 prod 部署在 push 脚本里按目标机 IP 传入）
+ARG VITE_API_BASE_URL=http://localhost:8000
+ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
+
 # Build for production
 RUN npm run build
 

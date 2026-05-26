@@ -39,10 +39,6 @@
           {{ loading ? '登录中...' : '登录' }}
         </button>
       </form>
-
-      <div class="login-footer">
-        <p>默认管理员账号：admin / ChangeMe123!</p>
-      </div>
     </div>
   </div>
 </template>
@@ -74,7 +70,7 @@ const handleLogin = async () => {
       username: username.value,
       password: password.value,
     })
-    router.push('/')
+    router.push(authStore.postLoginRoute())
   } catch (err) {
     error.value = err instanceof Error ? err.message : '登录失败，请检查用户名和密码'
   } finally {
@@ -189,12 +185,5 @@ const handleLogin = async () => {
 .login-button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
-}
-
-.login-footer {
-  margin-top: 24px;
-  text-align: center;
-  color: var(--text-tertiary);
-  font-size: 0.85rem;
 }
 </style>

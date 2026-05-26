@@ -4,6 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.authentication import hash_password
+from app.core.membership_roles import SPACE_ADMIN
 from app.core.security import get_security_settings
 from app.models.enterprise_space import EnterpriseSpace, Membership, User
 
@@ -66,7 +67,7 @@ def initialize_admin_and_default_space(db: Session) -> None:
         membership = Membership(
             user_id=admin.id,
             enterprise_space_id=default_space.id,
-            role="owner",
+            role=SPACE_ADMIN,
         )
         db.add(membership)
     else:

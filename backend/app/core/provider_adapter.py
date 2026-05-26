@@ -178,10 +178,16 @@ class BaseProvider(ABC):
                 if piece:
                     yield str(piece)
 
-    def embed(self, model_name: str, inputs: list[str]) -> ProviderResponse:
+    def embed(
+        self,
+        model_name: str,
+        inputs: list[str],
+        *,
+        timeout: httpx.Timeout | float | None = None,
+    ) -> ProviderResponse:
         start_time = time.time()
         try:
-            vectors = self._embed(model_name, inputs)
+            vectors = self._embed(model_name, inputs, timeout=timeout)
             return ProviderResponse(
                 success=True,
                 message="向量化成功",
@@ -218,7 +224,13 @@ class BaseProvider(ABC):
                 model_name=model_name,
             )
 
-    def _embed(self, model_name: str, inputs: list[str]) -> list[list[float]]:
+    def _embed(
+        self,
+        model_name: str,
+        inputs: list[str],
+        *,
+        timeout: httpx.Timeout | float | None = None,
+    ) -> list[list[float]]:
         raise NotImplementedError
 
     def request_headers(self) -> dict[str, str]:
@@ -253,11 +265,18 @@ class OpenAICompatibleProvider(BaseProvider):
             if isinstance(item, dict) and item.get("id")
         ]
 
-    def _embed(self, model_name: str, inputs: list[str]) -> list[list[float]]:
+    def _embed(
+        self,
+        model_name: str,
+        inputs: list[str],
+        *,
+        timeout: httpx.Timeout | float | None = None,
+    ) -> list[list[float]]:
         response = self.client.post(
             f"{self.config.base_url.rstrip('/')}/embeddings",
             headers={**self.request_headers(), "Content-Type": "application/json"},
             json={"model": model_name, "input": inputs},
+            timeout=timeout,
         )
         response.raise_for_status()
         payload = response.json()
@@ -673,9 +692,15 @@ def fetch_provider_models(config: AIModelProvider) -> list[DiscoveredModel]:
         provider.close()
 
 
-def embed_texts(config: AIModelProvider, model_name: str, inputs: list[str]) -> ProviderResponse:
+def embed_texts(
+    config: AIModelProvider,
+    model_name: str,
+    inputs: list[str],
+    *,
+    timeout: httpx.Timeout | float | None = None,
+) -> ProviderResponse:
     provider = get_provider(config)
     try:
-        return provider.embed(model_name, inputs)
+        return provider.embed(model_name, inputs, timeout=timeout)
     finally:
         provider.close()

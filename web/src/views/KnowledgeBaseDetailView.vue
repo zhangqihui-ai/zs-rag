@@ -309,7 +309,10 @@
                         </div>
                       </div>
                     </div>
-                    <div v-if="document.error_message" class="document-row-error status-box error">
+                    <div
+                      v-if="documentIsParseFailed(document) && document.error_message"
+                      class="document-row-error status-box error"
+                    >
                       <p class="document-row-error-text">{{ document.error_message }}</p>
                       <button
                         v-if="documentCanStartParse(document) && !isDocumentRowBusy(document)"
@@ -626,51 +629,17 @@
                 <p class="pdf-parser-hint">用于 LightRAG 图谱入库时的实体与关系抽取；未指定时使用企业空间默认 LLM。</p>
               </div>
 
-              <div class="pdf-parser-section">
-                <div class="pdf-parser-row">
-                  <h4 class="pdf-parser-label">PDF 解析器</h4>
-                  <div class="pdf-parser-field">
-                    <div class="custom-select-wrap pdf-parser-select-wrap">
-                      <select
-                        class="custom-select"
-                        :value="pdfParser"
-                        :disabled="savingPdfParser"
-                        @change="onPdfParserChange($event)"
-                      >
-                        <option value="opendataloader">OpenDataLoader（推荐，本地 CPU）</option>
-                        <option value="mineru">MinerU（图片 / 兼容模式）</option>
-                        <option value="docling">Docling（即将支持）</option>
-                      </select>
-                      <span class="custom-select-arrow">
-                        <AppIcon name="chevron-down" :size="14" />
-                      </span>
-                    </div>
-                    <span v-if="savingPdfParser" class="embedding-model-saving">保存中…</span>
-                  </div>
-                </div>
-                <div v-if="pdfParser === 'docling'" class="embedding-model-warning">
-                  <AppIcon name="status" :size="14" />
-                  <span>Docling 引擎尚未上线，当前仍使用 OpenDataLoader 完成 PDF 解析；功能就绪后会自动切换。</span>
-                </div>
-                <div v-if="pdfParser === 'opendataloader'" class="pdf-parser-section extract-llm-section">
-                  <div class="pdf-parser-row">
-                    <h4 class="pdf-parser-label">Hybrid 模式</h4>
-                    <div class="pdf-parser-field">
-                      <label class="pdf-parser-hybrid-toggle">
-                        <input
-                          type="checkbox"
-                          :checked="pdfParserHybrid"
-                          :disabled="savingPdfParserHybrid"
-                          @change="onPdfParserHybridChange($event)"
-                        />
-                        <span>扫描件 / 复杂表格（需 odl-hybrid sidecar）</span>
-                      </label>
-                      <span v-if="savingPdfParserHybrid" class="embedding-model-saving">保存中…</span>
-                    </div>
-                  </div>
-                  <p class="pdf-parser-hint">默认本地 CPU 解析；开启 Hybrid 后复杂页走 docling 后端，适合扫描 PDF。</p>
-                </div>
-              </div>
+              <ParserSettingsPanel
+                v-if="knowledgeBase"
+                :knowledge-base="knowledgeBase"
+                @saved="onKbSettingsSaved"
+              />
+
+              <EnrichmentSettingsPanel
+                v-if="knowledgeBase && !isLightragKb"
+                :knowledge-base="knowledgeBase"
+                @saved="onKbSettingsSaved"
+              />
 
               <ChunkingSettingsPanel
                 v-if="knowledgeBase"
@@ -893,6 +862,8 @@ import {
 import { modelApi, defaultModelApi, getErrorMessage as getModelErrorMessage, type ModelItem, type DefaultModelOption } from '../api/model-management'
 import AppIcon from '../components/AppIcon.vue'
 import ChunkingSettingsPanel from '../components/knowledge-base/ChunkingSettingsPanel.vue'
+import EnrichmentSettingsPanel from '../components/knowledge-base/EnrichmentSettingsPanel.vue'
+import ParserSettingsPanel from '../components/knowledge-base/ParserSettingsPanel.vue'
 import DocumentParseProgress from '../components/knowledge-base/DocumentParseProgress.vue'
 import RetrievalSettingsPanel from '../components/knowledge-base/RetrievalSettingsPanel.vue'
 import RetrievalConfigForm, {
@@ -1102,78 +1073,8 @@ const llmModelsLoading = ref(false)
 const savingExtractLlm = ref(false)
 const defaultLlmModel = ref<DefaultModelOption | null>(null)
 
-type PdfParser = 'opendataloader' | 'mineru' | 'docling'
-
-const savingPdfParser = ref(false)
-const savingPdfParserHybrid = ref(false)
-
-const pdfParser = computed<PdfParser>(() => {
-  const raw = (knowledgeBase.value?.config as Record<string, unknown> | null)?.pdf_parser
-  if (raw === 'mineru' || raw === 'docling') {
-    return raw
-  }
-  return 'opendataloader'
-})
-
-const pdfParserHybrid = computed(() => {
-  const cfg = (knowledgeBase.value?.config as Record<string, unknown> | null) ?? {}
-  return cfg.pdf_parser_hybrid === true
-})
-
-async function saveKbPdfConfig(patch: Record<string, unknown>) {
-  if (!kbId.value || Number.isNaN(kbId.value)) {
-    return
-  }
-  const prevConfig = (knowledgeBase.value?.config || {}) as Record<string, unknown>
-  const nextConfig = { ...prevConfig, ...patch }
-  const updated = await knowledgeBaseApi.update(kbId.value, { config: nextConfig })
+function onKbSettingsSaved(updated: KnowledgeBase) {
   knowledgeBase.value = updated
-}
-
-async function onPdfParserChange(evt: Event) {
-  const target = evt.target as HTMLSelectElement
-  const next = (target.value === 'mineru'
-    ? 'mineru'
-    : target.value === 'docling'
-      ? 'docling'
-      : 'opendataloader') as PdfParser
-  if (!kbId.value || Number.isNaN(kbId.value) || next === pdfParser.value) {
-    return
-  }
-  savingPdfParser.value = true
-  try {
-    await saveKbPdfConfig({ pdf_parser: next })
-    if (next === 'docling') {
-      showNotice('已记录偏好为 Docling；引擎上线前仍使用 OpenDataLoader 解析 PDF。', 'info', 4000)
-    } else if (next === 'mineru') {
-      showNotice('PDF 解析器已切换为 MinerU（HTTP sidecar）。', 'success', 3000)
-    } else {
-      showNotice('PDF 解析器已切换为 OpenDataLoader（本地 CPU）。', 'success', 3000)
-    }
-  } catch (value) {
-    showNotice(getKnowledgeBaseErrorMessage(value, '更新 PDF 解析器失败'), 'error')
-    target.value = pdfParser.value
-  } finally {
-    savingPdfParser.value = false
-  }
-}
-
-async function onPdfParserHybridChange(evt: Event) {
-  const target = evt.target as HTMLInputElement
-  const next = target.checked
-  if (!kbId.value || Number.isNaN(kbId.value) || next === pdfParserHybrid.value) {
-    return
-  }
-  savingPdfParserHybrid.value = true
-  try {
-    await saveKbPdfConfig({ pdf_parser_hybrid: next })
-    showNotice(next ? '已开启 OpenDataLoader Hybrid 模式。' : '已关闭 Hybrid，使用纯本地解析。', 'success', 3000)
-  } catch (value) {
-    showNotice(getKnowledgeBaseErrorMessage(value, '更新 Hybrid 配置失败'), 'error')
-    target.checked = pdfParserHybrid.value
-  } finally {
-    savingPdfParserHybrid.value = false
-  }
 }
 
 /** 底部单行 Toast（如上传成功），不占顶部 notice 条 */
@@ -1329,7 +1230,7 @@ const activityItems = computed(() => {
     status: statusLabelMap[document.status] || document.status,
     tone: statusToneMap[document.status] || 'info',
     message:
-      document.error_message ||
+      ((document.status === 'failed' || document.status === 'graph_failed') && document.error_message) ||
       (document.status === 'indexed'
         ? `文档已完成解析与索引，共生成 ${document.chunk_count} 个分块。`
         : `当前状态为 ${statusLabelMap[document.status] || document.status}。`),
@@ -2374,7 +2275,7 @@ async function cancelDocumentParseAction(documentId: number) {
   } else {
     patchDocumentInList(documentId, {
       status: 'uploaded',
-      error_message: '用户已取消解析',
+      error_message: null,
       chunk_count: 0,
     })
   }
