@@ -2,33 +2,46 @@
 # =============================================================================
 # 将 docker-compose.prod.yml 用到的镜像推送到公司私有仓库（完全离线 prod 部署）
 #
-# 用法（在有外网 / 能 docker pull & docker build 的机器上执行）：
+# 用法（能访问 Docker Hub / 外网 apt 的构建机）：
 #
 #   docker login 192.168.252.252:5566
-#
-#   # 按目标机 IP/端口构建前端 API 地址并推送全部镜像（默认 prod）
 #   VITE_API_BASE_URL=http://192.168.252.115:8091 ./scripts/push-images-to-registry.sh
 #
-#   若启用 MinerU / ODL Hybrid（dev compose 可选 sidecar，prod 暂未编排）：
+# 内网 / 无法访问 deb.debian.org 的构建机（使用 Dockerfile.local + 私有仓库基础镜像）：
+#
+#   # 1) 在有网机器准备 offline_deps（仅需做一次，随仓库拷贝到内网）：
+#   #    cd backend && ./scripts/download_offline_wheels.sh
+#   #
+#   # 2) 确保私有仓库已有 python:3.12-slim（可先单独 push 基础镜像，或从 Hub 镜像一次）
+#   docker login 192.168.252.252:5566
+#   VITE_API_BASE_URL=http://192.168.252.115:8091 ./scripts/push-images-to-registry.sh --offline
+#
+#   前端若无法 npm ci / 仓库无 node:20-alpine，可在有网机先构建 dist 再推送：
+#   #   cd web && VITE_API_BASE_URL=http://192.168.252.115:8091 npm ci && npm run build:deploy
+#   #   ./scripts/push-images-to-registry.sh --offline
+#   #   （有 web/dist 时跳过 node 镜像，仅需 nginx:alpine；缺镜像用 scripts/sync-registry-image.sh 同步）
+#
+#   若启用 MinerU / ODL Hybrid：
 #   ./scripts/push-images-to-registry.sh --mineru --odl-hybrid
 #
-#   推送 dev compose 镜像（挂载源码的开发模式，一般不用于完全离线）：
+#   推送 dev compose 镜像：
 #   ./scripts/push-images-to-registry.sh --dev
 #
 # 可选环境变量：
-#   REGISTRY=192.168.252.252:5566      私有仓库地址
-#   IMAGE_NAMESPACE=zs-rag               仓库内项目命名空间
-#   VITE_API_BASE_URL=...              【prod 必设】前端构建时写入的 API 根地址
-#   BACKEND_DOCKERFILE=Dockerfile        离线构建 backend 可改为 Dockerfile.local
-#   APT_MIRROR=                          传给 backend 构建（国内 Debian 镜像）
+#   REGISTRY=192.168.252.252:5566
+#   IMAGE_NAMESPACE=zs-rag
+#   VITE_API_BASE_URL=...              【prod 必设】前端 API 根地址
+#   BACKEND_DOCKERFILE=Dockerfile        内网加 --offline 时自动为 Dockerfile.local
+#   BASE_IMAGE=...                     默认 ${REGISTRY}/${IMAGE_NAMESPACE}/python:3.12-slim
+#   NODE_IMAGE / NGINX_IMAGE           前端构建基础镜像（默认从私有仓库拉取）
+#   APT_MIRROR=                        在线 Dockerfile 可用国内 Debian 源
 #
 # 可选参数：
-#   --dev          推送 docker-compose.yml（dev）镜像，而非 prod
-#   --mineru       同时构建并推送 MinerU sidecar 镜像
-#   --odl-hybrid   同时推送 OpenDataLoader Hybrid 用的 python:3.12-slim
-#   --skip-build   仅推送第三方基础镜像，不构建 backend / frontend / mineru
-#
-# 目标机（192.168.252.115）部署步骤见脚本末尾输出。
+#   --offline      内网离线构建：仅从私有仓库拉基础镜像，backend 用 Dockerfile.local
+#   --dev          推送 dev compose 镜像
+#   --mineru       推送 MinerU sidecar
+#   --odl-hybrid   推送 python:3.12-slim（sidecar 用）
+#   --skip-build   仅同步/推送第三方镜像，不构建前后端
 # =============================================================================
 set -euo pipefail
 
@@ -36,13 +49,13 @@ REGISTRY="${REGISTRY:-192.168.252.252:5566}"
 IMAGE_NAMESPACE="${IMAGE_NAMESPACE:-zs-rag}"
 BACKEND_DOCKERFILE="${BACKEND_DOCKERFILE:-Dockerfile}"
 APT_MIRROR="${APT_MIRROR:-}"
-# prod 前端构建：浏览器直连 backend 宿主机端口（与 .env.deploy.example 默认一致）
 VITE_API_BASE_URL="${VITE_API_BASE_URL:-http://192.168.252.115:8091}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 MODE="prod"
+OFFLINE=false
 WITH_MINERU=false
 WITH_ODL_HYBRID=false
 SKIP_BUILD=false
@@ -50,19 +63,28 @@ SKIP_BUILD=false
 for arg in "$@"; do
   case "$arg" in
     --dev) MODE="dev" ;;
+    --offline) OFFLINE=true ;;
     --mineru) WITH_MINERU=true ;;
     --odl-hybrid) WITH_ODL_HYBRID=true ;;
     --skip-build) SKIP_BUILD=true ;;
     -h|--help)
-      sed -n '1,35p' "$0"
+      sed -n '1,45p' "$0"
       exit 0
       ;;
     *)
-      echo "未知参数: $arg（可用 --dev --mineru --odl-hybrid --skip-build）" >&2
+      echo "未知参数: $arg（可用 --offline --dev --mineru --odl-hybrid --skip-build）" >&2
       exit 1
       ;;
   esac
 done
+
+if [[ "$OFFLINE" == true && "$BACKEND_DOCKERFILE" == "Dockerfile" ]]; then
+  BACKEND_DOCKERFILE="Dockerfile.local"
+fi
+
+BASE_IMAGE="${BASE_IMAGE:-$(printf '%s/%s/python:3.12-slim' "$REGISTRY" "$IMAGE_NAMESPACE")}"
+NODE_IMAGE="${NODE_IMAGE:-$(printf '%s/%s/node:20-alpine' "$REGISTRY" "$IMAGE_NAMESPACE")}"
+NGINX_IMAGE="${NGINX_IMAGE:-$(printf '%s/%s/nginx:alpine' "$REGISTRY" "$IMAGE_NAMESPACE")}"
 
 log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
 
@@ -82,12 +104,47 @@ mirror_pull_tag_push() {
   docker tag "$src" "$dst"
   log "Push  $dst"
   docker push "$dst"
-  echo "$dst"
 }
 
-log "Mode     : ${MODE}"
+pull_registry_image() {
+  local dest_name="$1"
+  local dst
+  dst="$(registry_tag "$dest_name")"
+  log "Pull from registry: $dst"
+  docker pull "$dst"
+}
+
+check_offline_backend_deps() {
+  local has_wheel=false has_jre=false
+  shopt -s nullglob
+  local wheels=(backend/offline_deps/*.whl backend/offline_deps/*.tar.gz)
+  shopt -u nullglob
+  if ((${#wheels[@]} > 0)); then
+    has_wheel=true
+  fi
+  shopt -s nullglob
+  local jres=(backend/offline_deps/jre/*.tar.gz)
+  shopt -u nullglob
+  if ((${#jres[@]} > 0)); then
+    has_jre=true
+  fi
+
+  if [[ "$has_wheel" != true ]]; then
+    echo "错误: backend/offline_deps/ 下无 wheel/tar.gz。" >&2
+    echo "  请在有网机器执行: cd backend && ./scripts/download_offline_wheels.sh" >&2
+    echo "  再将 offline_deps/ 目录拷贝到内网构建机。" >&2
+    exit 1
+  fi
+  if [[ "$has_jre" != true ]]; then
+    echo "警告: 未找到 backend/offline_deps/jre/*.tar.gz，构建可能回退 apt 并失败。" >&2
+    echo "  建议: cd backend && ./scripts/download_offline_jre.sh" >&2
+  fi
+}
+
+log "Mode     : ${MODE}$( [[ "$OFFLINE" == true ]] && echo ' (offline)' )"
 log "Registry : ${REGISTRY}"
 log "Namespace: ${IMAGE_NAMESPACE}"
+log "Backend  : ${BACKEND_DOCKERFILE}"
 log "Project  : ${ROOT_DIR}"
 
 if ! docker info >/dev/null 2>&1; then
@@ -95,7 +152,14 @@ if ! docker info >/dev/null 2>&1; then
   exit 1
 fi
 
+USE_FRONTEND_BUNDLE=false
+if [[ "$MODE" == "prod" && -f web/dist/index.html ]]; then
+  USE_FRONTEND_BUNDLE=true
+  log "检测到 web/dist/，离线构建前端将跳过 node:20-alpine（使用 Dockerfile.prod-bundle）"
+fi
+
 if [[ "$MODE" == "prod" ]]; then
+  # 目标机 compose 运行所需
   THIRD_PARTY_IMAGES=(
     "postgres:16-alpine|postgres:16-alpine"
     "quay.io/coreos/etcd:v3.5.18|etcd:v3.5.18"
@@ -104,6 +168,14 @@ if [[ "$MODE" == "prod" ]]; then
     "neo4j:5.26-community|neo4j:5.26-community"
     "opensearchproject/opensearch:3.6.0|opensearch:3.6.0"
   )
+  # 仅在本机构建 backend/frontend 时需要
+  if [[ "$SKIP_BUILD" == false ]]; then
+    THIRD_PARTY_IMAGES+=("python:3.12-slim|python:3.12-slim")
+    THIRD_PARTY_IMAGES+=("nginx:alpine|nginx:alpine")
+    if [[ "$USE_FRONTEND_BUNDLE" != true ]]; then
+      THIRD_PARTY_IMAGES+=("node:20-alpine|node:20-alpine")
+    fi
+  fi
 else
   THIRD_PARTY_IMAGES=(
     "postgres:16|postgres:16"
@@ -113,23 +185,44 @@ else
     "neo4j:5.26|neo4j:5.26"
     "opensearchproject/opensearch:3.6.0|opensearch:3.6.0"
     "node:20-alpine|node:20-alpine"
+    "python:3.12-slim|python:3.12-slim"
   )
 fi
 
-if [[ "$WITH_ODL_HYBRID" == true ]]; then
+if [[ "$WITH_ODL_HYBRID" == true && "$MODE" == "prod" ]]; then
+  : # python:3.12-slim 已在 prod 列表
+elif [[ "$WITH_ODL_HYBRID" == true ]]; then
   THIRD_PARTY_IMAGES+=("python:3.12-slim|python:3.12-slim")
 fi
 
 for entry in "${THIRD_PARTY_IMAGES[@]}"; do
   src="${entry%%|*}"
   dest="${entry##*|}"
-  mirror_pull_tag_push "$src" "$dest"
+  if [[ "$OFFLINE" == true ]]; then
+    if ! pull_registry_image "$dest"; then
+      echo "错误: 私有仓库缺少镜像 $(registry_tag "$dest")" >&2
+      echo "  在有外网的机器执行以下命令同步后重试：" >&2
+      echo "    docker login ${REGISTRY}" >&2
+      echo "    ./scripts/sync-registry-image.sh ${src} ${dest}" >&2
+      echo "  或一次性同步全部基础镜像：" >&2
+      echo "    ./scripts/push-images-to-registry.sh --skip-build" >&2
+      exit 1
+    fi
+  else
+    mirror_pull_tag_push "$src" "$dest"
+  fi
 done
 
 if [[ "$SKIP_BUILD" == false ]]; then
   build_args=()
   if [[ -n "$APT_MIRROR" ]]; then
     build_args+=(--build-arg "APT_MIRROR=${APT_MIRROR}")
+  fi
+
+  if [[ "$OFFLINE" == true || "$BACKEND_DOCKERFILE" == "Dockerfile.local" ]]; then
+    check_offline_backend_deps
+    build_args+=(--build-arg "BASE_IMAGE=${BASE_IMAGE}")
+    log "Backend base image: ${BASE_IMAGE}"
   fi
 
   if [[ "$MODE" == "prod" ]]; then
@@ -146,13 +239,25 @@ if [[ "$SKIP_BUILD" == false ]]; then
     log "Push  $BACKEND_DST"
     docker push "$BACKEND_DST"
 
-    log "Build frontend:prod (VITE_API_BASE_URL=${VITE_API_BASE_URL})"
-    docker build \
-      --build-arg "VITE_API_BASE_URL=${VITE_API_BASE_URL}" \
-      -f web/Dockerfile \
-      --target production \
-      -t "$FRONTEND_DST" \
-      ./web
+    if [[ -f web/dist/index.html ]]; then
+      log "Build frontend:prod (Dockerfile.prod-bundle, 使用已有 web/dist/)"
+      docker build \
+        --build-arg "NGINX_IMAGE=${NGINX_IMAGE}" \
+        -f web/Dockerfile.prod-bundle \
+        -t "$FRONTEND_DST" \
+        ./web
+    else
+      log "Build frontend:prod (Dockerfile, VITE_API_BASE_URL=${VITE_API_BASE_URL})"
+      log "  提示: 内网若 npm ci 失败，请先在 web/ 目录执行 npm ci && npm run build 后重试 --offline"
+      docker build \
+        --build-arg "VITE_API_BASE_URL=${VITE_API_BASE_URL}" \
+        --build-arg "NODE_IMAGE=${NODE_IMAGE}" \
+        --build-arg "NGINX_IMAGE=${NGINX_IMAGE}" \
+        -f web/Dockerfile \
+        --target production \
+        -t "$FRONTEND_DST" \
+        ./web
+    fi
     log "Push  $FRONTEND_DST"
     docker push "$FRONTEND_DST"
   else
@@ -191,52 +296,15 @@ fi
 cat <<EOF
 
 ================================================================================
-推送完成（${MODE}）。私有仓库 ${REGISTRY}/${IMAGE_NAMESPACE}/ 下应有对应镜像。
+推送完成（${MODE}$( [[ "$OFFLINE" == true ]] && echo ', offline build' )）。
 
-【prod 完全离线目标机 192.168.252.115 部署 checklist】
+【prod 目标机 192.168.252.115】
+  docker compose ${COMPOSE_FILES} pull
+  docker compose ${COMPOSE_FILES} up -d --no-build
+  docker compose ${COMPOSE_FILES} exec backend python -m alembic upgrade head
 
-1) 配置 Docker 信任 HTTP 私有仓库（若仓库非 HTTPS）：
-   /etc/docker/daemon.json 增加：
-   {
-     "insecure-registries": ["${REGISTRY}"]
-   }
-   然后 systemctl restart docker
-
-2) 准备部署目录（无需 git 源码，只需 3 个文件）：
-   mkdir -p ~/zs-rag-deploy && cd ~/zs-rag-deploy
-   # 从有网机器拷贝：
-   #   docker-compose.prod.yml
-   #   docker-compose.prod.registry.yml
-   #   .env.deploy.example  -> 复制为 .env 并修改密码
-
-   docker login ${REGISTRY}
-
-3) 编辑 .env（必改项）：
-   REGISTRY=${REGISTRY}
-   IMAGE_NAMESPACE=${IMAGE_NAMESPACE}
-   FRONTEND_PORT=8090
-   BACKEND_PORT=8091
-   CORS_ORIGINS=http://192.168.252.115:8090
-   POSTGRES_PASSWORD / JWT_SECRET / ADMIN_PASSWORD / NEO4J_PASSWORD / MINIO_ROOT_PASSWORD
-
-   注意：VITE_API_BASE_URL 已在推送时写入前端镜像（当前为 ${VITE_API_BASE_URL}）。
-   若目标机 IP/端口不同，请用正确的 VITE_API_BASE_URL 重新执行本推送脚本。
-
-4) 拉取镜像并启动（不本地 build）：
-   docker compose ${COMPOSE_FILES} pull
-   docker compose ${COMPOSE_FILES} up -d --no-build
-
-5) 首次启动后跑数据库迁移：
-   docker compose ${COMPOSE_FILES} exec backend python -m alembic upgrade head
-
-【访问地址】
-  前端：http://192.168.252.115:8090
-  后端：http://192.168.252.115:8091/docs
-
-【防火墙】
-  仅需开放 FRONTEND_PORT、BACKEND_PORT；中间件端口均在 Docker 内网，无需对外暴露。
-
-【与 dev 的区别】
-  prod 镜像内已包含前后端代码与依赖，目标机不需要 ./backend、./web 源码目录，也不跑 npm ci。
+  前端: http://192.168.252.115:8090
+  后端: http://192.168.252.115:8091/docs
+  前端 API 构建地址: ${VITE_API_BASE_URL}
 ================================================================================
 EOF

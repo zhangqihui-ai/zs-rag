@@ -1,3 +1,5 @@
+/// <reference types="vite/client" />
+
 declare module '*?url' {
   const src: string
   export default src
@@ -10,19 +12,28 @@ declare module '*.vue' {
   export default component
 }
 
+// 扩展 vue-router 的 RouteMeta（须 import 以免覆盖 vue-router 原有导出）
+import 'vue-router'
+
 declare module 'vue-router' {
   interface RouteMeta {
     /** 允许未携带 token 访问（如登录页、嵌入入口） */
     public?: boolean
+    title?: string
+    description?: string
+    noSpaceAllowed?: boolean
+    requiresSystemAdmin?: boolean
+    requiresSpaceAdmin?: boolean
   }
 }
 
 interface ImportMetaEnv {
   readonly VITE_API_BASE_URL?: string
-  /** 普通请求超时（毫秒），默认 30000 */
   readonly VITE_HTTP_TIMEOUT_MS?: string
-  /** 上传/重建索引等长请求超时（毫秒），默认 900000（15 分钟） */
   readonly VITE_LONG_REQUEST_TIMEOUT_MS?: string
+  readonly VITE_DOCUMENT_REQUEST_TIMEOUT_MS?: string
+  readonly VITE_FILE_DOWNLOAD_TIMEOUT_MS?: string
+  readonly VITE_PDF_PARSE_TIMEOUT_MS?: string
 }
 
 interface ImportMeta {

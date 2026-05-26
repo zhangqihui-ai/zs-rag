@@ -11,7 +11,9 @@
 # 若构建机可访问 Debian 镜像但无法访问 deb.debian.org，可传：
 #   --build-arg APT_MIRROR=http://mirrors.aliyun.com/debian
 
-FROM python:3.12-slim AS base
+# 内网构建时由 push 脚本传入：192.168.252.252:5566/zs-rag/python:3.12-slim
+ARG BASE_IMAGE=python:3.12-slim
+FROM ${BASE_IMAGE} AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

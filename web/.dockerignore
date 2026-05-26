@@ -6,8 +6,9 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# Build output
+# Build output（node 构建阶段忽略；Dockerfile.prod-bundle 需 dist/，见下方 !dist）
 dist/
+!dist/
 build/
 
 # Environment files

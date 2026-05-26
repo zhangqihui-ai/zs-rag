@@ -1,8 +1,11 @@
 # Frontend Dockerfile
 # Supports both development and production modes
 
+ARG NODE_IMAGE=node:20-alpine
+ARG NGINX_IMAGE=nginx:alpine
+
 # Development stage
-FROM node:20-alpine as development
+FROM ${NODE_IMAGE} as development
 
 WORKDIR /app
 
@@ -23,7 +26,7 @@ CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]
 
 
 # Build stage
-FROM node:20-alpine as builder
+FROM ${NODE_IMAGE} as builder
 
 WORKDIR /app
 
@@ -45,7 +48,7 @@ RUN npm run build
 
 
 # Production stage
-FROM nginx:alpine as production
+FROM ${NGINX_IMAGE} as production
 
 # Copy custom nginx config
 COPY nginx.conf /etc/nginx/conf.d/default.conf
