@@ -1,0 +1,26 @@
+# 本机 dev（docker-compose.yml）专用：MinerU 与 115 prod 一致，使用 cpu-offline 镜像内模型。
+# 不改动 backend/frontend 挂载与热加载。
+#
+# 用法：
+#   docker compose -f docker-compose.yml -f docker-compose.mineru-offline.yml \
+#     --profile mineru up -d --no-build --force-recreate mineru-cpu
+#
+# .env 建议：
+#   MINERU_CPU_IMAGE=192.168.252.252:5566/zs-rag/mineru:cpu-offline
+#   MINERU_MODEL_SOURCE=local
+#   MINERU_BASE_URL=http://mineru:8000
+#   MINERU_TIMEOUT=1800
+
+services:
+  mineru-cpu:
+    image: ${MINERU_CPU_IMAGE:-192.168.252.252:5566/zs-rag/mineru:cpu-offline}
+    pull_policy: always
+    build: !reset null
+    environment:
+      MINERU_MODEL_SOURCE: ${MINERU_MODEL_SOURCE:-local}
+    # 禁止挂 mineru_models 卷：空卷会盖住镜像内 /models 与 mineru.json
+    volumes: !reset []
+    networks:
+      zs-rag-network:
+        aliases:
+          - mineru

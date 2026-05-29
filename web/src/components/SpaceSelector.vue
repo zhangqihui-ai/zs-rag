@@ -6,7 +6,6 @@
       </span>
       <div class="space-selector-copy">
         <span class="space-selector-label">企业空间</span>
-        <strong>{{ selectedSpace?.name || '未配置空间' }}</strong>
       </div>
     </div>
 
@@ -28,8 +27,6 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
-
 import type { EnterpriseSpace } from '../stores/auth'
 import AppIcon from './AppIcon.vue'
 
@@ -42,8 +39,6 @@ const emit = defineEmits<{
   'update:modelValue': [value: string]
 }>()
 
-const selectedSpace = computed(() => props.spaces.find((space) => space.slug === props.modelValue) || null)
-
 const handleChange = (event: Event) => {
   const target = event.target as HTMLSelectElement
   emit('update:modelValue', target.value)
@@ -54,9 +49,9 @@ const handleChange = (event: Event) => {
 .space-selector {
   display: flex;
   align-items: center;
-  gap: 14px;
-  min-width: 260px;
-  padding: 10px 12px;
+  gap: 12px;
+  min-width: 0;
+  padding: 8px 12px;
   border: 1px solid var(--border-color);
   border-radius: 16px;
   background: var(--bg-secondary);
@@ -88,19 +83,11 @@ const handleChange = (event: Event) => {
   gap: 2px;
 }
 
-.space-selector-copy strong {
-  color: var(--text-primary);
-  font-size: 0.92rem;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 .space-selector-label {
-  color: var(--text-tertiary);
-  font-size: 0.72rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .space-selector-control {

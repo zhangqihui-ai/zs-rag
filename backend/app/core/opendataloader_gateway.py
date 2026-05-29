@@ -21,12 +21,14 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import get_settings
+from app.core.heading_match import normalize_heading_match_text
 from app.core.document_parser import (
     ParsedDocument,
     ParsedSegment,
     _CLASS_ORDER,
     _update_heading_path,
     build_table_segments_from_rows,
+    build_table_segments_smart,
 )
 from app.core.mineru_gateway import (
     _append_segment,
@@ -419,7 +421,7 @@ class OpenDataLoaderResult:
                 if not text:
                     continue
                 cls = _text_level_to_class(text_level if isinstance(text_level, int) else None)
-                current_heading_path = _update_heading_path(heading_stack, cls, text)
+                current_heading_path = _update_heading_path(heading_stack, cls, normalize_heading_match_text(text))
                 _append_segment(
                     segments,
                     parts,
@@ -475,12 +477,13 @@ class OpenDataLoaderResult:
                 table_html = body.strip() if body.strip().startswith("<") else ""
                 if not table_html and rows:
                     table_html = _grid_to_html_table(rows)
-                table_segments = build_table_segments_from_rows(
+                table_segments = build_table_segments_smart(
                     rows,
                     table_counter,
                     offset_ref,
                     parts,
                     current_heading_path,
+                    table_body=body,
                     table_body_html=table_html or None,
                 )
                 for seg in table_segments:
@@ -601,9 +604,30 @@ class OpenDataLoaderGateway:
             }
             if hybrid_on:
                 convert_kwargs["hybrid"] = "docling-fast"
+                convert_kwargs["hybrid_mode"] = "full"
                 convert_kwargs["hybrid_url"] = self.hybrid_url
                 convert_kwargs["hybrid_timeout"] = str(self.timeout * 1000)
                 convert_kwargs["hybrid_fallback"] = True
+                if log:
+                    try:
+                        import httpx
+
+                        probe = self.hybrid_url.rstrip("/") + "/health"
+                        resp = httpx.get(probe, timeout=5.0)
+                        if resp.status_code >= 400:
+                            log(
+                                f"警告：Hybrid sidecar 探测 {probe} 返回 HTTP {resp.status_code}；"
+                                "若解析结果仍无正文，可能已回退为普通 OpenDataLoader（hybrid_fallback）"
+                            )
+                        else:
+                            log(
+                                f"Hybrid sidecar 探测 OK：{probe}（hybrid_mode=full，全部页面走 Docling OCR）"
+                            )
+                    except Exception as exc:
+                        log(
+                            f"警告：Hybrid sidecar 不可达（{self.hybrid_url}：{exc}）。"
+                            "将尝试 convert，失败时会静默回退为普通 OpenDataLoader；扫描 PDF 请修复 sidecar 或改用 MinerU"
+                        )
             try:
                 opendataloader_pdf.convert(**convert_kwargs)
             except Exception as e:
@@ -641,6 +665,36 @@ class OpenDataLoaderGateway:
                 f"OpenDataLoader：完成，耗时 {elapsed}s，元素 {len(elements)} 个"
                 f"，Markdown 约 {len(markdown or '')} 字符"
             )
+            if hybrid_on:
+                text_elems = sum(
+                    1
+                    for e in elements
+                    if str(e.get("type") or "").lower()
+                    in {"paragraph", "heading", "list", "caption", "footnote", "code"}
+                    and _element_content(e).strip()
+                )
+                img_elems = sum(
+                    1
+                    for e in elements
+                    if str(e.get("type") or "").lower() in {"picture", "image", "figure"}
+                )
+                if img_elems > 0 and text_elems == 0:
+                    timeout_hint = ""
+                    if elapsed >= self.timeout * 0.9:
+                        timeout_hint = (
+                            f"耗时 {elapsed}s 已接近 hybrid_timeout={self.timeout}s，"
+                            "sidecar 可能仍在 OCR 但已被超时回退；请将 .env ODL_TIMEOUT 调大（扫描 PDF 建议 1800+）。"
+                        )
+                    else:
+                        timeout_hint = (
+                            "sidecar 可能转换失败并已 hybrid_fallback 回退；"
+                            "请检查 opendataloader-hybrid 日志。"
+                        )
+                    log(
+                        "警告：Hybrid 已启用但结果无 OCR 正文（仅图片占位）。"
+                        + timeout_hint
+                        + " 扫描 PDF 建议改用 MinerU，或增大 ODL_TIMEOUT 后重试。"
+                    )
         return OpenDataLoaderResult(
             doc_json=doc_json,
             markdown=markdown,

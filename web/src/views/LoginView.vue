@@ -31,14 +31,22 @@
           />
         </div>
 
-        <div v-if="error" class="error-message">
-          {{ error }}
-        </div>
-
         <button type="submit" class="login-button" :disabled="loading">
           {{ loading ? '登录中...' : '登录' }}
         </button>
       </form>
+    </div>
+
+    <div v-if="showErrorModal" class="modal-overlay" @click.self="closeErrorModal">
+      <div class="modal-card login-error-modal" role="alertdialog" aria-labelledby="login-error-title" aria-modal="true">
+        <div class="login-error-modal-header">
+          <h3 id="login-error-title">登录失败</h3>
+        </div>
+        <p class="login-error-modal-message">{{ errorMessage }}</p>
+        <div class="login-error-modal-actions">
+          <button type="button" class="login-button" @click="closeErrorModal">知道了</button>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -46,6 +54,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { getApiErrorMessage } from '../lib/apiError'
 import { useAuthStore } from '../stores/auth'
 
 const router = useRouter()
@@ -54,16 +63,26 @@ const authStore = useAuthStore()
 const username = ref('')
 const password = ref('')
 const loading = ref(false)
-const error = ref('')
+const showErrorModal = ref(false)
+const errorMessage = ref('')
+
+const showLoginError = (message: string) => {
+  errorMessage.value = message
+  showErrorModal.value = true
+}
+
+const closeErrorModal = () => {
+  showErrorModal.value = false
+}
 
 const handleLogin = async () => {
   if (!username.value || !password.value) {
-    error.value = '请输入用户名和密码'
+    showLoginError('请输入用户名和密码')
     return
   }
 
   loading.value = true
-  error.value = ''
+  showErrorModal.value = false
 
   try {
     await authStore.login({
@@ -72,7 +91,7 @@ const handleLogin = async () => {
     })
     router.push(authStore.postLoginRoute())
   } catch (err) {
-    error.value = err instanceof Error ? err.message : '登录失败，请检查用户名和密码'
+    showLoginError(getApiErrorMessage(err, '用户名或密码错误，请检查后重试'))
   } finally {
     loading.value = false
   }
@@ -155,13 +174,32 @@ const handleLogin = async () => {
   color: var(--text-tertiary);
 }
 
-.error-message {
-  color: #f87171;
-  background: rgba(248, 113, 113, 0.1);
-  padding: 12px;
-  border-radius: 8px;
-  font-size: 0.9rem;
+.login-error-modal {
+  width: min(400px, 100%);
+  padding: 28px 28px 24px;
   text-align: center;
+}
+
+.login-error-modal-header h3 {
+  margin: 0 0 12px;
+  color: #f87171;
+  font-size: 1.15rem;
+}
+
+.login-error-modal-message {
+  margin: 0 0 24px;
+  color: var(--text-primary);
+  font-size: 0.95rem;
+  line-height: 1.6;
+}
+
+.login-error-modal-actions {
+  display: flex;
+  justify-content: center;
+}
+
+.login-error-modal-actions .login-button {
+  min-width: 120px;
 }
 
 .login-button {

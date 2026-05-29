@@ -50,20 +50,28 @@
 
     <div
       class="app-main"
-      :class="{ 'app-main--chat': isChatRoute, 'app-main--chat-embed-panel': isChatEmbedPanel }"
+      :class="{
+        'app-main--chat': isChatRoute,
+        'app-main--chat-embed-panel': isChatEmbedPanel,
+        'app-main--fill': isFillPage,
+      }"
     >
       <header class="app-header">
         <div class="app-header-main">
           <div class="app-breadcrumb">
             <template v-for="(item, index) in breadcrumbs" :key="`${item.label}-${index}`">
               <router-link v-if="item.to" class="app-breadcrumb-link" :to="item.to">{{ item.label }}</router-link>
+              <button
+                v-else-if="item.onClick"
+                type="button"
+                class="app-breadcrumb-link"
+                @click="item.onClick"
+              >
+                {{ item.label }}
+              </button>
               <span v-else class="app-breadcrumb-current">{{ item.label }}</span>
               <span v-if="index < breadcrumbs.length - 1" class="app-breadcrumb-separator">/</span>
             </template>
-          </div>
-          <div class="app-title-group">
-            <h1>{{ currentPage.title }}</h1>
-            <p>{{ currentPage.description }}</p>
           </div>
         </div>
 
@@ -89,7 +97,6 @@
             </div>
             <div class="header-user-copy">
               <strong>{{ authStore.currentUser?.username || '未登录用户' }}</strong>
-              <span>{{ authStore.roleLabel }}</span>
             </div>
           </div>
 
@@ -105,6 +112,7 @@
         :class="{
           'app-content--chat': isChatRoute,
           'app-content--chat-embed-panel': isChatEmbedPanel,
+          'app-content--flush': isFillPage,
         }"
       >
         <div
@@ -127,6 +135,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import { useAppStore } from '../stores/app'
 import { useAuthStore } from '../stores/auth'
+import { layoutBreadcrumbTailOverride, layoutChatHomeHandler, layoutPageTitleOverride } from '../composables/useLayoutPageContext'
 import AppIcon from './AppIcon.vue'
 import SpaceSelector from './SpaceSelector.vue'
 
@@ -142,14 +151,14 @@ const navItems = computed(() => {
     { to: '/retrieval', label: '知识检索', caption: '效果验证', icon: 'retrieval' },
     { to: '/chat', label: '对话', caption: '知识助手', icon: 'chat' },
     { to: '/providers', label: '模型管理', caption: '模型供给', icon: 'models' },
-    { to: '/settings', label: '系统设置', caption: '平台策略', icon: 'settings' },
   ] as Array<{ to: string; label: string; caption: string; icon: string }>
 
-  if (authStore.canManageSpaces) {
-    items.push({ to: '/admin/spaces', label: '企业空间管理', caption: '租户治理', icon: 'workspace' })
+  if (authStore.canManageUsers || authStore.canManageSpaces) {
+    items.push({ to: '/admin/users', label: '用户管理', caption: '成员与企业空间', icon: 'user' })
   }
-  if (authStore.canManageUsers) {
-    items.push({ to: '/admin/users', label: '用户管理', caption: '成员与权限', icon: 'user' })
+
+  if (authStore.isSystemAdmin) {
+    items.push({ to: '/settings', label: '系统设置', caption: '平台策略', icon: 'settings' })
   }
 
   return items
@@ -161,16 +170,31 @@ const currentSpaceSlug = computed({
 })
 
 const currentPage = computed(() => ({
-  title: (route.meta.title as string) || navItems.find((item) => item.to === route.path)?.label || '工作台',
-  description: (route.meta.description as string) || '管理企业知识资产与 AI 模型配置。',
+  title:
+    layoutPageTitleOverride.value ||
+    (route.meta.title as string) ||
+    navItems.value.find((item) => item.to === route.path)?.label ||
+    '工作台',
 }))
 
 const breadcrumbs = computed(() => {
-  const items: Array<{ label: string; to?: string }> = [{ label: 'ZS-RAG', to: '/' }]
+  const items: Array<{ label: string; to?: string; onClick?: () => void }> = [{ label: 'ZS-RAG', to: '/' }]
 
   if (route.name === 'knowledge-base-detail') {
     items.push({ label: '知识库管理', to: '/knowledge-bases' })
-    items.push({ label: '知识库详情' })
+    items.push({ label: layoutBreadcrumbTailOverride.value || '知识库详情' })
+    return items
+  }
+
+  if (route.name === 'chat') {
+    const tail = layoutBreadcrumbTailOverride.value
+    const chatHome = layoutChatHomeHandler.value
+    if (tail && chatHome) {
+      items.push({ label: '对话', onClick: chatHome })
+      items.push({ label: tail })
+      return items
+    }
+    items.push({ label: '对话' })
     return items
   }
 
@@ -180,6 +204,8 @@ const breadcrumbs = computed(() => {
 
 const userInitial = computed(() => (authStore.currentUser?.username || 'U').charAt(0).toUpperCase())
 const isChatRoute = computed(() => route.name === 'chat')
+/** 铺满型页面：内容区收小上下留白，便于子内容撑满一屏 */
+const isFillPage = computed(() => route.name === 'knowledge-document-detail')
 /** iframe 嵌入：仅保留对话主区域，隐藏侧栏与顶栏 */
 const isChatEmbedPanel = computed(() => {
   if (route.name !== 'chat') return false
@@ -481,7 +507,7 @@ const handleLogout = () => {
   align-items: center;
   gap: 10px;
   color: var(--text-tertiary);
-  font-size: 0.82rem;
+  font-size: 0.98rem;
   font-weight: 600;
 }
 
@@ -495,6 +521,14 @@ const handleLogout = () => {
   transition: color 0.2s ease;
 }
 
+button.app-breadcrumb-link {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+}
+
 .app-breadcrumb-link:hover {
   color: var(--brand-primary);
 }
@@ -505,23 +539,6 @@ const handleLogout = () => {
 
 .app-breadcrumb-separator {
   opacity: 0.6;
-}
-
-.app-title-group {
-  display: grid;
-  gap: 6px;
-}
-
-.app-title-group h1 {
-  margin: 0;
-  font-size: clamp(1.4rem, 2vw, 1.9rem);
-  color: var(--text-primary);
-}
-
-.app-title-group p {
-  margin: 0;
-  color: var(--text-secondary);
-  font-size: 0.95rem;
 }
 
 .app-header-actions {
@@ -585,6 +602,22 @@ const handleLogout = () => {
   flex-direction: column;
   min-height: 0;
   padding: 36px 40px 48px;
+}
+
+/* 铺满型页面：锁定一屏，仅面板内部滚动，去掉页面级滚动条 */
+.app-main.app-main--fill {
+  height: 100dvh;
+  max-height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.app-content.app-content--flush {
+  flex: 1 1 0%;
+  min-height: 0;
+  overflow: hidden;
+  padding-top: 18px;
+  padding-bottom: 18px;
 }
 
 .app-content-inner {

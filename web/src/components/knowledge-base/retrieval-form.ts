@@ -1,13 +1,17 @@
 import type { KnowledgeBase, RetrievalMode } from '../../api/knowledge-base'
 import { knowledgeBaseApi } from '../../api/knowledge-base'
-import type { HybridStrategy, RetrievalFormState } from './RetrievalConfigForm.vue'
+import type { FusionMethod, HybridStrategy, RetrievalFormState } from './RetrievalConfigForm.vue'
+
+export type { FusionMethod, HybridStrategy, RetrievalFormState }
 
 export interface StoredRetrievalConfig {
   vector_weight?: number
   hybrid_strategy?: HybridStrategy
+  fusion_method?: FusionMethod
   rerank_enabled?: boolean
   rerank_model_id?: number | null
   score_threshold_enabled?: boolean
+  include_image_ocr?: boolean
 }
 
 export function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
@@ -34,6 +38,10 @@ export function readStoredRetrieval(kb: KnowledgeBase): StoredRetrievalConfig {
       stored.hybrid_strategy === 'weight' || stored.hybrid_strategy === 'rerank'
         ? stored.hybrid_strategy
         : undefined,
+    fusion_method:
+      stored.fusion_method === 'weighted' || stored.fusion_method === 'rrf'
+        ? stored.fusion_method
+        : undefined,
     rerank_enabled:
       typeof stored.rerank_enabled === 'boolean' ? stored.rerank_enabled : undefined,
     rerank_model_id: typeof rerankId === 'number' ? rerankId : rerankId === null ? null : undefined,
@@ -41,6 +49,8 @@ export function readStoredRetrieval(kb: KnowledgeBase): StoredRetrievalConfig {
       typeof stored.score_threshold_enabled === 'boolean'
         ? stored.score_threshold_enabled
         : undefined,
+    include_image_ocr:
+      typeof stored.include_image_ocr === 'boolean' ? stored.include_image_ocr : undefined,
   }
 }
 
@@ -52,8 +62,10 @@ export function defaultRetrievalFormState(): RetrievalFormState {
     score_threshold: 0.5,
     vector_weight: 0.3,
     hybrid_strategy: 'weight',
+    fusion_method: 'weighted',
     rerank_enabled: false,
     rerank_model_id: null,
+    include_image_ocr: false,
   }
 }
 
@@ -90,6 +102,7 @@ export function buildRetrievalUpdatePayload(
   const retrievalStored: StoredRetrievalConfig = {
     vector_weight: f.vector_weight,
     hybrid_strategy: f.hybrid_strategy,
+    fusion_method: f.fusion_method,
     rerank_enabled: f.rerank_enabled,
     rerank_model_id:
       f.mode === 'hybrid'
@@ -100,6 +113,7 @@ export function buildRetrievalUpdatePayload(
           ? f.rerank_model_id
           : null,
     score_threshold_enabled: f.score_threshold_enabled,
+    include_image_ocr: f.include_image_ocr,
   }
   return {
     default_retrieval_mode: f.mode,
@@ -129,8 +143,10 @@ export function retrievalFormFromKnowledgeBase(kb: KnowledgeBase): RetrievalForm
     score_threshold: scoreThreshold,
     vector_weight: clampNumber(stored.vector_weight, 0, 1, 0.3),
     hybrid_strategy: stored.hybrid_strategy || 'weight',
+    fusion_method: stored.fusion_method || 'weighted',
     rerank_enabled: stored.rerank_enabled ?? false,
     rerank_model_id: stored.rerank_model_id ?? null,
+    include_image_ocr: stored.include_image_ocr ?? false,
   }
 }
 

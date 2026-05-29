@@ -281,6 +281,9 @@
           </div>
 
           <div class="chat-main-body">
+            <p v-if="memoryHintVisible" class="chat-memory-hint" role="status">
+              {{ memoryHintText }}
+            </p>
             <div
               ref="messageListRef"
               class="message-list scrollbar-pill"
@@ -375,6 +378,24 @@
               </template>
             </div>
             </div>
+
+            <div v-if="showSuggestedQuestionsBlock" class="chat-suggest-questions">
+              <div class="chat-suggest-questions-divider">
+                <span>试着问问</span>
+              </div>
+              <div class="chat-suggest-questions-chips">
+                <button
+                  v-for="(q, qi) in displayedSuggestedQuestions"
+                  :key="`${qi}-${q}`"
+                  type="button"
+                  class="chat-suggest-question-chip"
+                  @click="applySuggestedQuestion(q)"
+                >
+                  {{ q }}
+                </button>
+              </div>
+            </div>
+
             <button
               v-show="showJumpToBottom"
               type="button"
@@ -440,112 +461,11 @@
               API 接入
             </button>
           </div>
-          <section v-if="activeConfig" class="surface-card chat-system-prompt-card">
-            <div class="section-heading compact-heading">
-              <h4>系统提示词</h4>
-            </div>
-            <label class="field system-prompt-field">
-              <textarea
-                v-model="systemPromptDraft"
-                class="textarea system-prompt-textarea"
-                rows="9"
-                aria-label="系统提示词"
-                @blur="flushSystemPrompt"
-              />
-            </label>
-          </section>
-
-          <section class="surface-card">
-            <div class="section-heading compact-heading">
-              <h4>知识库上下文</h4>
-            </div>
-
-            <div v-if="activeConfig" class="field kb-multiselect-field">
-              <KnowledgeBaseMultiSelect
-                v-model="chatKnowledgeBaseIds"
-                v-model:open="kbDropdownOpen"
-                :knowledge-bases="kbs"
-                :embedding-models="embeddingModelsFlat"
-                :embedding-space-default="embeddingSpaceDefault"
-              />
-            </div>
-            <div v-else class="kb-settings-loading">加载配置中…</div>
-
-            <div v-if="activeConfig" class="field chat-retrieval-topk-field">
-              <span class="chat-topk-field-label">
-                Top K
-                <span class="chat-topk-help" :title="RETRIEVAL_TOP_K_HELP" tabindex="0" role="note">?</span>
-              </span>
-              <div class="chat-topk-slider-row">
-                <input
-                  v-model.number="chatTopK"
-                  class="input chat-topk-number-input"
-                  type="number"
-                  min="1"
-                  max="50"
-                  step="1"
-                  aria-label="Top K"
-                  @change="onChatTopKCommit"
-                  @blur="onChatTopKCommit"
-                />
-                <input
-                  v-model.number="chatTopK"
-                  class="chat-topk-progress-range"
-                  type="range"
-                  min="1"
-                  max="50"
-                  step="1"
-                  :style="chatTopKSliderStyle"
-                  aria-label="Top K 滑动条"
-                  @change="onChatTopKCommit"
-                />
-              </div>
-            </div>
-
-            <div v-if="activeConfig && hasLightragKbSelected" class="field chat-lightrag-mode-field">
-              <span class="field-label">图检索模式（LightRAG）</span>
-              <select
-                class="select"
-                :value="activeConfig.lightrag_query_mode || 'mix'"
-                @change="onLightragModeChange"
-              >
-                <option value="mix">mix（推荐）</option>
-                <option value="naive">naive</option>
-                <option value="local">local</option>
-                <option value="global">global</option>
-                <option value="hybrid">hybrid</option>
-              </select>
-            </div>
-
-            <div v-if="activeConfig" class="field chat-citation-toggle-field">
-              <div class="chat-citation-toggle-head">
-                <span class="field-label">显示引文</span>
-                <span
-                  class="chat-citation-help"
-                  tabindex="0"
-                  role="img"
-                  title="开启后，助手回复中的 [1]、[2] 等会显示为角标，并在消息下方列出对应知识库文档与页码；仅在选择知识库并命中检索片段时生效。"
-                >
-                  <AppIcon name="help-circle" :size="16" />
-                </span>
-              </div>
-              <label class="chat-switch">
-                <input
-                  type="checkbox"
-                  role="switch"
-                  :checked="activeConfig.show_citations !== false"
-                  @change="updateConfig('show_citations', ($event.target as HTMLInputElement).checked)"
-                />
-                <span class="chat-switch-track" aria-hidden="true" />
-              </label>
-            </div>
-          </section>
-
           <section id="chat-panel-model-config" class="surface-card">
             <div class="section-heading compact-heading">
               <div>
                 <h4>模型配置</h4>
-                <p>本对话下所有会话共用此配置</p>
+                <p class="section-subtext">本对话下所有会话共用此配置</p>
               </div>
             </div>
 
@@ -615,28 +535,440 @@
                 </div>
               </label>
 
-              <label class="field">
-                <span class="field-label">Temperature ({{ activeConfig?.temperature || 0.7 }})</span>
+              <div v-if="activeConfig" class="chat-model-params">
+                <div class="chat-model-params-heading">参数</div>
+
+                <div class="chat-model-param-row" :class="{ 'is-disabled': activeConfig.temperature_enabled !== true }">
+                  <label class="chat-switch chat-model-param-switch">
+                    <input
+                      type="checkbox"
+                      role="switch"
+                      :checked="activeConfig.temperature_enabled === true"
+                      @change="onTemperatureEnabledChange(($event.target as HTMLInputElement).checked)"
+                    />
+                    <span class="chat-switch-track" aria-hidden="true" />
+                  </label>
+                  <span class="chat-model-param-label chat-field-label-block">
+                    Temperature
+                    <span class="chat-field-hint-wrap" tabindex="0" role="button" aria-label="Temperature help">
+                      <span class="chat-topk-help">?</span>
+                    </span>
+                    <span class="chat-field-hint-tooltip" role="tooltip">{{ TEMPERATURE_HELP }}</span>
+                  </span>
+                  <input
+                    v-model.number="chatTemperature"
+                    class="chat-model-param-range"
+                    type="range"
+                    min="0"
+                    max="2"
+                    step="0.1"
+                    :style="chatTemperatureSliderStyle"
+                    :disabled="activeConfig.temperature_enabled !== true"
+                    aria-label="Temperature slider"
+                    @change="onTemperatureCommit"
+                  />
+                  <input
+                    v-model.number="chatTemperature"
+                    class="input chat-model-param-number"
+                    type="number"
+                    min="0"
+                    max="2"
+                    step="0.1"
+                    :disabled="activeConfig.temperature_enabled !== true"
+                    aria-label="Temperature"
+                    @change="onTemperatureCommit"
+                    @blur="onTemperatureCommit"
+                  />
+                </div>
+
+                <div class="chat-model-param-row" :class="{ 'is-disabled': activeConfig.max_tokens_enabled !== true }">
+                  <label class="chat-switch chat-model-param-switch">
+                    <input
+                      type="checkbox"
+                      role="switch"
+                      :checked="activeConfig.max_tokens_enabled === true"
+                      @change="onMaxTokensEnabledChange(($event.target as HTMLInputElement).checked)"
+                    />
+                    <span class="chat-switch-track" aria-hidden="true" />
+                  </label>
+                  <span class="chat-model-param-label chat-field-label-block">
+                    Max Tokens
+                    <span class="chat-field-hint-wrap" tabindex="0" role="button" aria-label="Max Tokens help">
+                      <span class="chat-topk-help">?</span>
+                    </span>
+                    <span class="chat-field-hint-tooltip" role="tooltip">{{ MAX_TOKENS_HELP }}</span>
+                  </span>
+                  <input
+                    v-model.number="chatMaxTokens"
+                    class="chat-model-param-range"
+                    type="range"
+                    min="100"
+                    :max="chatMaxTokensSliderMax"
+                    step="100"
+                    :style="chatMaxTokensSliderStyle"
+                    :disabled="activeConfig.max_tokens_enabled !== true"
+                    aria-label="Max Tokens slider"
+                    @change="onMaxTokensCommit"
+                  />
+                  <input
+                    v-model.number="chatMaxTokens"
+                    class="input chat-model-param-number"
+                    type="number"
+                    min="100"
+                    :max="chatMaxTokensSliderMax"
+                    step="100"
+                    :disabled="activeConfig.max_tokens_enabled !== true"
+                    aria-label="Max Tokens"
+                    @change="onMaxTokensCommit"
+                    @blur="onMaxTokensCommit"
+                  />
+                </div>
+
+                <div class="chat-model-param-row" :class="{ 'is-disabled': activeConfig.top_p_enabled !== true }">
+                  <label class="chat-switch chat-model-param-switch">
+                    <input
+                      type="checkbox"
+                      role="switch"
+                      :checked="activeConfig.top_p_enabled === true"
+                      @change="onTopPEnabledChange(($event.target as HTMLInputElement).checked)"
+                    />
+                    <span class="chat-switch-track" aria-hidden="true" />
+                  </label>
+                  <span class="chat-model-param-label chat-field-label-block">
+                    Top P
+                    <span class="chat-field-hint-wrap" tabindex="0" role="button" aria-label="Top P 说明">
+                      <span class="chat-topk-help">?</span>
+                    </span>
+                    <span class="chat-field-hint-tooltip" role="tooltip">{{ TOP_P_HELP }}</span>
+                  </span>
+                  <input
+                    v-model.number="chatTopP"
+                    class="chat-model-param-range"
+                    type="range"
+                    min="0.05"
+                    max="1"
+                    step="0.05"
+                    :style="chatTopPSliderStyle"
+                    :disabled="activeConfig.top_p_enabled !== true"
+                    aria-label="Top P 滑动条"
+                    @change="onTopPCommit"
+                  />
+                  <input
+                    v-model.number="chatTopP"
+                    class="input chat-model-param-number"
+                    type="number"
+                    min="0.05"
+                    max="1"
+                    step="0.05"
+                    :disabled="activeConfig.top_p_enabled !== true"
+                    aria-label="Top P"
+                    @change="onTopPCommit"
+                    @blur="onTopPCommit"
+                  />
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section v-if="activeConfig" class="surface-card chat-system-prompt-card">
+            <div class="section-heading compact-heading">
+              <h4 class="chat-field-label-block">
+                系统提示词
+                <span class="chat-field-hint-wrap" tabindex="0" role="button" aria-label="系统提示词说明">
+                  <span class="chat-topk-help">?</span>
+                </span>
+                <span class="chat-field-hint-tooltip" role="tooltip">{{ SYSTEM_PROMPT_HELP }}</span>
+              </h4>
+            </div>
+            <label class="field system-prompt-field">
+              <textarea
+                v-model="systemPromptDraft"
+                class="textarea system-prompt-textarea"
+                rows="9"
+                aria-label="系统提示词"
+                @blur="flushSystemPrompt"
+              />
+            </label>
+          </section>
+
+          <section class="surface-card">
+            <div class="section-heading compact-heading">
+              <h4>知识库检索</h4>
+            </div>
+
+            <div v-if="activeConfig" class="field kb-multiselect-field">
+              <KnowledgeBaseMultiSelect
+                v-model="chatKnowledgeBaseIds"
+                v-model:open="kbDropdownOpen"
+                :knowledge-bases="kbs"
+                :embedding-models="embeddingModelsFlat"
+                :embedding-space-default="embeddingSpaceDefault"
+              />
+            </div>
+            <div v-else class="kb-settings-loading">加载配置中…</div>
+
+            <div v-if="activeConfig" class="field chat-retrieval-topk-field">
+              <span class="chat-topk-field-label chat-field-label-block">
+                Top K
+                <span
+                  class="chat-field-hint-wrap"
+                  tabindex="0"
+                  role="button"
+                  aria-label="Top K 说明"
+                >
+                  <span class="chat-topk-help">?</span>
+                </span>
+                <span class="chat-field-hint-tooltip" role="tooltip">{{ RETRIEVAL_TOP_K_HELP }}</span>
+              </span>
+              <div class="chat-topk-slider-row">
                 <input
+                  v-model.number="chatTopK"
+                  class="input chat-topk-number-input"
+                  type="number"
+                  min="1"
+                  max="50"
+                  step="1"
+                  aria-label="Top K"
+                  @change="onChatTopKCommit"
+                  @blur="onChatTopKCommit"
+                />
+                <input
+                  v-model.number="chatTopK"
+                  class="chat-topk-progress-range"
+                  type="range"
+                  min="1"
+                  max="50"
+                  step="1"
+                  :style="chatTopKSliderStyle"
+                  aria-label="Top K 滑动条"
+                  @change="onChatTopKCommit"
+                />
+              </div>
+            </div>
+
+            <div v-if="activeConfig && hasLightragKbSelected" class="field chat-lightrag-mode-field">
+              <span class="field-label chat-field-label-block">
+                图检索模式（LightRAG）
+                <span class="chat-field-hint-wrap" tabindex="0" role="button" aria-label="图检索模式说明">
+                  <span class="chat-topk-help">?</span>
+                </span>
+                <span class="chat-field-hint-tooltip" role="tooltip">{{ LIGHTRAG_MODE_HELP }}</span>
+              </span>
+              <select
+                class="select"
+                :value="activeConfig.lightrag_query_mode || 'mix'"
+                @change="onLightragModeChange"
+              >
+                <option value="mix">mix（推荐）</option>
+                <option value="naive">naive</option>
+                <option value="local">local</option>
+                <option value="global">global</option>
+                <option value="hybrid">hybrid</option>
+              </select>
+            </div>
+
+            <div v-if="activeConfig" class="field chat-citation-toggle-field">
+              <div class="chat-citation-toggle-head">
+                <span class="field-label chat-field-label-block">
+                  显示引文
+                  <span
+                    class="chat-field-hint-wrap"
+                    tabindex="0"
+                    role="button"
+                    aria-label="显示引文说明"
+                  >
+                    <span class="chat-topk-help">?</span>
+                  </span>
+                  <span class="chat-field-hint-tooltip" role="tooltip">{{ SHOW_CITATIONS_HELP }}</span>
+                </span>
+              </div>
+              <label class="chat-switch">
+                <input
+                  type="checkbox"
+                  role="switch"
+                  :checked="activeConfig.show_citations !== false"
+                  @change="updateConfig('show_citations', ($event.target as HTMLInputElement).checked)"
+                />
+                <span class="chat-switch-track" aria-hidden="true" />
+              </label>
+            </div>
+          </section>
+
+          <section class="surface-card">
+            <div class="section-heading compact-heading">
+              <div>
+                <h4>对话记忆</h4>
+                <p class="section-subtext">控制发给大模型的多轮历史；不影响知识库检索（仍仅用本轮问题）</p>
+              </div>
+            </div>
+
+            <div v-if="activeConfig" class="field chat-memory-field">
+              <span class="field-label chat-field-label-block">
+                记忆窗口（消息条数）
+                <span
+                  class="chat-field-hint-wrap"
+                  tabindex="0"
+                  role="button"
+                  aria-label="记忆窗口说明"
+                >
+                  <span class="chat-topk-help">?</span>
+                </span>
+                <span class="chat-field-hint-tooltip" role="tooltip">{{ MEMORY_WINDOW_HELP }}</span>
+              </span>
+              <div class="chat-topk-slider-row">
+                <input
+                  v-model.number="chatMaxHistoryMessages"
+                  class="input chat-topk-number-input"
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="1"
+                  aria-label="记忆窗口消息条数"
+                  @change="onMaxHistoryMessagesCommit"
+                  @blur="onMaxHistoryMessagesCommit"
+                />
+                <input
+                  v-model.number="chatMaxHistoryMessages"
+                  class="chat-topk-progress-range"
                   type="range"
                   min="0"
-                  max="2"
-                  step="0.1"
-                  :value="activeConfig?.temperature || 0.7"
-                  @change="updateConfig('temperature', parseFloat(($event.target as HTMLInputElement).value))"
+                  max="100"
+                  step="1"
+                  :style="chatMaxHistorySliderStyle"
+                  aria-label="记忆窗口滑动条"
+                  @change="onMaxHistoryMessagesCommit"
                 />
-              </label>
+              </div>
+            </div>
 
-              <label class="field">
-                <span class="field-label">Max Tokens ({{ activeConfig?.max_tokens || 2000 }})</span>
+            <div v-if="activeConfig" class="field chat-memory-field">
+              <span class="field-label chat-field-label-block">
+                记忆 token 上限（可选）
+                <span
+                  class="chat-field-hint-wrap"
+                  tabindex="0"
+                  role="button"
+                  aria-label="记忆 token 上限说明"
+                >
+                  <span class="chat-topk-help">?</span>
+                </span>
+                <span class="chat-field-hint-tooltip" role="tooltip">{{ MEMORY_TOKEN_HELP }}</span>
+              </span>
+              <input
+                v-model="chatMaxHistoryTokensDraft"
+                class="input"
+                type="number"
+                min="1"
+                max="128000"
+                step="256"
+                placeholder="留空不限"
+                aria-label="记忆 token 上限"
+                @blur="flushMaxHistoryTokens"
+              />
+            </div>
+
+            <div v-if="activeConfig" class="field chat-citation-toggle-field">
+              <div class="chat-citation-toggle-head">
+                <span class="field-label chat-field-label-block">
+                  多轮检索改写
+                  <span
+                    class="chat-field-hint-wrap"
+                    tabindex="0"
+                    role="button"
+                    aria-label="多轮检索改写说明"
+                  >
+                    <span class="chat-topk-help">?</span>
+                  </span>
+                  <span class="chat-field-hint-tooltip" role="tooltip">{{ REFINE_MULTITURN_HELP }}</span>
+                </span>
+              </div>
+              <label class="chat-switch">
                 <input
-                  type="range"
-                  min="100"
-                  max="8000"
-                  step="100"
-                  :value="activeConfig?.max_tokens || 2000"
-                  @change="updateConfig('max_tokens', parseInt(($event.target as HTMLInputElement).value, 10))"
+                  type="checkbox"
+                  role="switch"
+                  :checked="activeConfig.refine_multiturn === true"
+                  @change="updateConfig('refine_multiturn', ($event.target as HTMLInputElement).checked)"
                 />
+                <span class="chat-switch-track" aria-hidden="true" />
+              </label>
+            </div>
+          </section>
+
+          <section v-if="activeConfig" class="surface-card chat-dialog-extras-card">
+            <div class="section-heading compact-heading">
+              <div>
+                <h4>对话体验</h4>
+                <p class="section-subtext">开场白与无检索命中时的兜底回复</p>
+              </div>
+            </div>
+            <label class="field">
+              <span class="field-label chat-field-label-block">
+                开场白
+                <span class="chat-field-hint-wrap" tabindex="0" role="button" aria-label="开场白说明">
+                  <span class="chat-topk-help">?</span>
+                </span>
+                <span class="chat-field-hint-tooltip" role="tooltip">{{ OPENING_GREETING_HELP }}</span>
+              </span>
+              <textarea
+                v-model="openingGreetingDraft"
+                class="textarea"
+                rows="3"
+                :placeholder="DEFAULT_OPENING_GREETING"
+                aria-label="开场白"
+                @blur="flushOpeningGreeting"
+              />
+            </label>
+            <label class="field">
+              <span class="field-label chat-field-label-block">
+                空检索回复
+                <span class="chat-field-hint-wrap" tabindex="0" role="button" aria-label="空检索回复说明">
+                  <span class="chat-topk-help">?</span>
+                </span>
+                <span class="chat-field-hint-tooltip" role="tooltip">{{ EMPTY_RESPONSE_HELP }}</span>
+              </span>
+              <textarea
+                v-model="emptyResponseDraft"
+                class="textarea"
+                rows="3"
+                placeholder="已选知识库但未命中任何片段时的固定回复；留空则仍调用大模型"
+                aria-label="空检索回复"
+                @blur="flushEmptyResponse"
+              />
+            </label>
+          </section>
+
+          <section v-if="activeConfig" class="surface-card chat-suggest-settings-card">
+            <div class="chat-suggest-setting-row">
+              <div class="chat-suggest-setting-icon" aria-hidden="true">
+                <AppIcon name="chat" :size="18" />
+              </div>
+              <div class="chat-suggest-setting-text">
+                <div class="chat-suggest-setting-title chat-field-label-block">
+                  下一步问题建议
+                  <span class="chat-field-hint-wrap" tabindex="0" role="button" aria-label="下一步问题建议说明">
+                    <span class="chat-topk-help">?</span>
+                  </span>
+                  <span class="chat-field-hint-tooltip" role="tooltip">{{ SUGGEST_QUESTIONS_HELP }}</span>
+                </div>
+              </div>
+              <button
+                type="button"
+                class="btn btn-text chat-suggest-setting-gear"
+                aria-label="下一步问题建议设置"
+                @click="openSuggestQuestionsModal"
+              >
+                <AppIcon name="settings" :size="18" />
+              </button>
+              <label class="chat-switch chat-suggest-setting-switch">
+                <input
+                  type="checkbox"
+                  role="switch"
+                  :checked="activeConfig.suggest_next_questions_enabled === true"
+                  @change="
+                    updateConfig('suggest_next_questions_enabled', ($event.target as HTMLInputElement).checked)
+                  "
+                />
+                <span class="chat-switch-track" aria-hidden="true" />
               </label>
             </div>
           </section>
@@ -644,6 +976,71 @@
 
       </div>
       </div>
+      <!-- 下一步问题建议设置 -->
+      <Teleport to="body">
+        <div v-if="showSuggestQuestionsModal" class="modal-overlay" @click.self="closeSuggestQuestionsModal">
+          <div class="modal-content chat-suggest-modal" @click.stop>
+            <div class="modal-header">
+              <h3>下一步问题建议设置</h3>
+              <button type="button" class="btn btn-text" aria-label="关闭" @click="closeSuggestQuestionsModal">
+                <AppIcon name="close" :size="20" />
+              </button>
+            </div>
+            <div class="modal-body chat-suggest-modal-body">
+              <label class="field">
+                <span class="field-label">模型</span>
+                <select v-model="suggestModelIdDraft" class="select">
+                  <option :value="null">系统默认模型（与对话主模型相同）</option>
+                  <option v-for="m in flatChatModels" :key="m.id" :value="m.id">
+                    {{ m.model_name }} · {{ m.provider_name }}
+                  </option>
+                </select>
+              </label>
+
+              <div class="field">
+                <span class="field-label">提示词</span>
+                <div class="chat-suggest-prompt-options">
+                  <label
+                    class="chat-suggest-prompt-card"
+                    :class="{ 'is-selected': suggestPromptModeDraft === 'system' }"
+                  >
+                    <input v-model="suggestPromptModeDraft" type="radio" class="sr-only" value="system" />
+                    <div class="chat-suggest-prompt-card-head">
+                      <span class="chat-suggest-prompt-card-title">系统默认提示词</span>
+                      <span class="chat-suggest-prompt-card-radio" aria-hidden="true" />
+                    </div>
+                    <p class="chat-suggest-prompt-card-desc">使用内置提示词生成下一步问题。</p>
+                    <pre class="chat-suggest-prompt-preview">{{ DEFAULT_SUGGEST_NEXT_QUESTIONS_PROMPT }}</pre>
+                  </label>
+                  <label
+                    class="chat-suggest-prompt-card"
+                    :class="{ 'is-selected': suggestPromptModeDraft === 'custom' }"
+                  >
+                    <input v-model="suggestPromptModeDraft" type="radio" class="sr-only" value="custom" />
+                    <div class="chat-suggest-prompt-card-head">
+                      <span class="chat-suggest-prompt-card-title">自定义提示词</span>
+                      <span class="chat-suggest-prompt-card-radio" aria-hidden="true" />
+                    </div>
+                    <p class="chat-suggest-prompt-card-desc">编写并使用你自己的下一步问题生成提示词。</p>
+                    <textarea
+                      v-model="suggestCustomPromptDraft"
+                      class="textarea chat-suggest-prompt-custom"
+                      rows="4"
+                      placeholder="请输入自定义提示词…"
+                      :disabled="suggestPromptModeDraft !== 'custom'"
+                    />
+                  </label>
+                </div>
+              </div>
+            </div>
+            <div class="modal-footer chat-suggest-modal-footer">
+              <button type="button" class="btn btn-secondary" @click="closeSuggestQuestionsModal">取消</button>
+              <button type="button" class="btn btn-primary" @click="saveSuggestQuestionsModal">保存</button>
+            </div>
+          </div>
+        </div>
+      </Teleport>
+
       <!-- 引文 · 切片正文 -->
       <div v-if="citationModalOpen" class="modal-overlay" role="presentation" @click.self="closeCitationModal">
         <div class="modal-content citation-chunk-modal" @click.stop>
@@ -1355,6 +1752,7 @@ import KnowledgeBaseMultiSelect from '../components/knowledge-base/KnowledgeBase
 
 import { useChatStore } from '../stores/chat'
 import { streamChatCompletion } from '../lib/chat-sse'
+import { resolveApiBaseUrl } from '../lib/apiBaseUrl'
 import { useRoute, useRouter } from 'vue-router'
 import { knowledgeBaseApi, type KnowledgeBase, type KnowledgeChunk } from '../api/knowledge-base'
 import {
@@ -1370,6 +1768,7 @@ import {
   type ChatCitation,
 } from '../api/chat'
 import { useAuthStore } from '../stores/auth'
+import { useLayoutPageContext } from '../composables/useLayoutPageContext'
 import {
   buildOpenAiAccessCurl,
   buildOpenAiAccessPython,
@@ -1453,6 +1852,24 @@ const chatStore = useChatStore()
 const authStore = useAuthStore()
 const route = useRoute()
 const router = useRouter()
+const { setPageContext, setChatHomeHandler, clearPageContext } = useLayoutPageContext()
+
+function syncChatPageHeader() {
+  const conv = chatStore.activeConversation
+  if (chatStore.activeConversationId && conv?.title) {
+    setPageContext({ title: conv.title, breadcrumbTail: conv.title })
+    setChatHomeHandler(() => chatStore.leaveConversation())
+    return
+  }
+  setPageContext({ title: '对话', breadcrumbTail: null })
+  setChatHomeHandler(null)
+}
+
+watch(
+  () => [chatStore.activeConversationId, chatStore.activeConversation?.title] as const,
+  () => syncChatPageHeader(),
+  { immediate: true },
+)
 
 /** URL ?embed_panel=1：iframe 内仅展示对话主区（隐藏平台导航与「会话」侧栏） */
 const isEmbedPanelMode = computed(() => {
@@ -1992,7 +2409,15 @@ function handleChatWsPayload(raw: unknown) {
       })
     }
     streamingAssistantTempId.value = null
-    chatStore.setGenerating(false)
+    scrollChatToBottom()
+    return
+  }
+
+  if (d.type === 'suggested_questions') {
+    const qs = d.questions
+    suggestedQuestions.value = Array.isArray(qs)
+      ? qs.map((x) => String(x).trim()).filter(Boolean).slice(0, 3)
+      : []
     scrollChatToBottom()
     return
   }
@@ -2064,6 +2489,114 @@ async function onLightragModeChange(evt: Event) {
 
 const RETRIEVAL_TOP_K_HELP =
   '与知识库「检索设置 / 检索测试」中的 Top K 相同：单库时召回条数一致；多库时为合并排序后写入上下文的上限。修改后会同步保存到已选知识库。'
+
+const SHOW_CITATIONS_HELP =
+  '开启后，助手回复中的 [1]、[2] 等会显示为角标，并在消息下方列出对应知识库文档与页码；仅在选择知识库并命中检索片段时生效。'
+
+const MEMORY_WINDOW_HELP =
+  '控制发给大模型多少条历史 user/assistant 消息，用于多轮理解。设为 0 表示每轮不带历史；不影响知识库检索（仍只用本轮问题）。'
+
+const MEMORY_TOKEN_HELP =
+  '在消息条数限制之外，按 token 估算从最新消息向前截断，避免历史占满模型上下文。留空则仅按消息条数限制。'
+
+const REFINE_MULTITURN_HELP =
+  '开启后，结合最近对话将「它呢」「刚才那个」等省略问句改写成完整检索语句，再搜索知识库。仅影响检索 query，不改变对话记忆窗口。'
+
+const SYSTEM_PROMPT_HELP =
+  '定义助手的人设与回答规则。可用 {knowledge} 占位符，本轮检索到的知识库片段会自动插入该位置；留空保存后服务端会按是否绑定知识库选择默认模板。'
+
+const LIGHTRAG_MODE_HELP =
+  '图知识库（LightRAG）的检索策略：mix 综合多种图检索；naive 简单向量；local 侧重实体邻域；global 侧重全局关系；hybrid 混合 local 与 global。'
+
+const DEFAULT_OPENING_GREETING = '你好，我是你的智能助手，有什么需要帮助的吗？'
+
+const OPENING_GREETING_HELP =
+  '新建会话时自动写入一条助手消息作为欢迎语。仅对新创建的会话生效，已存在会话不会 retroactive 插入；留空则新建会话不再显示开场白。'
+
+const EMPTY_RESPONSE_HELP =
+  '已选择知识库但本轮检索无任何命中片段时的固定回复；留空则仍调用大模型，结合系统提示词作答。'
+
+const SUGGEST_QUESTIONS_HELP =
+  '开启后，助手每次回复完成会在聊天区生成最多 3 条「试着问问」追问建议；空会话则展示默认示例问题。'
+
+const TEMPERATURE_HELP =
+  '控制回答的随机性与多样性。值越高，候选词分布越平滑、结果越发散；值越低，越倾向高概率词、结果越稳定。'
+
+const MAX_TOKENS_HELP =
+  '限制模型单次回复最多生成的 token 数，仅为上限，实际输出可能更短。上限优先取模型管理中的「最大输出 token」，其次为上下文窗口，均未配置时最高 131072。'
+
+const TOP_P_HELP =
+  '核采样阈值（0~1）。例如 0.8 表示只从累计概率 ≥80% 的最小 token 集合中采样；越大越随机，越小越确定。'
+
+const DEFAULT_CHAT_TEMPERATURE = 0.7
+const DEFAULT_CHAT_MAX_TOKENS = 2000
+const DEFAULT_CHAT_TOP_P = 1.0
+/** 最大标记滑条/输入的全局上限（未探测到模型规格时使用） */
+const CHAT_MAX_TOKENS_SLIDER_CEILING = 131072
+
+const DEFAULT_SUGGEST_NEXT_QUESTIONS_PROMPT =
+  '请预测用户最可能追问的 3 个问题，每个问题不超过 20 字，使用与助手最新回复相同的语言，仅输出 JSON 数组，例如 ["问题1", "问题2", "问题3"]。'
+
+const DEFAULT_STARTER_QUESTIONS = ['你能做什么？', '帮我写代码', '讲个笑话']
+
+const suggestedQuestions = ref<string[]>([])
+const showSuggestQuestionsModal = ref(false)
+const suggestPromptModeDraft = ref<'system' | 'custom'>('system')
+const suggestCustomPromptDraft = ref('')
+const suggestModelIdDraft = ref<number | null>(null)
+
+const displayedSuggestedQuestions = computed(() => {
+  if (suggestedQuestions.value.length > 0) {
+    return suggestedQuestions.value
+  }
+  const hasUserMsg = chatStore.messages.some((m) => m.role === 'user')
+  if (!hasUserMsg) {
+    return DEFAULT_STARTER_QUESTIONS
+  }
+  return []
+})
+
+const showSuggestedQuestionsBlock = computed(() => {
+  if (chatStore.isGenerating) {
+    return false
+  }
+  if (activeConfig.value?.suggest_next_questions_enabled !== true) {
+    return false
+  }
+  return displayedSuggestedQuestions.value.length > 0
+})
+
+function openSuggestQuestionsModal() {
+  const c = activeConfig.value
+  suggestPromptModeDraft.value = c?.suggest_next_questions_prompt_mode === 'custom' ? 'custom' : 'system'
+  suggestCustomPromptDraft.value = c?.suggest_next_questions_custom_prompt ?? ''
+  suggestModelIdDraft.value = c?.suggest_next_questions_model_id ?? null
+  showSuggestQuestionsModal.value = true
+}
+
+function closeSuggestQuestionsModal() {
+  showSuggestQuestionsModal.value = false
+}
+
+async function saveSuggestQuestionsModal() {
+  const mode = suggestPromptModeDraft.value
+  await chatStore.updateConfiguration({
+    suggest_next_questions_model_id: suggestModelIdDraft.value,
+    suggest_next_questions_prompt_mode: mode,
+    suggest_next_questions_custom_prompt:
+      mode === 'custom' ? suggestCustomPromptDraft.value.trim() || null : null,
+  })
+  showSuggestQuestionsModal.value = false
+}
+
+function applySuggestedQuestion(q: string) {
+  const text = q.trim()
+  if (!text || chatStore.isGenerating) {
+    return
+  }
+  draftMessage.value = text
+  void handleSend()
+}
 
 const DEFAULT_CHAT_TOP_K = defaultRetrievalFormState().top_k
 
@@ -2148,6 +2681,326 @@ async function flushSystemPrompt() {
   await chatStore.updateConfiguration({ system_prompt: nextPayload })
 }
 
+const DEFAULT_MAX_HISTORY_MESSAGES = 20
+
+function clampMaxHistoryMessages(n: unknown): number {
+  const v = typeof n === 'number' ? n : Number(n)
+  if (!Number.isFinite(v)) return DEFAULT_MAX_HISTORY_MESSAGES
+  return Math.min(100, Math.max(0, Math.round(v)))
+}
+
+const chatMaxHistoryMessages = ref(DEFAULT_MAX_HISTORY_MESSAGES)
+
+watch(
+  () => activeConfig.value?.max_history_messages,
+  (v) => {
+    chatMaxHistoryMessages.value = clampMaxHistoryMessages(v ?? DEFAULT_MAX_HISTORY_MESSAGES)
+  },
+  { immediate: true },
+)
+
+const chatMaxHistorySliderStyle = computed(() => {
+  const min = 0
+  const max = 100
+  const raw = Number.isFinite(chatMaxHistoryMessages.value) ? chatMaxHistoryMessages.value : min
+  const clamped = Math.min(Math.max(raw, min), max)
+  const pct = ((clamped - min) / (max - min)) * 100
+  return { '--progress': `${pct.toFixed(2)}%` } as Record<string, string>
+})
+
+function onMaxHistoryMessagesCommit() {
+  if (!activeConfig.value) return
+  const v = clampMaxHistoryMessages(chatMaxHistoryMessages.value)
+  chatMaxHistoryMessages.value = v
+  const prev = clampMaxHistoryMessages(activeConfig.value.max_history_messages ?? DEFAULT_MAX_HISTORY_MESSAGES)
+  if (v === prev) return
+  void updateConfig('max_history_messages', v)
+}
+
+const chatMaxHistoryTokensDraft = ref('')
+
+watch(
+  () => activeConfig.value?.max_history_tokens,
+  (v) => {
+    chatMaxHistoryTokensDraft.value = v != null && v > 0 ? String(v) : ''
+  },
+  { immediate: true },
+)
+
+async function flushMaxHistoryTokens() {
+  const remote = activeConfig.value?.max_history_tokens ?? null
+  const raw = chatMaxHistoryTokensDraft.value.trim()
+  let next: number | null = null
+  if (raw !== '') {
+    const n = parseInt(raw, 10)
+    if (!Number.isFinite(n) || n < 1) {
+      chatMaxHistoryTokensDraft.value = remote != null && remote > 0 ? String(remote) : ''
+      return
+    }
+    next = Math.min(128000, n)
+  }
+  if (next === remote) return
+  await chatStore.updateConfiguration({ max_history_tokens: next })
+}
+
+const openingGreetingDraft = ref('')
+const emptyResponseDraft = ref('')
+
+watch(
+  () => activeConfig.value?.opening_greeting,
+  (v) => {
+    openingGreetingDraft.value = v != null ? String(v) : ''
+  },
+  { immediate: true },
+)
+
+watch(
+  () => activeConfig.value?.empty_response,
+  (v) => {
+    emptyResponseDraft.value = v != null ? String(v) : ''
+  },
+  { immediate: true },
+)
+
+async function flushOpeningGreeting() {
+  const remote = activeConfig.value?.opening_greeting ?? null
+  const draftTrim = openingGreetingDraft.value.trim()
+  const nextPayload: string | null = draftTrim === '' ? null : openingGreetingDraft.value
+  if (nextPayload === remote) return
+  await chatStore.updateConfiguration({ opening_greeting: nextPayload })
+}
+
+async function flushEmptyResponse() {
+  const remote = activeConfig.value?.empty_response ?? null
+  const draftTrim = emptyResponseDraft.value.trim()
+  const nextPayload: string | null = draftTrim === '' ? null : emptyResponseDraft.value
+  if (nextPayload === remote) return
+  await chatStore.updateConfiguration({ empty_response: nextPayload })
+}
+
+function estimateMessageTokens(text: string): number {
+  const s = text || ''
+  return s.length > 0 ? Math.max(1, Math.floor(s.length / 4)) : 0
+}
+
+function countMessagesForModelWindow(
+  messages: { role: string; content: string }[],
+  maxMsgs: number,
+  maxTokens: number | null | undefined,
+): number {
+  if (maxMsgs <= 0) return 0
+  const slice = messages.slice(-maxMsgs)
+  if (maxTokens == null || maxTokens <= 0) {
+    return slice.length
+  }
+  let used = 0
+  let count = 0
+  for (let i = slice.length - 1; i >= 0; i -= 1) {
+    const t = estimateMessageTokens(slice[i].content)
+    if (used + t > maxTokens && count > 0) break
+    used += t
+    count += 1
+  }
+  return count
+}
+
+function resolveSelectedModelItem(c: typeof activeConfig.value): ModelItem | undefined {
+  if (!c) return undefined
+  const byId = c.model_id != null ? flatChatModels.value.find((x) => x.id === c.model_id) : undefined
+  return (
+    byId ??
+    flatChatModels.value.find(
+      (x) =>
+        x.model_name === c.model_name?.trim() &&
+        (!c.model_provider || x.provider_code === c.model_provider),
+    )
+  )
+}
+
+const selectedModelContextWindow = computed(
+  () => resolveSelectedModelItem(activeConfig.value)?.context_window ?? null,
+)
+
+const selectedModelMaxOutputTokens = computed(
+  () => resolveSelectedModelItem(activeConfig.value)?.max_output_tokens ?? null,
+)
+
+function clampChatTemperature(raw: unknown): number {
+  const n = typeof raw === 'number' ? raw : Number(raw)
+  if (!Number.isFinite(n)) return DEFAULT_CHAT_TEMPERATURE
+  return Math.min(2, Math.max(0, Math.round(n * 10) / 10))
+}
+
+function clampChatMaxTokens(raw: unknown, max: number): number {
+  const n = typeof raw === 'number' ? raw : Number(raw)
+  if (!Number.isFinite(n)) return DEFAULT_CHAT_MAX_TOKENS
+  const hi = Math.max(100, max)
+  return Math.min(hi, Math.max(100, Math.round(n)))
+}
+
+function clampChatTopP(raw: unknown): number {
+  const n = typeof raw === 'number' ? raw : Number(raw)
+  if (!Number.isFinite(n)) return DEFAULT_CHAT_TOP_P
+  return Math.min(1, Math.max(0.05, Math.round(n * 100) / 100))
+}
+
+const chatTemperature = ref(DEFAULT_CHAT_TEMPERATURE)
+const chatMaxTokens = ref(DEFAULT_CHAT_MAX_TOKENS)
+const chatTopP = ref(DEFAULT_CHAT_TOP_P)
+
+const chatMaxTokensSliderMax = computed(() => {
+  const ceiling = CHAT_MAX_TOKENS_SLIDER_CEILING
+  const out = selectedModelMaxOutputTokens.value
+  if (out != null && out > 0) {
+    return Math.min(Math.max(out, 256), ceiling)
+  }
+  const ctx = selectedModelContextWindow.value
+  if (ctx != null && ctx > 0) {
+    return Math.min(Math.max(ctx, 256), ceiling)
+  }
+  return ceiling
+})
+
+watch(chatMaxTokensSliderMax, (max) => {
+  chatMaxTokens.value = clampChatMaxTokens(chatMaxTokens.value, max)
+})
+
+watch(
+  () => activeConfig.value?.temperature,
+  (v) => {
+    chatTemperature.value = clampChatTemperature(v ?? DEFAULT_CHAT_TEMPERATURE)
+  },
+  { immediate: true },
+)
+
+watch(
+  () => activeConfig.value?.max_tokens,
+  (v) => {
+    chatMaxTokens.value = clampChatMaxTokens(v ?? DEFAULT_CHAT_MAX_TOKENS, chatMaxTokensSliderMax.value)
+  },
+  { immediate: true },
+)
+
+watch(
+  () => activeConfig.value?.top_p,
+  (v) => {
+    chatTopP.value = clampChatTopP(v ?? DEFAULT_CHAT_TOP_P)
+  },
+  { immediate: true },
+)
+
+const chatTemperatureSliderStyle = computed(() => {
+  const min = 0
+  const max = 2
+  const clamped = clampChatTemperature(chatTemperature.value)
+  const pct = ((clamped - min) / (max - min)) * 100
+  return { '--progress': `${pct.toFixed(2)}%` } as Record<string, string>
+})
+
+const chatMaxTokensSliderStyle = computed(() => {
+  const min = 100
+  const max = chatMaxTokensSliderMax.value
+  const clamped = clampChatMaxTokens(chatMaxTokens.value, max)
+  const pct = ((clamped - min) / (max - min)) * 100
+  return { '--progress': `${pct.toFixed(2)}%` } as Record<string, string>
+})
+
+const chatTopPSliderStyle = computed(() => {
+  const min = 0.05
+  const max = 1
+  const clamped = clampChatTopP(chatTopP.value)
+  const pct = ((clamped - min) / (max - min)) * 100
+  return { '--progress': `${pct.toFixed(2)}%` } as Record<string, string>
+})
+
+async function onTemperatureEnabledChange(enabled: boolean) {
+  await updateConfig('temperature_enabled', enabled)
+  if (enabled) {
+    await onTemperatureCommit()
+  }
+}
+
+async function onMaxTokensEnabledChange(enabled: boolean) {
+  await updateConfig('max_tokens_enabled', enabled)
+  if (enabled) {
+    await onMaxTokensCommit()
+  }
+}
+
+async function onTopPEnabledChange(enabled: boolean) {
+  await updateConfig('top_p_enabled', enabled)
+  if (enabled) {
+    await onTopPCommit()
+  }
+}
+
+async function onTemperatureCommit() {
+  if (activeConfig.value?.temperature_enabled !== true) {
+    return
+  }
+  const v = clampChatTemperature(chatTemperature.value)
+  chatTemperature.value = v
+  const prev = clampChatTemperature(activeConfig.value.temperature ?? DEFAULT_CHAT_TEMPERATURE)
+  if (v === prev) {
+    return
+  }
+  await updateConfig('temperature', v)
+}
+
+async function onMaxTokensCommit() {
+  if (activeConfig.value?.max_tokens_enabled !== true) {
+    return
+  }
+  const max = chatMaxTokensSliderMax.value
+  const v = clampChatMaxTokens(chatMaxTokens.value, max)
+  chatMaxTokens.value = v
+  const prev = clampChatMaxTokens(activeConfig.value.max_tokens ?? DEFAULT_CHAT_MAX_TOKENS, max)
+  if (v === prev) {
+    return
+  }
+  await updateConfig('max_tokens', v)
+}
+
+async function onTopPCommit() {
+  if (activeConfig.value?.top_p_enabled !== true) {
+    return
+  }
+  const v = clampChatTopP(chatTopP.value)
+  chatTopP.value = v
+  const prev = clampChatTopP(activeConfig.value.top_p ?? DEFAULT_CHAT_TOP_P)
+  if (v === prev) {
+    return
+  }
+  await updateConfig('top_p', v)
+}
+
+const memoryHintVisible = computed(() => {
+  const displayed = activeMessages.value.length
+  const maxMsgs = clampMaxHistoryMessages(activeConfig.value?.max_history_messages ?? DEFAULT_MAX_HISTORY_MESSAGES)
+  const modelUsed = countMessagesForModelWindow(
+    activeMessages.value,
+    maxMsgs,
+    activeConfig.value?.max_history_tokens,
+  )
+  return displayed > modelUsed
+})
+
+const memoryHintText = computed(() => {
+  const displayed = activeMessages.value.length
+  const maxMsgs = clampMaxHistoryMessages(activeConfig.value?.max_history_messages ?? DEFAULT_MAX_HISTORY_MESSAGES)
+  const modelUsed = countMessagesForModelWindow(
+    activeMessages.value,
+    maxMsgs,
+    activeConfig.value?.max_history_tokens,
+  )
+  let text = `界面可见 ${displayed} 条消息，模型推理使用最近 ${modelUsed} 条对话记忆（窗口上限 ${maxMsgs} 条）`
+  const ctx = selectedModelContextWindow.value
+  if (ctx != null && ctx > 0) {
+    text += `；当前模型上下文约 ${ctx.toLocaleString()} tokens`
+  }
+  return text
+})
+
 const headerModelTriggerLabel = computed(() => {
   const c = activeConfig.value
   const byId = c?.model_id != null ? flatChatModels.value.find((x) => x.id === c.model_id) : undefined
@@ -2219,17 +3072,7 @@ function isHeaderModelOptionCurrent(m: ModelItem): boolean {
   return true
 }
 
-const apiBaseUrl = computed(() => {
-  const env = import.meta.env.VITE_API_BASE_URL as string | undefined
-  if (env != null && String(env).trim().length > 0) {
-    return String(env).replace(/\/$/, '')
-  }
-  if (typeof window !== 'undefined') {
-    const { protocol, hostname } = window.location
-    return `${protocol}//${hostname}:8000`
-  }
-  return 'http://localhost:8000'
-})
+const apiBaseUrl = computed(() => resolveApiBaseUrl())
 
 const chatPageUrl = computed(() =>
   typeof window !== 'undefined' ? `${window.location.origin}/chat` : '/chat',
@@ -2778,6 +3621,7 @@ onBeforeUnmount(() => {
   }
   streamAbort.value?.abort()
   streamAbort.value = null
+  clearPageContext()
 })
 
 const fetchKbs = async () => {
@@ -2831,6 +3675,7 @@ watch(() => chatStore.activeSessionId, (newId, oldId) => {
   settingsDrawerOpen.value = false
   kbDropdownOpen.value = false
   streamingAssistantTempId.value = null
+  suggestedQuestions.value = []
   chatStore.setGenerating(false)
   streamAbort.value?.abort()
   streamAbort.value = null
@@ -2911,6 +3756,7 @@ const handleSend = async () => {
   })
   streamingAssistantTempId.value = tempAssistantId
   chatStore.setGenerating(true)
+  suggestedQuestions.value = []
 
   draftMessage.value = ''
 
@@ -2929,6 +3775,7 @@ const handleSend = async () => {
 
   try {
     await streamChatCompletion(sessionId, content, handleChatWsPayload, { signal: ac.signal })
+    chatStore.setGenerating(false)
   } catch (e: unknown) {
     if (e instanceof DOMException && e.name === 'AbortError') {
       streamingAssistantTempId.value = null
@@ -3294,15 +4141,15 @@ function onChatTopKCommit() {
   padding: 10px 14px;
   border: none;
   border-radius: 12px;
-  background: #111827;
-  color: #f9fafb;
+  background: var(--brand-primary);
+  color: #ffffff;
   font-weight: 600;
   cursor: pointer;
-  transition: opacity 0.15s ease, transform 0.15s ease;
+  transition: background 0.15s ease, transform 0.15s ease;
 }
 
 .btn-embed-site:hover {
-  opacity: 0.92;
+  background: var(--brand-primary-hover);
 }
 
 .btn-access-api {
@@ -4634,6 +5481,428 @@ function onChatTopKCommit() {
   overflow: hidden;
 }
 
+.chat-memory-hint {
+  flex-shrink: 0;
+  margin: 0 4px 8px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.section-subtext {
+  margin: 4px 0 0;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  font-weight: 400;
+}
+
+.chat-suggest-questions {
+  flex-shrink: 0;
+  padding: 4px 4px 10px;
+}
+
+.chat-suggest-questions-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  color: var(--text-tertiary);
+  font-size: 0.82rem;
+}
+
+.chat-suggest-questions-divider::before,
+.chat-suggest-questions-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border-color);
+}
+
+.chat-suggest-questions-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.chat-suggest-question-chip {
+  padding: 8px 14px;
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--brand-primary, #2563eb);
+  font-size: 0.88rem;
+  line-height: 1.3;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.chat-suggest-question-chip:hover {
+  background: var(--brand-primary-light, rgba(37, 99, 235, 0.08));
+  border-color: rgba(59, 130, 246, 0.45);
+}
+
+.chat-suggest-settings-card {
+  padding: 12px 14px;
+}
+
+.chat-suggest-setting-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 36px;
+}
+
+.chat-suggest-setting-icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: var(--brand-primary, #2563eb);
+  color: #fff;
+}
+
+.chat-suggest-setting-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.chat-suggest-setting-title {
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.2;
+}
+
+.chat-suggest-setting-gear {
+  flex-shrink: 0;
+  padding: 6px;
+}
+
+.chat-suggest-setting-switch {
+  flex-shrink: 0;
+}
+
+.chat-model-params {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow: visible;
+}
+
+.chat-model-params-heading {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.chat-model-param-row {
+  display: grid;
+  grid-template-columns: auto minmax(52px, max-content) minmax(0, 1fr) 80px;
+  align-items: center;
+  gap: 8px 8px;
+  overflow: visible;
+}
+
+.chat-model-param-switch {
+  flex-shrink: 0;
+}
+
+.chat-model-param-switch .chat-switch-track {
+  width: 32px;
+  height: 18px;
+}
+
+.chat-model-param-switch .chat-switch-track::after {
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+}
+
+.chat-model-param-switch .chat-switch input:checked + .chat-switch-track::after {
+  transform: translateX(14px);
+}
+
+.chat-model-param-label {
+  font-size: 0.86rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.chat-model-param-label.chat-field-label-block {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: auto;
+  max-width: none;
+  margin-bottom: 0;
+}
+
+.chat-model-param-label .chat-field-hint-wrap {
+  position: relative;
+}
+
+.chat-model-param-label .chat-field-hint-tooltip {
+  left: 50%;
+  right: auto;
+  width: min(268px, calc(100vw - 48px));
+  max-width: min(268px, calc(100vw - 48px));
+  transform: translateX(-50%) translateY(4px);
+}
+
+.chat-model-param-label .chat-field-hint-tooltip::after {
+  left: 50%;
+  right: auto;
+  margin-left: -5px;
+  background: #fff;
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-bottom: none;
+  border-right: none;
+}
+
+.chat-model-param-label.chat-field-label-block:hover .chat-field-hint-tooltip,
+.chat-model-param-label.chat-field-label-block:focus-within .chat-field-hint-tooltip {
+  transform: translateX(-50%) translateY(0);
+}
+
+.chat-model-param-range {
+  --progress: 0%;
+  --progress-color: var(--brand-primary, #3b82f6);
+  --progress-track: rgba(59, 130, 246, 0.12);
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  min-width: 0;
+  height: 6px;
+  margin: 0;
+  border-radius: 999px;
+  outline: none;
+  cursor: pointer;
+  background: linear-gradient(
+    to right,
+    var(--progress-color) 0%,
+    var(--progress-color) var(--progress),
+    var(--progress-track) var(--progress),
+    var(--progress-track) 100%
+  );
+}
+
+.chat-model-param-range:disabled {
+  cursor: not-allowed;
+}
+
+.chat-model-param-range::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background: transparent;
+}
+
+.chat-model-param-range::-moz-range-track {
+  height: 6px;
+  border-radius: 999px;
+  background: transparent;
+}
+
+.chat-model-param-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 8px;
+  height: 18px;
+  margin-top: -6px;
+  border-radius: 4px;
+  background: #ffffff;
+  border: 1px solid var(--border-strong, #d1d5db);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.15);
+  cursor: pointer;
+}
+
+.chat-model-param-range::-moz-range-thumb {
+  width: 8px;
+  height: 18px;
+  border-radius: 4px;
+  background: #ffffff;
+  border: 1px solid var(--border-strong, #d1d5db);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.15);
+  cursor: pointer;
+}
+
+.chat-model-param-number {
+  width: 80px;
+  min-width: 0;
+  padding: 6px 6px;
+  text-align: center;
+  background: var(--bg-secondary, #f3f4f6);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  font-size: 0.84rem;
+}
+
+.chat-model-param-number:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.chat-model-param-row.is-disabled .chat-model-param-range {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.chat-system-prompt-card h4.chat-field-label-block,
+.chat-suggest-setting-title.chat-field-label-block {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  width: auto;
+  max-width: none;
+  margin-bottom: 0;
+}
+
+.chat-suggest-setting-title .chat-field-hint-wrap {
+  position: relative;
+}
+
+.chat-suggest-setting-title .chat-field-hint-tooltip {
+  left: 0;
+  right: auto;
+  width: min(268px, calc(100vw - 48px));
+  max-width: min(268px, calc(100vw - 48px));
+}
+
+.modal-content.chat-suggest-modal {
+  max-width: 520px;
+  width: min(calc(100vw - 32px), 520px);
+  max-height: min(88vh, 620px);
+  padding: 20px;
+}
+
+.modal-content.chat-suggest-modal .modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.chat-suggest-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow-y: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.chat-suggest-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-color);
+}
+
+.chat-suggest-prompt-options {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.chat-suggest-prompt-card {
+  display: block;
+  padding: 12px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-primary);
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.chat-suggest-prompt-card.is-selected {
+  border-color: var(--brand-primary, #2563eb);
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.15);
+}
+
+.chat-suggest-prompt-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.chat-suggest-prompt-card-title {
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.chat-suggest-prompt-card-radio {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.chat-suggest-prompt-card.is-selected .chat-suggest-prompt-card-radio {
+  border-color: var(--brand-primary, #2563eb);
+  box-shadow: inset 0 0 0 3px var(--brand-primary, #2563eb);
+}
+
+.chat-suggest-prompt-card-desc {
+  margin: 0 0 10px;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+.chat-suggest-prompt-preview {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary, #f9fafb);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: 400;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chat-suggest-prompt-custom {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .message-list {
   flex: 1 1 0%;
   display: flex;
@@ -4924,9 +6193,8 @@ function onChatTopKCommit() {
 }
 
 .chat-topk-field-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
+  display: block;
+  width: 100%;
   margin-bottom: 8px;
   color: var(--text-primary);
   font-weight: 600;
@@ -4942,10 +6210,87 @@ function onChatTopKCommit() {
   border-radius: 50%;
   font-size: 0.72rem;
   font-weight: 600;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
+  background: #fff;
   border: 1px solid var(--border-color);
   cursor: help;
   vertical-align: middle;
+}
+
+.chat-field-hint-wrap:hover .chat-topk-help,
+.chat-field-hint-wrap:focus .chat-topk-help {
+  color: var(--text-primary);
+  border-color: rgba(59, 130, 246, 0.35);
+}
+
+.chat-field-label-block {
+  position: relative;
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 8px;
+}
+
+.chat-field-hint-wrap {
+  display: inline-flex;
+  vertical-align: middle;
+  margin-left: 4px;
+}
+
+.chat-field-hint-tooltip {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 200;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #fff;
+  color: var(--text-primary, #111827);
+  border: 1px solid var(--border-color, #e5e7eb);
+  font-size: 0.78rem;
+  font-weight: 400;
+  line-height: 1.55;
+  box-shadow:
+    0 4px 16px rgba(15, 23, 42, 0.08),
+    0 1px 3px rgba(15, 23, 42, 0.06);
+  white-space: normal;
+  word-break: break-word;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(4px);
+  transition:
+    opacity 0.16s ease,
+    transform 0.16s ease,
+    visibility 0.16s ease;
+}
+
+.chat-field-hint-tooltip::after {
+  content: '';
+  position: absolute;
+  top: -5px;
+  left: auto;
+  right: 12px;
+  width: 10px;
+  height: 10px;
+  background: #fff;
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-bottom: none;
+  border-right: none;
+  transform: rotate(45deg);
+}
+
+.chat-field-label-block:hover .chat-field-hint-tooltip,
+.chat-field-label-block:focus-within .chat-field-hint-tooltip {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateY(0);
 }
 
 .chat-topk-slider-row {
@@ -5039,20 +6384,14 @@ function onChatTopKCommit() {
 }
 
 .chat-citation-toggle-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  display: block;
+  width: 100%;
   margin-bottom: 8px;
 }
 
-.chat-citation-toggle-head .field-label {
+.chat-citation-toggle-head .field-label,
+.chat-citation-toggle-head .chat-field-label-block {
   margin-bottom: 0;
-}
-
-.chat-citation-help {
-  display: inline-flex;
-  color: var(--text-tertiary);
-  cursor: help;
 }
 
 .chat-switch {

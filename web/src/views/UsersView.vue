@@ -4,16 +4,37 @@
       <PageHeader
         eyebrow="Identity Management"
         title="用户管理"
-        description="创建与管理企业用户，系统管理员可将用户分配到多个企业空间。"
       >
         <template #actions>
-          <button class="btn btn-primary" type="button" @click="openCreateModal">
+          <button v-if="activeTab === 'users'" class="btn btn-primary" type="button" @click="openCreateModal">
             <AppIcon name="plus" :size="16" />
             创建用户
           </button>
         </template>
       </PageHeader>
 
+      <div v-if="canManageUsers && canManageSpaces" class="admin-tabs" role="tablist" aria-label="管理模块">
+        <button
+          type="button"
+          role="tab"
+          :class="['admin-tab', { active: activeTab === 'users' }]"
+          @click="activeTab = 'users'"
+        >
+          用户
+        </button>
+        <button
+          type="button"
+          role="tab"
+          :class="['admin-tab', { active: activeTab === 'spaces' }]"
+          @click="activeTab = 'spaces'"
+        >
+          企业空间
+        </button>
+      </div>
+
+      <EnterpriseSpacesPanel v-if="activeTab === 'spaces'" />
+
+      <template v-else>
       <section class="surface-card toolbar-panel">
         <div class="search-row">
           <input v-model="searchQuery" type="search" placeholder="搜索用户名或邮箱..." @keyup.enter="loadUsers" />
@@ -141,12 +162,13 @@
           </form>
         </div>
       </div>
+      </template>
     </div>
   </Layout>
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 
 import { listAllEnterpriseSpaces } from '../api/enterprise-space'
 import {
@@ -157,6 +179,7 @@ import {
   updateUser,
   type UserDetail,
 } from '../api/users'
+import EnterpriseSpacesPanel from '../components/admin/EnterpriseSpacesPanel.vue'
 import AppIcon from '../components/AppIcon.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Layout from '../components/Layout.vue'
@@ -165,6 +188,10 @@ import type { EnterpriseSpace, MembershipRole } from '../stores/auth'
 import { useAuthStore } from '../stores/auth'
 
 const authStore = useAuthStore()
+
+const canManageUsers = computed(() => authStore.canManageUsers)
+const canManageSpaces = computed(() => authStore.canManageSpaces)
+const activeTab = ref<'users' | 'spaces'>(authStore.canManageUsers ? 'users' : 'spaces')
 
 const users = ref<UserDetail[]>([])
 const allSpaces = ref<EnterpriseSpace[]>([])
@@ -309,6 +336,38 @@ onMounted(async () => {
 </script>
 
 <style scoped>
+.admin-tabs {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px;
+  margin-bottom: 16px;
+  border-radius: 12px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+}
+
+.admin-tab {
+  padding: 8px 18px;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+.admin-tab:hover {
+  color: var(--text-primary);
+}
+
+.admin-tab.active {
+  background: var(--bg-secondary);
+  color: var(--brand-primary);
+  box-shadow: var(--card-shadow-xs);
+}
+
 .toolbar-panel {
   margin-bottom: 16px;
 }

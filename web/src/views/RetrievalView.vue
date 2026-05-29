@@ -3,7 +3,6 @@
     <div class="page-shell retrieval-page">
       <div class="page-intro">
         <h1 class="page-intro-title">知识检索</h1>
-        <p class="page-intro-desc">选择一个或多个知识库，验证召回效果；布局与知识库管理中的「检索测试」一致。</p>
       </div>
 
       <section
@@ -91,35 +90,11 @@
                   <AppIcon name="retrieval" :size="18" />
                 </template>
               </EmptyState>
-              <div v-else class="search-result-list">
-                <article
-                  v-for="result in searchResults.results"
-                  :key="result.knowledge_base_id + ':' + result.chunk_uid"
-                  class="search-result-card"
-                >
-                  <div class="search-result-header">
-                    <div class="search-result-titles">
-                      <strong>{{ result.document_name }}</strong>
-                      <span v-if="result.knowledge_base_name" class="chip chip-soft">{{ result.knowledge_base_name }}</span>
-                    </div>
-                    <span class="chip">Score {{ formatScore(result.score) }}</span>
-                  </div>
-                  <p class="search-result-body">{{ result.content }}</p>
-                  <div class="search-result-meta-row">
-                    <span>Chunk #{{ result.chunk_index }}</span>
-                    <span v-if="result.citation.page_no != null">页码 {{ result.citation.page_no }}</span>
-                    <span
-                      v-if="
-                        searchResults?.mode === 'hybrid' &&
-                        (result.vector_score != null || result.keyword_score != null)
-                      "
-                    >
-                      向量 {{ formatScore(result.vector_score ?? 0) }} · 全文
-                      {{ formatScore(result.keyword_score ?? 0) }}
-                    </span>
-                  </div>
-                </article>
-              </div>
+              <RetrievalSearchResultList
+                v-else
+                :results="searchResults.results"
+                :mode="searchResults.mode"
+              />
             </div>
           </div>
         </div>
@@ -142,6 +117,7 @@ import AppIcon from '../components/AppIcon.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Layout from '../components/Layout.vue'
 import RetrievalConfigForm from '../components/knowledge-base/RetrievalConfigForm.vue'
+import RetrievalSearchResultList from '../components/knowledge-base/RetrievalSearchResultList.vue'
 import KnowledgeBaseMultiSelect from '../components/knowledge-base/KnowledgeBaseMultiSelect.vue'
 import { defaultRetrievalFormState, retrievalFormFromKnowledgeBase, type RetrievalFormState } from '../components/knowledge-base/retrieval-form'
 import { loadRetrievalKbPreference, saveRetrievalKbPreference } from '../lib/retrieval-kb-preference'
@@ -244,9 +220,11 @@ async function submitSearch() {
       mode: f.mode,
       top_k: f.top_k,
       score_threshold: f.score_threshold_enabled ? f.score_threshold : null,
+      include_image_ocr: f.include_image_ocr,
     }
     if (f.mode === 'hybrid' && f.hybrid_strategy === 'weight') {
       payload.vector_weight = f.vector_weight
+      payload.fusion_method = f.fusion_method
     }
     searchResults.value = await knowledgeBaseApi.searchMulti(payload)
   } catch (e) {
@@ -297,13 +275,6 @@ watch(
   font-size: 1.35rem;
   font-weight: 700;
   color: var(--text-primary);
-}
-
-.page-intro-desc {
-  margin: 0;
-  font-size: 0.95rem;
-  color: var(--text-secondary);
-  line-height: 1.6;
 }
 
 .retrieval-section-head {

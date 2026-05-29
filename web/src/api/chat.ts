@@ -18,7 +18,19 @@ export interface ChatConversation {
   temperature?: number
   max_tokens?: number
   top_p?: number
+  temperature_enabled?: boolean
+  max_tokens_enabled?: boolean
+  top_p_enabled?: boolean
   system_prompt?: string | null
+  max_history_messages?: number
+  max_history_tokens?: number | null
+  refine_multiturn?: boolean
+  opening_greeting?: string | null
+  empty_response?: string | null
+  suggest_next_questions_enabled?: boolean
+  suggest_next_questions_model_id?: number | null
+  suggest_next_questions_prompt_mode?: 'system' | 'custom'
+  suggest_next_questions_custom_prompt?: string | null
 }
 
 export interface ChatSession {
@@ -45,7 +57,19 @@ export interface ChatConfiguration {
   temperature: number
   max_tokens: number
   top_p: number
+  temperature_enabled?: boolean
+  max_tokens_enabled?: boolean
+  top_p_enabled?: boolean
   system_prompt?: string | null
+  max_history_messages?: number
+  max_history_tokens?: number | null
+  refine_multiturn?: boolean
+  opening_greeting?: string | null
+  empty_response?: string | null
+  suggest_next_questions_enabled?: boolean
+  suggest_next_questions_model_id?: number | null
+  suggest_next_questions_prompt_mode?: 'system' | 'custom'
+  suggest_next_questions_custom_prompt?: string | null
 }
 
 /** 助手消息保存的知识库引文（与正文中的 [1]、[2] 角标对应） */

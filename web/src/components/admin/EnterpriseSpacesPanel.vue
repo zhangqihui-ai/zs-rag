@@ -1,155 +1,148 @@
 <template>
-  <Layout>
-    <div class="page-shell admin-spaces-view">
-      <PageHeader
-        eyebrow="Tenant Management"
-        title="企业空间管理"
-        description="创建、编辑企业空间，并管理各空间成员与角色。"
-      >
-        <template #actions>
-          <button class="btn btn-primary" type="button" @click="openCreateModal">
-            <AppIcon name="plus" :size="16" />
-            创建企业空间
-          </button>
-        </template>
-      </PageHeader>
+  <div class="spaces-panel">
+    <div class="spaces-panel-toolbar">
+      <p class="spaces-panel-hint">管理企业空间（租户）及其成员与角色。</p>
+      <button class="btn btn-primary" type="button" @click="openCreateModal">
+        <AppIcon name="plus" :size="16" />
+        创建企业空间
+      </button>
+    </div>
 
-      <div v-if="loading" class="surface-card loading-skeleton panel-skeleton"></div>
+    <div v-if="loading" class="surface-card loading-skeleton panel-skeleton"></div>
 
-      <div v-else-if="error" class="surface-card error-panel">
-        <h3>加载失败</h3>
-        <p>{{ error }}</p>
+    <div v-else-if="error" class="surface-card error-panel">
+      <h3>加载失败</h3>
+      <p>{{ error }}</p>
+    </div>
+
+    <EmptyState v-else-if="spaces.length === 0" title="暂无企业空间" description="点击上方按钮创建第一个企业空间。">
+      <template #icon>
+        <AppIcon name="workspace" :size="20" />
+      </template>
+    </EmptyState>
+
+    <section v-else class="surface-card table-panel">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>名称</th>
+            <th>标识 (slug)</th>
+            <th>描述</th>
+            <th>成员数</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="space in spaces" :key="space.id">
+            <td><strong>{{ space.name }}</strong></td>
+            <td><code>{{ space.slug }}</code></td>
+            <td>{{ space.description || '—' }}</td>
+            <td>{{ memberCounts[space.id] ?? '—' }}</td>
+            <td class="table-actions">
+              <button class="btn btn-secondary btn-sm" type="button" @click="openMembersDrawer(space)">成员</button>
+              <button class="btn btn-secondary btn-sm" type="button" @click="openEditModal(space)">编辑</button>
+              <button
+                class="btn btn-secondary btn-sm"
+                type="button"
+                :disabled="space.slug === 'default'"
+                @click="confirmDelete(space)"
+              >
+                删除
+              </button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- 创建/编辑 Modal -->
+    <div v-if="spaceModalVisible" class="modal-overlay" @click.self="closeSpaceModal">
+      <div class="modal-card">
+        <h3>{{ editingSpace ? '编辑企业空间' : '创建企业空间' }}</h3>
+        <form class="modal-form" @submit.prevent="submitSpaceForm">
+          <label>
+            名称
+            <input v-model="spaceForm.name" type="text" required maxlength="100" />
+          </label>
+          <label v-if="!editingSpace">
+            标识 (slug)
+            <input v-model="spaceForm.slug" type="text" required maxlength="100" pattern="[a-z0-9-]+" />
+          </label>
+          <label>
+            描述
+            <textarea v-model="spaceForm.description" rows="3" maxlength="500"></textarea>
+          </label>
+          <p v-if="formError" class="form-error">{{ formError }}</p>
+          <div class="modal-actions">
+            <button class="btn btn-secondary" type="button" @click="closeSpaceModal">取消</button>
+            <button class="btn btn-primary" type="submit" :disabled="submitting">
+              {{ submitting ? '保存中...' : '保存' }}
+            </button>
+          </div>
+        </form>
       </div>
+    </div>
 
-      <EmptyState v-else-if="spaces.length === 0" title="暂无企业空间" description="点击上方按钮创建第一个企业空间。">
-        <template #icon>
-          <AppIcon name="workspace" :size="20" />
-        </template>
-      </EmptyState>
+    <!-- 成员 Drawer -->
+    <div v-if="membersDrawerVisible" class="modal-overlay" @click.self="closeMembersDrawer">
+      <div class="modal-card modal-card-wide">
+        <div class="drawer-header">
+          <div>
+            <h3>{{ selectedSpace?.name }} · 成员管理</h3>
+            <p>管理该空间下的用户成员与角色。</p>
+          </div>
+          <button class="btn btn-secondary btn-sm" type="button" @click="closeMembersDrawer">关闭</button>
+        </div>
 
-      <section v-else class="surface-card table-panel">
-        <table class="data-table">
+        <div class="member-add-row">
+          <select v-model="addMemberUserId" class="member-select">
+            <option :value="null">选择用户添加...</option>
+            <option v-for="user in availableUsersForAdd" :key="user.id" :value="user.id">
+              {{ user.username }}{{ user.email ? ` (${user.email})` : '' }}
+            </option>
+          </select>
+          <select v-model="addMemberRole" class="member-select">
+            <option value="member">普通成员</option>
+            <option value="space_admin">空间管理员</option>
+          </select>
+          <button class="btn btn-primary btn-sm" type="button" :disabled="!addMemberUserId" @click="handleAddMember">
+            添加成员
+          </button>
+        </div>
+
+        <div v-if="membersLoading" class="loading-skeleton panel-skeleton"></div>
+        <table v-else class="data-table">
           <thead>
             <tr>
-              <th>名称</th>
-              <th>标识 (slug)</th>
-              <th>描述</th>
-              <th>成员数</th>
+              <th>用户名</th>
+              <th>邮箱</th>
+              <th>角色</th>
               <th>操作</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="space in spaces" :key="space.id">
-              <td><strong>{{ space.name }}</strong></td>
-              <td><code>{{ space.slug }}</code></td>
-              <td>{{ space.description || '—' }}</td>
-              <td>{{ memberCounts[space.id] ?? '—' }}</td>
-              <td class="table-actions">
-                <button class="btn btn-secondary btn-sm" type="button" @click="openMembersDrawer(space)">成员</button>
-                <button class="btn btn-secondary btn-sm" type="button" @click="openEditModal(space)">编辑</button>
-                <button
-                  class="btn btn-secondary btn-sm"
-                  type="button"
-                  :disabled="space.slug === 'default'"
-                  @click="confirmDelete(space)"
+            <tr v-for="member in members" :key="member.id">
+              <td>{{ member.user.username }}</td>
+              <td>{{ member.user.email || '—' }}</td>
+              <td>
+                <select
+                  :value="member.role"
+                  class="role-select"
+                  @change="handleRoleChange(member, ($event.target as HTMLSelectElement).value as MembershipRole)"
                 >
-                  删除
-                </button>
+                  <option value="member">普通成员</option>
+                  <option value="space_admin">空间管理员</option>
+                </select>
+              </td>
+              <td>
+                <button class="btn btn-secondary btn-sm" type="button" @click="handleRemoveMember(member)">移除</button>
               </td>
             </tr>
           </tbody>
         </table>
-      </section>
-
-      <!-- 创建/编辑 Modal -->
-      <div v-if="spaceModalVisible" class="modal-overlay" @click.self="closeSpaceModal">
-        <div class="modal-card">
-          <h3>{{ editingSpace ? '编辑企业空间' : '创建企业空间' }}</h3>
-          <form class="modal-form" @submit.prevent="submitSpaceForm">
-            <label>
-              名称
-              <input v-model="spaceForm.name" type="text" required maxlength="100" />
-            </label>
-            <label v-if="!editingSpace">
-              标识 (slug)
-              <input v-model="spaceForm.slug" type="text" required maxlength="100" pattern="[a-z0-9-]+" />
-            </label>
-            <label>
-              描述
-              <textarea v-model="spaceForm.description" rows="3" maxlength="500"></textarea>
-            </label>
-            <p v-if="formError" class="form-error">{{ formError }}</p>
-            <div class="modal-actions">
-              <button class="btn btn-secondary" type="button" @click="closeSpaceModal">取消</button>
-              <button class="btn btn-primary" type="submit" :disabled="submitting">
-                {{ submitting ? '保存中...' : '保存' }}
-              </button>
-            </div>
-          </form>
-        </div>
-      </div>
-
-      <!-- 成员 Drawer -->
-      <div v-if="membersDrawerVisible" class="modal-overlay" @click.self="closeMembersDrawer">
-        <div class="modal-card modal-card-wide">
-          <div class="drawer-header">
-            <div>
-              <h3>{{ selectedSpace?.name }} · 成员管理</h3>
-              <p>管理该空间下的用户成员与角色。</p>
-            </div>
-            <button class="btn btn-secondary btn-sm" type="button" @click="closeMembersDrawer">关闭</button>
-          </div>
-
-          <div class="member-add-row">
-            <select v-model="addMemberUserId" class="member-select">
-              <option :value="null">选择用户添加...</option>
-              <option v-for="user in availableUsersForAdd" :key="user.id" :value="user.id">
-                {{ user.username }}{{ user.email ? ` (${user.email})` : '' }}
-              </option>
-            </select>
-            <select v-model="addMemberRole" class="member-select">
-              <option value="member">普通成员</option>
-              <option value="space_admin">空间管理员</option>
-            </select>
-            <button class="btn btn-primary btn-sm" type="button" :disabled="!addMemberUserId" @click="handleAddMember">
-              添加成员
-            </button>
-          </div>
-
-          <div v-if="membersLoading" class="loading-skeleton panel-skeleton"></div>
-          <table v-else class="data-table">
-            <thead>
-              <tr>
-                <th>用户名</th>
-                <th>邮箱</th>
-                <th>角色</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="member in members" :key="member.id">
-                <td>{{ member.user.username }}</td>
-                <td>{{ member.user.email || '—' }}</td>
-                <td>
-                  <select
-                    :value="member.role"
-                    class="role-select"
-                    @change="handleRoleChange(member, ($event.target as HTMLSelectElement).value as MembershipRole)"
-                  >
-                    <option value="member">普通成员</option>
-                    <option value="space_admin">空间管理员</option>
-                  </select>
-                </td>
-                <td>
-                  <button class="btn btn-secondary btn-sm" type="button" @click="handleRemoveMember(member)">移除</button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
       </div>
     </div>
-  </Layout>
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -166,13 +159,11 @@ import {
   updateEnterpriseSpace,
   updateSpaceMember,
   type MembershipWithUser,
-} from '../api/enterprise-space'
-import { listUsers, type UserDetail } from '../api/users'
-import AppIcon from '../components/AppIcon.vue'
-import EmptyState from '../components/EmptyState.vue'
-import Layout from '../components/Layout.vue'
-import PageHeader from '../components/PageHeader.vue'
-import type { EnterpriseSpace, MembershipRole } from '../stores/auth'
+} from '../../api/enterprise-space'
+import { listUsers, type UserDetail } from '../../api/users'
+import type { EnterpriseSpace, MembershipRole } from '../../stores/auth'
+import AppIcon from '../AppIcon.vue'
+import EmptyState from '../EmptyState.vue'
 
 const spaces = ref<EnterpriseSpace[]>([])
 const memberCounts = ref<Record<number, number>>({})
@@ -338,6 +329,25 @@ onMounted(loadSpaces)
 </script>
 
 <style scoped>
+.spaces-panel {
+  display: grid;
+  gap: 16px;
+}
+
+.spaces-panel-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.spaces-panel-hint {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 0.9rem;
+}
+
 .table-panel {
   overflow-x: auto;
 }

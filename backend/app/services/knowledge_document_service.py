@@ -28,9 +28,11 @@ from app.core.chunking_engine import (
     apply_general_chunking,
     apply_parent_child_chunking,
     adapt_chunk_size_for_small_doc,
+    consolidate_mineru_image_segments,
     merge_adjacent_segments_by_budget,
     merge_leading_preamble_segments,
     parse_chunking_config,
+    split_segments_at_cn_section_headings,
 )
 from app.core.errors import AppError
 from app.core.milvus_client import create_collection_if_not_exists, delete_vectors, drop_collection_if_exists, insert_vectors
@@ -69,6 +71,7 @@ SUPPORTED_EXTENSIONS = {"txt", "md", "pdf", "docx", "xlsx", "xlsm", "xls", "csv"
 settings = get_settings()
 
 MAX_PARSE_LOG_LINES = 2000
+PARSE_LOG_FLUSH_EVERY_LINES = 8
 CHUNK_DB_FLUSH_BATCH = 100
 
 _DOCUMENT_IN_PROGRESS_STATUSES = (
@@ -104,14 +107,14 @@ def _persist_parse_view_artifacts(*, parsed, file_path: Path) -> None:
     if not meta:
         return
     parent = file_path.parent
+    backend = meta.get("parser_backend")
 
-    if parsed.parser_type == "docx":
+    if parsed.parser_type == "docx" and backend != "mineru":
         view = persist_docx_view_artifacts(segments=parsed.segments or [], file_path_parent=parent)
         meta["parse_view"] = view
         meta["docx_view"] = view
         return
 
-    backend = meta.get("parser_backend")
     if backend not in {"mineru", "opendataloader"}:
         return
     md = meta.pop("_parse_markdown", None) or meta.pop("_mineru_markdown", None)
@@ -141,6 +144,11 @@ def _parsed_uses_prebuilt_table_chunks(parsed) -> bool:
     if parsed.parser_type in {"xlsx", "xlsm", "xls"}:
         return True
     segs = parsed.segments or []
+    if any((s.metadata or {}).get("table_role") == "body" for s in segs):
+        return True
+    backend = meta.get("parser_backend")
+    if backend in {"mineru", "opendataloader"} and segs:
+        return True
     if segs:
         table_like = sum(1 for s in segs if (s.metadata or {}).get("block") == "table")
         if table_like >= max(3, len(segs) // 2):
@@ -178,6 +186,21 @@ def _enrichment_options_from_kb(knowledge_base: KnowledgeBase):
 
     cfg = knowledge_base.config if isinstance(knowledge_base.config, dict) else {}
     return resolve_enrichment(cfg)
+
+
+def _slim_image_ocr_keyword_text(
+    content: str,
+    *,
+    heading_path: str | None,
+    metadata: dict[str, Any],
+) -> str:
+    """独立 image OCR 块：keyword_text 仅保留 caption/章节/摘要，content 仍完整。"""
+    caption = str(metadata.get("caption") or metadata.get("image_caption") or "").strip()
+    heading = (heading_path or str(metadata.get("heading_path") or "")).strip()
+    body = (content or "").strip()
+    summary = body[:120] + ("…" if len(body) > 120 else "")
+    parts = [p for p in (caption, heading, summary) if p]
+    return "\n".join(parts) if parts else summary
 
 
 def _clear_document_storage_dir(storage_path: str | None) -> None:
@@ -239,7 +262,7 @@ def _build_progress_payload(
 
 def _build_parse_log_payload(
     kind: Literal["parse", "reindex"],
-    phase: Literal["success", "error"],
+    phase: Literal["running", "success", "error"],
     lines: list[dict[str, str]],
 ) -> dict[str, Any]:
     return {
@@ -248,6 +271,26 @@ def _build_parse_log_payload(
         "lines": lines[-MAX_PARSE_LOG_LINES:],
         "updated_at": _utc_now_iso(),
     }
+
+
+def _maybe_flush_running_parse_log(
+    db: Session,
+    document: KnowledgeDocument,
+    *,
+    kind: Literal["parse", "reindex"],
+    log_lines: list[dict[str, str]],
+    flush_state: dict[str, int],
+    force: bool = False,
+) -> None:
+    """解析/索引进行中增量写入 parse_log_json，刷新页面后可从 GET parse-log 恢复。"""
+    n = len(log_lines)
+    last = flush_state.get("last_flush", 0)
+    if not force and n - last < PARSE_LOG_FLUSH_EVERY_LINES:
+        return
+    flush_state["last_flush"] = n
+    document.parse_log_json = _build_parse_log_payload(kind, "running", log_lines)
+    db.commit()
+    ensure_db_connection(db)
 
 
 def _storage_path_for(document: KnowledgeDocument) -> Path:
@@ -331,6 +374,15 @@ def _document_chunk_uid(document_id: int, chunk_index: int) -> str:
 
 
 def serialize_document(document: KnowledgeDocument) -> dict[str, Any]:
+    from app.core.parser_config import parser_engine_display_name
+
+    meta = document.metadata_json if isinstance(document.metadata_json, dict) else {}
+    backend = str(meta.get("parser_backend") or "").strip() or None
+    fallback = meta.get("parser_fallback") is True
+    parser_engine = backend
+    parser_engine_label = (
+        parser_engine_display_name(backend, fallback=fallback) if backend else None
+    )
     return {
         "id": document.id,
         "enterprise_space_id": document.enterprise_space_id,
@@ -343,6 +395,8 @@ def serialize_document(document: KnowledgeDocument) -> dict[str, Any]:
         "file_size": document.file_size,
         "storage_type": document.storage_type,
         "parser_type": document.parser_type,
+        "parser_engine": parser_engine,
+        "parser_engine_label": parser_engine_label,
         "chunk_size": document.chunk_size,
         "chunk_overlap": document.chunk_overlap,
         "status": document.status,
@@ -358,25 +412,9 @@ def serialize_document(document: KnowledgeDocument) -> dict[str, Any]:
 
 
 def serialize_chunk(chunk: KnowledgeChunk) -> dict[str, Any]:
-    return {
-        "id": chunk.id,
-        "chunk_uid": chunk.chunk_uid,
-        "document_id": chunk.document_id,
-        "chunk_index": chunk.chunk_index,
-        "content": chunk.content,
-        "content_preview": chunk.content_preview,
-        "char_count": chunk.char_count,
-        "token_count": chunk.token_count,
-        "start_offset": chunk.start_offset,
-        "end_offset": chunk.end_offset,
-        "page_no": chunk.page_no,
-        "heading_path": chunk.heading_path,
-        "vector_status": chunk.vector_status,
-        "vector_id": chunk.vector_id,
-        "metadata": chunk.metadata_json,
-        "created_at": chunk.created_at,
-        "updated_at": chunk.updated_at,
-    }
+    from app.services.chunk_response import serialize_chunk as _serialize
+
+    return _serialize(chunk)
 
 
 def get_document_or_error(db: Session, *, space_id: int, kb_id: int, document_id: int) -> KnowledgeDocument:
@@ -404,6 +442,135 @@ def get_knowledge_chunk_serialized(db: Session, *, space_id: int, kb_id: int, ch
     if chunk is None:
         raise AppError(status_code=404, code="CHUNK_NOT_FOUND", message="切片不存在或无权访问")
     return serialize_chunk(chunk)
+
+
+def _text_from_content_list_json(cl: list[Any], *, source_name: str) -> str:
+    if not cl:
+        return ""
+    first = cl[0] if isinstance(cl[0], dict) else {}
+    if "block_index" in first or first.get("type") in {"section", "table_overview"}:
+        parts: list[str] = []
+        for item in cl:
+            if not isinstance(item, dict):
+                continue
+            for key in ("text", "content", "image_ocr_text"):
+                raw = item.get(key)
+                if isinstance(raw, str) and raw.strip():
+                    parts.append(raw.strip())
+                    break
+        return "\n".join(parts).strip()
+    from app.core.mineru_gateway import MineruResult
+
+    parsed = MineruResult(content_list=cl, source_file_name=source_name).to_parsed_document()
+    return (parsed.text or "").strip()
+
+
+def _load_document_parsed_text(
+    db: Session,
+    *,
+    document: KnowledgeDocument,
+    knowledge_base: KnowledgeBase,
+    force_reparse: bool = False,
+) -> str:
+    path = resolve_original_file_path(document)
+    if not path or not path.is_file():
+        raise AppError(status_code=404, code="DOCUMENT_FILE_NOT_FOUND", message="原始文档文件不存在")
+    if not force_reparse:
+        parent = path.parent
+        for cl_name in (MINERU_VIEW_CL_FILENAME, DOCX_VIEW_CL_FILENAME):
+            cl_path = parent / cl_name
+            if not cl_path.is_file():
+                continue
+            try:
+                cl = json.loads(cl_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(cl, list) and cl:
+                text = _text_from_content_list_json(cl, source_name=document.file_name or "doc")
+                if text:
+                    return text
+    parser_options = _parser_options_from_kb(knowledge_base)
+    parsed = parse_document(
+        document.file_name,
+        path.read_bytes(),
+        parser_options=parser_options,
+    )
+    return (parsed.text or "").strip()
+
+
+def _offsets_valid(full_text: str, start: int | None, end: int | None) -> bool:
+    if start is None or end is None:
+        return False
+    if start < 0 or end <= start:
+        return False
+    return start < len(full_text) and end <= len(full_text)
+
+
+def get_chunk_source_context_serialized(
+    db: Session,
+    *,
+    space_id: int,
+    kb_id: int,
+    chunk_id: int,
+    context_chars: int = 320,
+) -> dict[str, Any]:
+    knowledge_base = get_knowledge_base_or_error(db, space_id=space_id, kb_id=kb_id, include_deleted=False)
+    chunk = db.execute(
+        select(KnowledgeChunk).where(
+            KnowledgeChunk.id == chunk_id,
+            KnowledgeChunk.enterprise_space_id == space_id,
+            KnowledgeChunk.knowledge_base_id == kb_id,
+        )
+    ).scalar_one_or_none()
+    if chunk is None:
+        raise AppError(status_code=404, code="CHUNK_NOT_FOUND", message="切片不存在或无权访问")
+    document = db.execute(
+        select(KnowledgeDocument).where(
+            KnowledgeDocument.id == chunk.document_id,
+            KnowledgeDocument.knowledge_base_id == kb_id,
+        )
+    ).scalar_one_or_none()
+    if document is None:
+        raise AppError(status_code=404, code="DOCUMENT_NOT_FOUND", message="文档不存在")
+
+    start = chunk.start_offset
+    end = chunk.end_offset
+    full_text = _load_document_parsed_text(db, document=document, knowledge_base=knowledge_base)
+    if not _offsets_valid(full_text, start, end):
+        full_text = _load_document_parsed_text(
+            db,
+            document=document,
+            knowledge_base=knowledge_base,
+            force_reparse=True,
+        )
+
+    if not _offsets_valid(full_text, start, end):
+        content = (chunk.content or "").strip()
+        return {
+            "text": content,
+            "highlight_start": 0,
+            "highlight_end": len(content),
+            "start_offset": start,
+            "end_offset": end,
+            "truncated_before": False,
+            "truncated_after": False,
+            "fallback": True,
+        }
+
+    assert start is not None and end is not None
+    slice_start = max(0, start - context_chars)
+    slice_end = min(len(full_text), end + context_chars)
+    excerpt = full_text[slice_start:slice_end]
+    return {
+        "text": excerpt,
+        "highlight_start": start - slice_start,
+        "highlight_end": end - slice_start,
+        "start_offset": start,
+        "end_offset": end,
+        "truncated_before": slice_start > 0,
+        "truncated_after": slice_end < len(full_text),
+        "fallback": False,
+    }
 
 
 _DOCUMENT_LIST_SORTS = frozenset({"created_desc", "created_asc", "name_asc", "updated_desc"})
@@ -656,6 +823,9 @@ def preview_document_chunking(
         parser_options=parser_options,
     )
     parsed.segments = merge_leading_preamble_segments(parsed.segments, full_text=parsed.text)
+    meta = parsed.metadata if isinstance(parsed.metadata, dict) else {}
+    if str(meta.get("parser_backend") or "") in {"mineru", "opendataloader"}:
+        parsed.segments = consolidate_mineru_image_segments(parsed.segments)
     if not parsed.text.strip():
         return {
             "document_id": document.id,
@@ -687,9 +857,13 @@ def preview_document_chunking(
 
     # 父子模式不做相邻段预算合并，否则会合并同一父块下多个子段，破坏 C-1/C-2… 粒度
     if cfg.mode != "parent_child":
-        chunk_size, chunk_overlap = adapt_chunk_size_for_small_doc(base_segments, chunk_size, chunk_overlap)
+        from app.core.text_chunker import segment_has_atomic_blocks
+
+        if not segment_has_atomic_blocks(base_segments):
+            chunk_size, chunk_overlap = adapt_chunk_size_for_small_doc(base_segments, chunk_size, chunk_overlap)
         base_segments = merge_adjacent_segments_by_budget(base_segments, chunk_size)
-    chunk_candidates = chunk_segments(base_segments, chunk_size, chunk_overlap)
+        base_segments = split_segments_at_cn_section_headings(base_segments)
+        chunk_candidates = chunk_segments(base_segments, chunk_size, chunk_overlap)
     if not chunk_candidates:
         raise AppError(status_code=400, code="DOCUMENT_CHUNK_EMPTY", message="文档分块结果为空")
 
@@ -929,7 +1103,11 @@ def _index_document(
     log_kind: Literal["parse", "reindex"] = "parse",
 ) -> dict[str, Any]:
     log_lines: list[dict[str, str]] = []
-    document.parse_log_json = None
+    log_flush_state: dict[str, int] = {"last_flush": 0}
+    document.parse_log_json = _build_parse_log_payload(log_kind, "running", log_lines)
+    db.commit()
+    ensure_db_connection(db)
+    db.refresh(document)
 
     def _progress(phase: str, *, current: int | None = None, total: int | None = None, message: str = "") -> None:
         check_cancelled(cancel_event)
@@ -937,12 +1115,28 @@ def _index_document(
             emit_progress(phase=phase, current=current, total=total, message=message)
         if message:
             _emit(message)
+        else:
+            _maybe_flush_running_parse_log(
+                db,
+                document,
+                kind=log_kind,
+                log_lines=log_lines,
+                flush_state=log_flush_state,
+                force=True,
+            )
 
     def _emit(msg: str) -> None:
         if len(log_lines) < MAX_PARSE_LOG_LINES:
             log_lines.append({"t": _utc_now_iso(), "text": msg})
         if emit:
             emit(msg)
+        _maybe_flush_running_parse_log(
+            db,
+            document,
+            kind=log_kind,
+            log_lines=log_lines,
+            flush_state=log_flush_state,
+        )
 
     try:
         check_cancelled(cancel_event)
@@ -1002,6 +1196,14 @@ def _index_document(
         if len(parsed.segments) != n_seg_pre:
             _emit(f"封面/文前短段已合并为 1 条分段：{n_seg_pre} → {len(parsed.segments)}")
 
+        meta = parsed.metadata if isinstance(parsed.metadata, dict) else {}
+        parser_backend = str(meta.get("parser_backend") or "")
+        if parser_backend in {"mineru", "opendataloader"}:
+            n_img_pre = len(parsed.segments)
+            parsed.segments = consolidate_mineru_image_segments(parsed.segments)
+            if len(parsed.segments) != n_img_pre:
+                _emit(f"图片 OCR 整理：{n_img_pre} → {len(parsed.segments)}（短提示并入正文、重复截图 OCR 已去重）")
+
         if parsed.parser_type == "pdf":
             _emit("PDF 解析完成，准备入库…")
         else:
@@ -1048,6 +1250,7 @@ def _index_document(
             fallback_overlap=document.chunk_overlap,
         )
         if _parsed_uses_prebuilt_table_chunks(parsed):
+            from app.core.chunking_engine import prepare_mineru_prebuilt_segments
             from app.core.document_parser import compact_table_segments_for_index
 
             compacted = compact_table_segments_for_index(parsed.segments)
@@ -1055,8 +1258,23 @@ def _index_document(
                 _emit(
                     f"Excel 表格分段 {len(parsed.segments)} → {len(compacted)}（合并过密行块，跳过通用二次切块）"
                 )
+            meta = parsed.metadata if isinstance(parsed.metadata, dict) else {}
+            parser_backend = str(meta.get("parser_backend") or "") or None
+            merge_budget = (
+                chunking_cfg.parent_child.child_max_length
+                if chunking_cfg.mode == "parent_child"
+                else chunking_cfg.general.max_length
+            )
+            compacted, merge_log = prepare_mineru_prebuilt_segments(
+                compacted,
+                merge_budget,
+                parser_type=str(parsed.parser_type or ""),
+                parser_backend=parser_backend,
+            )
+            if merge_log:
+                _emit(merge_log)
             else:
-                _emit("Excel 表格模式：解析阶段已分块，跳过通用二次切块")
+                _emit("结构化 PDF 分段：1:1 映射为索引块，跳过通用二次切块")
             chunk_candidates = segments_to_chunk_candidates(compacted)
         else:
             if chunking_cfg.mode == "parent_child":
@@ -1087,11 +1305,23 @@ def _index_document(
 
             n_seg_before = len(base_segments)
             if chunking_cfg.mode != "parent_child":
-                adapted_size, adapted_overlap = adapt_chunk_size_for_small_doc(base_segments, chunk_size, chunk_overlap)
-                if adapted_size != chunk_size:
-                    _emit(f"小文档自适应：chunk_size {chunk_size}→{adapted_size}, overlap {chunk_overlap}→{adapted_overlap}")
-                    chunk_size, chunk_overlap = adapted_size, adapted_overlap
+                from app.core.text_chunker import segment_has_atomic_blocks
+
+                if not segment_has_atomic_blocks(base_segments):
+                    adapted_size, adapted_overlap = adapt_chunk_size_for_small_doc(
+                        base_segments, chunk_size, chunk_overlap
+                    )
+                    if adapted_size != chunk_size:
+                        _emit(
+                            f"小文档自适应：chunk_size {chunk_size}→{adapted_size}, "
+                            f"overlap {chunk_overlap}→{adapted_overlap}"
+                        )
+                        chunk_size, chunk_overlap = adapted_size, adapted_overlap
                 base_segments = merge_adjacent_segments_by_budget(base_segments, chunk_size)
+                n_after_merge = len(base_segments)
+                base_segments = split_segments_at_cn_section_headings(base_segments)
+                if len(base_segments) != n_after_merge:
+                    _emit(f"节标题硬切：{n_after_merge} → {len(base_segments)}")
                 _emit(f"相邻段合并（字符预算={chunk_size}）：分段 {n_seg_before} → {len(base_segments)}，再按长度切块")
             else:
                 _emit("父子模式：跳过相邻段预算合并，保留子段边界（与父块内 C-1、C-2… 预览一致）")
@@ -1175,6 +1405,12 @@ def _index_document(
                     heading_path = None
                 keyword = candidate.enrichment_keyword_text or content
                 chunk_meta = _compact_chunk_metadata_for_storage(candidate.metadata, content=content)
+                if chunk_meta.get("block") == "image" and not chunk_meta.get("image_ocr_attached"):
+                    keyword = _slim_image_ocr_keyword_text(
+                        content,
+                        heading_path=heading_path,
+                        metadata=chunk_meta,
+                    )
                 if candidate.page_no is not None:
                     chunk_meta["page_no"] = int(candidate.page_no)
                 chunk = KnowledgeChunk(
@@ -1744,7 +1980,7 @@ def iter_document_process_sse_events(
     try:
         while True:
             if stop_event is not None and stop_event.is_set():
-                request_cancel(key)
+                # 客户端断开仅停止 SSE 推送，后台解析/索引线程继续执行
                 break
             try:
                 kind, payload = q.get(timeout=2.0)
@@ -1770,9 +2006,8 @@ def iter_document_process_sse_events(
                 yield f"data: {json.dumps({'type': 'error', 'code': 'INTERNAL', 'message': str(payload)}, ensure_ascii=False)}\n\n"
                 break
     finally:
-        if stop_event is not None and stop_event.is_set():
-            request_cancel(key)
-        thread.join(timeout=5)
+        # 不在 SSE 断开时取消 worker；用户显式「停止解析」走 cancel_document_process
+        pass
 
 
 def delete_document_asset(db: Session, *, space_id: int, kb_id: int, document_id: int) -> None:

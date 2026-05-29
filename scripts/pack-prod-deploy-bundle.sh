@@ -9,8 +9,8 @@ cd "$ROOT_DIR"
 tar -czvf "$OUT" \
   docker-compose.prod.yml \
   docker-compose.prod.registry.yml \
-  .env.deploy.example
+  .env.template
 
 echo ""
 echo "已生成: $OUT"
-echo "目标机解压后: cp .env.deploy.example .env && 编辑 .env && docker compose -f docker-compose.prod.yml -f docker-compose.prod.registry.yml pull"
+echo "目标机解压后: cp .env.template .env && 编辑 .env && docker compose -f docker-compose.prod.yml -f docker-compose.prod.registry.yml pull"

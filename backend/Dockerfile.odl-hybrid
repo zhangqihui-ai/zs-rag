@@ -1,0 +1,89 @@
+# OpenDataLoader Hybrid sidecar（扫描 PDF / 复杂表格 OCR）
+#
+# offline_deps 准备见 scripts/download-odl-hybrid-docling-models.sh
+#
+# 推荐构建（分层缓存，改 Dockerfile 后通常只重建模型层 ~1 分钟）：
+#   ./scripts/build-odl-hybrid.sh
+#   ./scripts/build-odl-hybrid.sh --models-only   # 仅重打模型层（最快）
+#
+# 手动：
+#   docker build -f backend/Dockerfile.odl-hybrid -t zs-rag-odl-hybrid:latest backend
+#   docker build --target base -f backend/Dockerfile.odl-hybrid -t zs-rag-odl-hybrid:base backend
+
+# ============== base：apt + pip（~5–8 分钟，仅首次或依赖变更时重建）==============
+FROM python:3.12-slim-bookworm AS base
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+    PIP_DEFAULT_TIMEOUT=600
+
+RUN set -eux; \
+    rm -f /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list; \
+    echo "deb https://mirrors.aliyun.com/debian bookworm main contrib non-free non-free-firmware" > /etc/apt/sources.list; \
+    echo "deb https://mirrors.aliyun.com/debian bookworm-updates main contrib non-free non-free-firmware" >> /etc/apt/sources.list; \
+    echo "deb https://mirrors.aliyun.com/debian-security bookworm-security main contrib non-free non-free-firmware" >> /etc/apt/sources.list; \
+    apt-get update && apt-get install -y --no-install-recommends \
+        default-jre-headless \
+        curl \
+        ca-certificates \
+        libxcb1 \
+        libx11-6 \
+        libxext6 \
+        libxrender1 \
+        libgl1 \
+        libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip \
+    && pip install "opendataloader-pdf[hybrid]" \
+    && python -c "import cv2; print('opencv', cv2.__version__)"
+
+# ============== runtime：离线模型 COPY + 安装（改 Dockerfile 通常只重建本段）==============
+FROM base AS runtime
+
+ENV EASYOCR_MODULE_PATH=/root/.EasyOCR \
+    DOCLING_ARTIFACTS_PATH=/root/.cache/docling-models \
+    HF_HUB_OFFLINE=1
+
+# 分开 COPY：只改 EasyOCR 脚本时不失效 Docling 层缓存
+COPY offline_deps/easyocr-models/ /tmp/easyocr-models/
+COPY offline_deps/docling-models/ /tmp/docling-models/
+
+# 单 RUN 合并模型安装，减少层数与 export 时间
+RUN set -eu; \
+    MODEL_DIR="${EASYOCR_MODULE_PATH}/model"; \
+    OUT="${DOCLING_ARTIFACTS_PATH}"; \
+    DOCLING_EASYOCR="${OUT}/EasyOcr"; \
+    LAYOUT="/tmp/docling-models/docling-project--docling-layout-heron"; \
+    TABLE="/tmp/docling-models/docling-project--docling-models"; \
+    mkdir -p "${MODEL_DIR}" "${OUT}"; \
+    if [ ! -f /tmp/easyocr-models/craft_mlt_25k.pth ] \
+       || [ ! -f /tmp/easyocr-models/zh_sim_g2.pth ] \
+       || [ ! -f /tmp/easyocr-models/english_g2.pth ]; then \
+        echo "ERROR: missing EasyOCR .pth in offline_deps/easyocr-models/" >&2; \
+        exit 1; \
+    fi; \
+    cp /tmp/easyocr-models/craft_mlt_25k.pth \
+       /tmp/easyocr-models/zh_sim_g2.pth \
+       /tmp/easyocr-models/english_g2.pth \
+       "${MODEL_DIR}/"; \
+    mkdir -p "${DOCLING_EASYOCR}"; \
+    cp "${MODEL_DIR}"/*.pth "${DOCLING_EASYOCR}/"; \
+    if [ ! -d "${LAYOUT}" ] || [ ! -d "${TABLE}" ]; then \
+        echo "ERROR: missing Docling models in offline_deps/docling-models/" >&2; \
+        exit 1; \
+    fi; \
+    cp -a /tmp/docling-models/. "${OUT}/"; \
+    du -sh "${MODEL_DIR}" "${DOCLING_EASYOCR}" "${LAYOUT}" "${TABLE}"; \
+    python3 -c "import os, easyocr; p=os.path.join(os.environ['DOCLING_ARTIFACTS_PATH'], 'EasyOcr'); easyocr.Reader(['ch_sim','en'], gpu=False, download_enabled=False, model_storage_directory=p, verbose=False); print('EasyOCR offline OK:', p)"
+
+WORKDIR /srv
+EXPOSE 5002
+
+HEALTHCHECK --interval=30s --timeout=10s --retries=5 --start-period=120s \
+    CMD curl -fsS http://localhost:5002/health >/dev/null || curl -fsS http://localhost:5002/ >/dev/null || exit 1
+
+CMD ["opendataloader-pdf-hybrid", "--host", "0.0.0.0", "--port", "5002", "--force-ocr", "--ocr-lang", "ch_sim,en"]

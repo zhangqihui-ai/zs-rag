@@ -44,6 +44,16 @@ venv.bak/
 htmlcov/
 .tox/
 .nox/
+tests/
+
+# 构建上下文瘦身（deps 阶段仍用 offline_deps/；下列目录不打进 COPY 层）
+storage/
+# mineru_models_bundle 仅用于 Dockerfile.mineru-cpu-offline，经 --build-context 传入，此处排除以减小 backend 构建上下文
+mineru_models_bundle/
+# MinerU 离线镜像需要的脚本仍须打进 context
+scripts/**
+!scripts/generate-mineru-local-config.sh
+!scripts/mineru-api-entrypoint.sh
 
 # Misc
 .git
@@ -53,3 +63,5 @@ htmlcov/
 *.md
 Makefile
 docker-compose*.yml
+Dockerfile*
+!Dockerfile.local

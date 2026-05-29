@@ -20,7 +20,10 @@
       </div>
 
       <template v-else-if="knowledgeBase">
-        <div class="knowledge-detail-layout">
+        <div
+          class="knowledge-detail-layout"
+          :class="{ 'knowledge-detail-layout--settings': activeTab === 'settings' }"
+        >
           <aside class="detail-sidebar">
             <nav class="detail-sidebar-nav surface-card" aria-label="知识库功能导航">
               <button
@@ -143,6 +146,7 @@
               </EmptyState>
 
               <template v-else>
+                <div class="document-table-wrap" :style="documentTableStyle">
                 <div class="document-table document-table-head">
                   <span class="document-col-check">
                     <input
@@ -155,12 +159,23 @@
                       @change="toggleSelectAllOnPage"
                     />
                   </span>
-                  <span>名称</span>
+                  <span class="document-col-name">
+                    名称
+                    <span
+                      class="col-resize-handle"
+                      role="separator"
+                      aria-orientation="vertical"
+                      aria-label="拖动调整名称列宽，双击恢复默认"
+                      title="拖动调整列宽，双击恢复默认"
+                      @mousedown.prevent="startDocumentNameColResize"
+                      @dblclick.prevent="resetDocumentNameColWidth"
+                    />
+                  </span>
                   <span>上传时间</span>
-                  <span>来源</span>
-                  <span>状态</span>
-                  <span>分块数</span>
-                  <span>解析器</span>
+                  <span class="document-col-compact">来源</span>
+                  <span class="document-col-status">状态</span>
+                  <span class="document-col-compact">分块数</span>
+                  <span class="document-col-compact">解析器</span>
                   <span class="table-actions-head">动作</span>
                 </div>
 
@@ -185,18 +200,20 @@
                       @keydown.enter.prevent="goToDocumentDetail(document)"
                       @keydown.space.prevent="goToDocumentDetail(document)"
                     >
-                      <strong>{{ document.document_name }}</strong>
-                      <p v-if="shouldShowDocumentFileSubtitle(document)">{{ document.file_name }}</p>
+                      <DocumentFileIcon :ext="document.file_ext || document.parser_type" />
+                      <div class="document-name-wrap">
+                        <span class="document-name">{{ documentDisplayName(document) }}</span>
+                      </div>
                     </div>
                     <span class="document-meta-cell">{{ formatDate(document.created_at) }}</span>
-                    <span class="document-meta-cell">{{ formatSource(document) }}</span>
-                    <span>
+                    <span class="document-meta-cell document-col-compact">{{ formatSource(document) }}</span>
+                    <span class="document-col-status">
                       <span :class="['status-pill', statusToneMap[getDocumentDisplayStatus(document)] || 'info']">
                         {{ statusLabelMap[getDocumentDisplayStatus(document)] || getDocumentDisplayStatus(document) }}
                       </span>
                     </span>
-                    <span class="document-meta-cell">{{ document.chunk_count }}</span>
-                    <span class="document-meta-cell">{{ document.parser_type.toUpperCase() }}</span>
+                    <span class="document-meta-cell document-col-compact">{{ document.chunk_count }}</span>
+                    <span class="document-meta-cell document-col-compact">{{ documentParserDisplay(document, knowledgeBase) }}</span>
                     <div class="row-actions document-row-actions">
                       <DocumentParseProgress
                         v-if="parseTasks.isRunning(document.id)"
@@ -326,6 +343,7 @@
                     </div>
                   </article>
                 </div>
+                </div>
 
                 <div v-if="documentsTotal > 0" class="documents-pagination">
                   <span class="documents-pagination-meta">共 {{ documentsTotal }} 条</span>
@@ -362,13 +380,6 @@
             </section>
 
             <section v-else-if="activeTab === 'retrieval'" class="surface-card content-card retrieval-card">
-              <div class="section-heading">
-                <div>
-                  <h3>检索测试</h3>
-                  <p>快速验证当前知识库的召回效果；修改检索参数将自动保存为知识库默认，对问答与后续检索生效。</p>
-                </div>
-              </div>
-
               <div class="retrieval-layout">
                 <form class="retrieval-form retrieval-panel retrieval-panel--left" @submit.prevent="submitSearch">
                   <div class="retrieval-query-block">
@@ -432,30 +443,11 @@
                       </template>
                     </EmptyState>
                     <div v-else class="search-result-list">
-                      <article
-                        v-for="result in searchResults.results"
-                        :key="result.chunk_uid"
-                        class="search-result-card"
-                      >
-                        <div class="search-result-header">
-                          <strong>{{ result.document_name }}</strong>
-                          <span class="chip">Score {{ formatScore(result.score) }}</span>
-                        </div>
-                        <p>{{ result.content }}</p>
-                        <div class="search-result-meta-row">
-                          <span>Chunk #{{ result.chunk_index }}</span>
-                          <span v-if="result.citation.page_no">页码 {{ result.citation.page_no }}</span>
-                          <span
-                            v-if="
-                              searchResults?.mode === 'hybrid' &&
-                              (result.vector_score != null || result.keyword_score != null)
-                            "
-                          >
-                            向量 {{ formatScore(result.vector_score ?? 0) }} · 全文
-                            {{ formatScore(result.keyword_score ?? 0) }}
-                          </span>
-                        </div>
-                      </article>
+                      <RetrievalSearchResultList
+                        :results="searchResults.results"
+                        :mode="searchResults.mode"
+                        :kb-id="kbId"
+                      />
                     </div>
                   </div>
                 </div>
@@ -555,7 +547,10 @@
               </div>
             </section>
 
-            <section v-else class="surface-card content-card">
+            <section
+              v-else
+              :class="['surface-card', 'content-card', { 'kb-settings-card--panel-open': parserSettingsExpanded }]"
+            >
               <div class="section-heading">
                 <div>
                   <h3>知识库配置</h3>
@@ -633,6 +628,7 @@
                 v-if="knowledgeBase"
                 :knowledge-base="knowledgeBase"
                 @saved="onKbSettingsSaved"
+                @expanded-change="parserSettingsExpanded = $event"
               />
 
               <EnrichmentSettingsPanel
@@ -864,6 +860,7 @@ import AppIcon from '../components/AppIcon.vue'
 import ChunkingSettingsPanel from '../components/knowledge-base/ChunkingSettingsPanel.vue'
 import EnrichmentSettingsPanel from '../components/knowledge-base/EnrichmentSettingsPanel.vue'
 import ParserSettingsPanel from '../components/knowledge-base/ParserSettingsPanel.vue'
+import DocumentFileIcon from '../components/DocumentFileIcon.vue'
 import DocumentParseProgress from '../components/knowledge-base/DocumentParseProgress.vue'
 import RetrievalSettingsPanel from '../components/knowledge-base/RetrievalSettingsPanel.vue'
 import RetrievalConfigForm, {
@@ -875,16 +872,20 @@ import {
   retrievalFormFromKnowledgeBase,
   validateRetrievalForm,
 } from '../components/knowledge-base/retrieval-form'
+import RetrievalSearchResultList from '../components/knowledge-base/RetrievalSearchResultList.vue'
 import EmptyState from '../components/EmptyState.vue'
 import GraphVisualizationPanel from '../components/graph/GraphVisualizationPanel.vue'
 import { useDocumentParseTasks } from '../composables/useDocumentParseTasks'
+import { useLayoutPageContext } from '../composables/useLayoutPageContext'
 import ViewInGraphLink from '../components/graph/ViewInGraphLink.vue'
 import Layout from '../components/Layout.vue'
 import { graphSearch, getGraphErrorMessage, type GraphSearchResponse, type LightRagQueryMode } from '../api/graph-knowledge-base'
 import { GRAPH_ENTITY_QUERY_KEY, GRAPH_TAB_QUERY_KEY } from '../lib/graphNavigation'
+import { documentParserDisplay } from '../lib/parserDisplay'
 
 const route = useRoute()
 const router = useRouter()
+const { setPageContext, clearPageContext } = useLayoutPageContext()
 
 const statusLabelMap: Record<string, string> = {
   active: '运行中',
@@ -1059,6 +1060,9 @@ const activeParseLogLines = computed(() => {
 const activeParseLogPhase = computed(() => {
   const task = activeParseLogTask.value
   if (task) {
+    if (task.status === 'running') {
+      return 'running'
+    }
     return task.status
   }
   return parseLogPhase.value
@@ -1072,6 +1076,7 @@ const llmModels = ref<ModelItem[]>([])
 const llmModelsLoading = ref(false)
 const savingExtractLlm = ref(false)
 const defaultLlmModel = ref<DefaultModelOption | null>(null)
+const parserSettingsExpanded = ref(false)
 
 function onKbSettingsSaved(updated: KnowledgeBase) {
   knowledgeBase.value = updated
@@ -1105,12 +1110,15 @@ watch(activeParseLogLines, () => {
 })
 
 onUnmounted(() => {
+  clearPageContext()
   if (toastClearTimer != null) {
     window.clearTimeout(toastClearTimer)
   }
   if (documentKeywordDebounceTimer != null) {
     window.clearTimeout(documentKeywordDebounceTimer)
   }
+  stopDocumentNameColResize()
+  stopParseLogPoll()
   for (const documentId of [...documentStatusPollTimers.keys()]) {
     stopDocumentStatusPoll(documentId)
   }
@@ -1297,18 +1305,18 @@ function applyLocalProcessingOverlay(document: KnowledgeDocument): KnowledgeDocu
   if (!parseTasks.isRunning(document.id)) {
     return document
   }
-  if (document.status === 'graph_indexed' || document.status === 'indexed') {
-    return document
-  }
-  if (document.status === 'graph_indexing' || document.status === 'parsing' || document.status === 'indexing') {
-    return document
-  }
   const task = parseTasks.getTask(document.id)
   if (task?.mode === 'reindex') {
     return {
       ...document,
       status: isLightragKb.value ? 'graph_indexing' : 'indexing',
     }
+  }
+  if (document.status === 'graph_indexed' || document.status === 'indexed') {
+    return document
+  }
+  if (document.status === 'graph_indexing' || document.status === 'parsing' || document.status === 'indexing') {
+    return document
   }
   if (document.status === 'uploaded' || document.status === 'failed' || document.status === 'graph_failed') {
     return { ...document, status: 'parsing' }
@@ -1361,10 +1369,46 @@ function stopDocumentStatusPoll(documentId: number) {
 }
 
 function pruneProcessingDocumentIds() {
-  for (const [documentId, task] of parseTasks.tasks.entries()) {
-    if (!documents.value.some((d) => d.id === documentId) && task.status !== 'running') {
-      parseTasks.tasks.delete(documentId)
+  const id = kbId.value
+  if (!id || Number.isNaN(id)) {
+    return
+  }
+  for (const [key, task] of parseTasks.tasks.entries()) {
+    if (task.kbId !== id) {
+      continue
     }
+    if (!documents.value.some((d) => d.id === task.documentId) && task.status !== 'running') {
+      parseTasks.tasks.delete(key)
+    }
+  }
+}
+
+async function reconcileProcessingTasks() {
+  if (!kbId.value || Number.isNaN(kbId.value)) {
+    return
+  }
+  for (const documentId of parseTasks.runningDocumentIds()) {
+    startDocumentStatusPoll(documentId)
+  }
+  for (const doc of documents.value) {
+    if (parseTasks.isRunning(doc.id)) {
+      continue
+    }
+    if (!isDocumentProcessingOnServer(doc)) {
+      continue
+    }
+    const mode: 'parse' | 'reindex' =
+      doc.status === 'indexing' && (doc.chunk_count ?? 0) > 0 ? 'reindex' : 'parse'
+    await parseTasks.resumeWatch(doc.id, {
+      status: doc.status,
+      mode,
+      onTerminal: (snapshot) => {
+        endDocumentStreamProcessing(doc.id, snapshot)
+        persistParseLogSnapshot(doc.id)
+        void refreshDocuments()
+      },
+    })
+    startDocumentStatusPoll(doc.id)
   }
 }
 
@@ -1496,28 +1540,101 @@ function formatSource(document: KnowledgeDocument) {
   return document.source_type.toUpperCase()
 }
 
-/** file_name 相对路径的最后一段去掉扩展名，与 document_name 对比 */
-function fileStemFromUploadName(fileName: string) {
-  const normalized = fileName.replace(/\\/g, '/').trim()
-  const base = normalized.split('/').pop() ?? normalized
-  const dot = base.lastIndexOf('.')
-  return dot > 0 ? base.slice(0, dot) : base
+const DOC_NAME_COL_WIDTH_KEY = 'kb-document-name-col-width'
+const DOC_NAME_COL_MIN = 140
+const DOC_NAME_COL_MAX = 960
+
+function readStoredDocumentNameColWidth(): number | null {
+  try {
+    const raw = localStorage.getItem(DOC_NAME_COL_WIDTH_KEY)
+    if (!raw) {
+      return null
+    }
+    const width = Number(raw)
+    if (!Number.isFinite(width)) {
+      return null
+    }
+    return Math.min(DOC_NAME_COL_MAX, Math.max(DOC_NAME_COL_MIN, width))
+  } catch {
+    return null
+  }
 }
 
-/**
- * 第二行展示完整 file_name：仅在相对路径、或与标题明显不同时显示，避免与 document_name 重复占高。
- */
-function shouldShowDocumentFileSubtitle(document: KnowledgeDocument) {
+const documentNameColWidth = ref<number | null>(readStoredDocumentNameColWidth())
+const documentTableStyle = computed(() => {
+  if (documentNameColWidth.value == null) {
+    return undefined
+  }
+  return { '--doc-name-col-width': `${documentNameColWidth.value}px` }
+})
+
+let documentNameColResizeStartX = 0
+let documentNameColResizeStartWidth = 0
+let documentNameColResizeCleanup: (() => void) | null = null
+
+function resetDocumentNameColWidth() {
+  documentNameColWidth.value = null
+  try {
+    localStorage.removeItem(DOC_NAME_COL_WIDTH_KEY)
+  } catch {
+    /* ignore */
+  }
+}
+
+function stopDocumentNameColResize() {
+  documentNameColResizeCleanup?.()
+  documentNameColResizeCleanup = null
+}
+
+function startDocumentNameColResize(event: MouseEvent) {
+  stopDocumentNameColResize()
+
+  const header = (event.currentTarget as HTMLElement).closest('.document-col-name')
+  const measuredWidth = header?.getBoundingClientRect().width ?? DOC_NAME_COL_MIN
+  documentNameColResizeStartX = event.clientX
+  documentNameColResizeStartWidth = documentNameColWidth.value ?? measuredWidth
+
+  const onMove = (moveEvent: MouseEvent) => {
+    const delta = moveEvent.clientX - documentNameColResizeStartX
+    const next = Math.min(
+      DOC_NAME_COL_MAX,
+      Math.max(DOC_NAME_COL_MIN, documentNameColResizeStartWidth + delta),
+    )
+    documentNameColWidth.value = next
+  }
+
+  const onUp = () => {
+    document.body.classList.remove('col-resize-active')
+    window.removeEventListener('mousemove', onMove)
+    window.removeEventListener('mouseup', onUp)
+    documentNameColResizeCleanup = null
+    if (documentNameColWidth.value != null) {
+      try {
+        localStorage.setItem(DOC_NAME_COL_WIDTH_KEY, String(documentNameColWidth.value))
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  document.body.classList.add('col-resize-active')
+  window.addEventListener('mousemove', onMove)
+  window.addEventListener('mouseup', onUp)
+  documentNameColResizeCleanup = () => {
+    document.body.classList.remove('col-resize-active')
+    window.removeEventListener('mousemove', onMove)
+    window.removeEventListener('mouseup', onUp)
+  }
+}
+
+/** 列表主标题：优先展示带扩展名的文件名，更易辨认类型。 */
+function documentDisplayName(document: KnowledgeDocument) {
   const fn = document.file_name?.trim() ?? ''
-  if (!fn) {
-    return false
+  if (fn) {
+    const normalized = fn.replace(/\\/g, '/')
+    return normalized.split('/').pop() ?? fn
   }
-  const dn = document.document_name?.trim() ?? ''
-  if (fn.includes('/') || fn.includes('\\')) {
-    return true
-  }
-  const stem = fileStemFromUploadName(fn)
-  return stem !== dn
+  return document.document_name?.trim() || '未命名文档'
 }
 
 function openNativeFilePicker() {
@@ -1595,6 +1712,7 @@ async function fetchDocumentPage(options?: { withLoading?: boolean }) {
     documentsTotal.value = data.total
     documents.value = data.items.map(applyLocalProcessingOverlay)
     pruneProcessingDocumentIds()
+    await reconcileProcessingTasks()
   } catch (value) {
     const hasActiveParse = parseTasks.runningDocumentIds().length > 0
     if (withLoading || !hasActiveParse) {
@@ -1815,6 +1933,7 @@ async function loadPage() {
   }
   loading.value = true
   error.value = ''
+  clearPageContext()
   selectedDocumentIds.value = []
   try {
     documentsPage.value = 1
@@ -1894,7 +2013,68 @@ function goToDocumentDetail(document: KnowledgeDocument) {
 }
 
 function closeParseLogModal() {
+  stopParseLogPoll()
   showParseLogModal.value = false
+}
+
+const parseLogPollTimer = ref<number | null>(null)
+
+function stopParseLogPoll() {
+  if (parseLogPollTimer.value != null) {
+    window.clearInterval(parseLogPollTimer.value)
+    parseLogPollTimer.value = null
+  }
+}
+
+function formatParseLogTimeDisplay(t: string): string {
+  if (!t) {
+    return ''
+  }
+  const d = new Date(t)
+  if (!Number.isNaN(d.getTime())) {
+    return d.toLocaleTimeString('zh-CN', { hour12: false })
+  }
+  return t
+}
+
+function applyRemoteParseLog(remote: Awaited<ReturnType<typeof knowledgeBaseApi.getDocumentParseLog>>) {
+  if (!remote.lines?.length) {
+    return
+  }
+  parseLogLines.value = remote.lines.map((line) => ({
+    t: formatParseLogTimeDisplay(line.t),
+    text: line.text,
+  }))
+  if (remote.kind === 'reindex' || remote.kind === 'parse') {
+    parseLogKind.value = remote.kind
+  }
+  if (remote.phase === 'error') {
+    parseLogPhase.value = 'error'
+  } else if (remote.phase === 'success') {
+    parseLogPhase.value = 'success'
+  } else if (remote.phase === 'running') {
+    parseLogPhase.value = 'running'
+  }
+}
+
+async function refreshParseLogFromServer(documentId: number) {
+  if (!kbId.value || Number.isNaN(kbId.value)) {
+    return
+  }
+  try {
+    const remote = await knowledgeBaseApi.getDocumentParseLog(kbId.value, documentId)
+    applyRemoteParseLog(remote)
+    await parseTasks.syncLogsFromServer(documentId)
+  } catch {
+    /* 轮询时忽略瞬时失败 */
+  }
+}
+
+function startParseLogPoll(documentId: number) {
+  stopParseLogPoll()
+  parseLogPollTimer.value = window.setInterval(() => {
+    void refreshParseLogFromServer(documentId)
+  }, 3000)
 }
 
 type ParseLogSnapshot = {
@@ -1959,8 +2139,8 @@ function parseLogHasStoredSnapshot(documentId: number) {
 }
 
 function parseLogVisibleFor(document: KnowledgeDocument) {
-  if (parseTasks.isRunning(document.id)) {
-    return false
+  if (isDocumentProcessingOnServer(document)) {
+    return true
   }
   const task = parseTasks.getTask(document.id)
   if (task && task.logs.length > 0) {
@@ -2004,30 +2184,22 @@ async function openParseLogModal(document: KnowledgeDocument) {
 
   showParseLogModal.value = true
 
-  const skipServerFetch = parseTasks.isRunning(document.id)
-  if (!skipServerFetch && kbId.value && !Number.isNaN(kbId.value)) {
-    parseLogLoading.value = true
-    try {
-      const remote = await knowledgeBaseApi.getDocumentParseLog(kbId.value, document.id)
-      if (parseLogModalOpenedFor.value !== targetId) {
-        return
-      }
-      if (remote.lines && remote.lines.length > 0) {
-        parseLogLines.value = remote.lines.map((line) => ({
-          t: line.t || '',
-          text: line.text || '',
-        }))
-        parseLogKind.value = remote.kind === 'reindex' ? 'reindex' : 'parse'
-        parseLogPhase.value = remote.phase === 'error' ? 'error' : 'success'
-        parseLogDocumentId.value = document.id
-      }
-    } catch (value) {
-      showNotice(getKnowledgeBaseErrorMessage(value, '加载解析日志失败'), 'error')
-    } finally {
-      parseLogLoading.value = false
+  parseLogLoading.value = true
+  try {
+    await refreshParseLogFromServer(document.id)
+    if (parseLogModalOpenedFor.value !== targetId) {
+      return
     }
-  } else {
+  } catch (value) {
+    showNotice(getKnowledgeBaseErrorMessage(value, '加载解析日志失败'), 'error')
+  } finally {
     parseLogLoading.value = false
+  }
+
+  if (parseTasks.isRunning(document.id) || isDocumentProcessingOnServer(document)) {
+    startParseLogPoll(document.id)
+  } else {
+    stopParseLogPoll()
   }
 
   nextTick(() => {
@@ -2468,6 +2640,7 @@ async function submitSearch() {
       mode: f.mode,
       top_k: f.top_k,
       score_threshold: f.score_threshold_enabled ? f.score_threshold : null,
+      include_image_ocr: f.include_image_ocr,
     }
     if (f.mode === 'hybrid' && f.hybrid_strategy === 'weight') {
       payload.vector_weight = f.vector_weight
@@ -2480,6 +2653,17 @@ async function submitSearch() {
     searching.value = false
   }
 }
+
+watch(
+  () => knowledgeBase.value?.name,
+  (name) => {
+    if (!name?.trim()) {
+      return
+    }
+    setPageContext({ title: name, breadcrumbTail: name })
+  },
+  { immediate: true },
+)
 
 watch(
   () => route.params.id,
@@ -2579,6 +2763,21 @@ watch(openChunkingMenuForId, (value) => {
   margin-top: 20px;
   padding-top: 18px;
   border-top: 1px solid var(--border-color);
+}
+
+.kb-settings-card--panel-open {
+  overflow: visible;
+  position: relative;
+  z-index: 4;
+}
+
+/* 配置页多个可折叠面板展开时，避免被父级裁剪或下层块遮挡 */
+.knowledge-detail-layout--settings .detail-main {
+  overflow: visible;
+}
+
+.knowledge-detail-layout--settings .content-card {
+  overflow: visible;
 }
 
 .custom-select-wrap {
@@ -2830,14 +3029,12 @@ watch(openChunkingMenuForId, (value) => {
   gap: 16px;
 }
 
-.document-main-cell strong,
 .activity-card strong,
 .search-result-card strong,
 .error-panel h3 {
   color: var(--text-primary);
 }
 
-.document-main-cell p,
 .search-result-card p,
 .activity-card p,
 .error-panel p,
@@ -2886,24 +3083,96 @@ watch(openChunkingMenuForId, (value) => {
   min-width: min(320px, 100%);
 }
 
+.document-table-wrap {
+  min-width: 0;
+}
+
 .document-table-head,
 .document-row {
   display: grid;
-  grid-template-columns: 36px minmax(140px, 1.6fr) minmax(108px, 0.9fr) 0.6fr 0.72fr 0.5fr 0.5fr minmax(272px, 1.25fr);
-  gap: 8px 10px;
+  grid-template-columns:
+    36px var(--doc-name-col-width, minmax(140px, 1.6fr)) minmax(108px, 0.9fr) minmax(42px, 0.3fr)
+    minmax(68px, 0.48fr) minmax(36px, 0.24fr) minmax(88px, 0.66fr) minmax(300px, 1.75fr);
+  gap: 8px 8px;
   align-items: center;
 }
 
+.document-col-name {
+  position: relative;
+  min-width: 0;
+  padding-right: 6px;
+}
+
+.col-resize-handle {
+  position: absolute;
+  top: -6px;
+  right: -8px;
+  bottom: -6px;
+  width: 12px;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 2;
+}
+
+.col-resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  right: 5px;
+  bottom: 2px;
+  width: 2px;
+  border-radius: 1px;
+  background: transparent;
+  transition: background 0.15s ease;
+}
+
+.document-col-name:hover .col-resize-handle::after,
+.col-resize-handle:hover::after {
+  background: color-mix(in srgb, var(--brand-primary) 42%, var(--border-color));
+}
+
+:global(body.col-resize-active),
+:global(body.col-resize-active *) {
+  cursor: col-resize !important;
+  user-select: none;
+}
+
 .document-table-head {
-  padding: 0 12px 8px;
-  font-weight: 700;
-  font-size: 0.8rem;
+  padding: 0 14px 10px;
+  font-weight: 500;
+  font-size: 0.8125rem;
+  color: var(--text-tertiary);
+  letter-spacing: 0.02em;
   border-bottom: 1px solid var(--border-color);
+}
+
+.table-actions-head {
+  text-align: center;
+  justify-self: center;
+}
+
+.document-col-compact {
+  min-width: 0;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.document-col-status {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-width: 0;
 }
 
 .document-table-body {
   display: grid;
-  gap: 8px;
+  gap: 0;
+  border: 1px solid color-mix(in srgb, var(--border-color) 88%, transparent);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bg-primary);
 }
 
 .documents-pagination {
@@ -2953,11 +3222,21 @@ watch(openChunkingMenuForId, (value) => {
 
 .document-row {
   position: relative;
-  padding: 8px 12px;
-  border: 1px solid var(--border-color);
-  border-radius: 10px;
-  background: var(--bg-tertiary);
+  padding: 13px 14px;
+  border: none;
+  border-radius: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
+  background: transparent;
   box-shadow: none;
+  transition: background 0.15s ease;
+}
+
+.document-row:last-child {
+  border-bottom: none;
+}
+
+.document-row:hover {
+  background: color-mix(in srgb, var(--bg-secondary) 65%, var(--bg-primary));
 }
 
 .doc-checkbox {
@@ -2983,32 +3262,48 @@ watch(openChunkingMenuForId, (value) => {
 }
 
 .document-main-cell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   min-width: 0;
 }
 
-.document-main-cell strong,
-.document-main-cell p {
+.document-name-wrap {
+  min-width: 0;
+  flex: 1;
+}
+
+.document-name {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 0.875rem;
+  font-weight: 400;
+  line-height: 1.5;
+  letter-spacing: 0.01em;
+  color: color-mix(in srgb, var(--text-primary) 88%, var(--text-secondary));
 }
 
 .doc-preview-trigger {
   cursor: pointer;
-  border-radius: 8px;
-  padding: 3px 6px;
-  margin: -3px -6px;
+  border-radius: 6px;
+  padding: 2px 4px;
+  margin: -2px -4px;
   outline: none;
-  transition: background 0.15s ease, opacity 0.15s ease;
+  transition: opacity 0.15s ease;
 }
 
 .doc-preview-trigger:hover {
-  background: var(--bg-secondary);
+  background: transparent;
+}
+
+.doc-preview-trigger:hover .document-name {
+  color: var(--text-primary);
 }
 
 .doc-preview-trigger:focus-visible {
-  box-shadow: 0 0 0 2px var(--brand-primary);
+  box-shadow: 0 0 0 2px var(--brand-primary-light);
 }
 
 .doc-preview-loading {
@@ -3016,7 +3311,6 @@ watch(openChunkingMenuForId, (value) => {
   opacity: 0.65;
 }
 
-.document-main-cell p,
 .selected-file-card p,
 .search-result-card p,
 .activity-message,
@@ -3035,11 +3329,12 @@ watch(openChunkingMenuForId, (value) => {
 }
 
 .document-row .row-actions.document-row-actions {
-  display: inline-flex;
-  justify-content: flex-end;
+  display: flex;
+  justify-content: center;
   flex-wrap: nowrap;
-  gap: 5px;
+  gap: 6px;
   align-items: center;
+  width: 100%;
   min-width: 0;
   white-space: nowrap;
 }
@@ -3054,7 +3349,8 @@ watch(openChunkingMenuForId, (value) => {
 }
 
 .document-row .row-actions.document-row-actions .doc-parse-progress {
-  flex: 0 1 auto;
+  flex: 0 0 auto;
+  min-width: 176px;
 }
 
 .document-row .row-actions.document-row-actions .parse-log-dot-btn {
@@ -3065,21 +3361,16 @@ watch(openChunkingMenuForId, (value) => {
   flex-shrink: 0;
 }
 
-.document-row .document-main-cell strong {
-  font-size: 0.88rem;
-  font-weight: 600;
-  line-height: 1.25;
-}
-
-.document-row .document-main-cell p {
-  margin: 1px 0 0;
-  line-height: 1.3;
-  font-size: 0.75rem;
+.document-row .document-name {
+  font-size: 0.875rem;
+  font-weight: 400;
 }
 
 .document-row .document-meta-cell {
-  font-size: 0.76rem;
-  line-height: 1.3;
+  font-size: 0.8125rem;
+  font-weight: 400;
+  line-height: 1.45;
+  color: var(--text-secondary);
 }
 
 .document-row .status-pill {
@@ -3650,8 +3941,10 @@ watch(openChunkingMenuForId, (value) => {
 
   .document-table-head,
   .document-row {
-    grid-template-columns: 34px minmax(100px, 1.35fr) minmax(88px, 0.8fr) 0.58fr 0.68fr 0.48fr 0.48fr minmax(240px, 1.15fr);
-    gap: 6px 8px;
+    grid-template-columns:
+      34px var(--doc-name-col-width, minmax(100px, 1.35fr)) minmax(88px, 0.8fr) minmax(38px, 0.28fr)
+      minmax(64px, 0.46fr) minmax(32px, 0.22fr) minmax(80px, 0.6fr) minmax(268px, 1.62fr);
+    gap: 6px 6px;
   }
 
   .document-row {
@@ -3692,7 +3985,7 @@ watch(openChunkingMenuForId, (value) => {
     flex-direction: row;
     flex-wrap: wrap;
     align-items: center;
-    justify-content: flex-start;
+    justify-content: center;
   }
 
   .error-panel,

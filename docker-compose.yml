@@ -171,19 +171,31 @@ services:
       NEO4J_URI: bolt://neo4j:7687
       NEO4J_USERNAME: neo4j
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:-neo4jpassword}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
       # MinerU（PDF/图片解析）。默认关闭；启用时务必配合 --profile mineru 拉起 mineru 服务
       MINERU_ENABLED: ${MINERU_ENABLED:-false}
-      MINERU_BASE_URL: ${MINERU_BASE_URL:-http://mineru:8000}
+      MINERU_BASE_URL: ${MINERU_BASE_URL:-http://mineru-cpu:8000}
       MINERU_BACKEND: ${MINERU_BACKEND:-pipeline}
       MINERU_LANG: ${MINERU_LANG:-ch}
       MINERU_TIMEOUT: ${MINERU_TIMEOUT:-300}
-      MINERU_FORMATS: ${MINERU_FORMATS:-pdf,png,jpg,jpeg,bmp,tif,tiff,webp}
+      MINERU_FORMATS: ${MINERU_FORMATS:-pdf,png,jpg,jpeg,bmp,tif,tiff,webp,docx,xlsx,xlsm,xls,csv,md,txt}
       # OpenDataLoader PDF（默认 PDF 引擎；进程内 Python SDK + JVM，无需 HTTP sidecar）
       ODL_ENABLED: ${ODL_ENABLED:-true}
       ODL_DEFAULT_PARSER: ${ODL_DEFAULT_PARSER:-opendataloader}
       ODL_HYBRID: ${ODL_HYBRID:-false}
       ODL_HYBRID_URL: ${ODL_HYBRID_URL:-http://opendataloader-hybrid:5002}
       ODL_TIMEOUT: ${ODL_TIMEOUT:-120}
+      # 宿主机暴露端口（供系统设置「服务组件状态」判断是否可浏览器访问）
+      POSTGRES_EXPOSED_PORT: ${POSTGRES_PORT:-5432}
+      MILVUS_EXPOSED_PORT: ${MILVUS_PORT:-19530}
+      MILVUS_WEB_EXPOSED_PORT: 9091
+      MINIO_CONSOLE_EXPOSED_PORT: 9001
+      OPENSEARCH_EXPOSED_PORT: ${OPENSEARCH_PORT:-9200}
+      NEO4J_HTTP_EXPOSED_PORT: ${NEO4J_HTTP_PORT:-7474}
+      BACKEND_EXPOSED_PORT: ${BACKEND_PORT:-8000}
+      MINERU_EXPOSED_PORT: ${MINERU_PORT:-8001}
+      ODL_HYBRID_EXPOSED_PORT: ${ODL_HYBRID_PORT:-5002}
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     volumes:
@@ -204,25 +216,23 @@ services:
       - zs-rag-network
     restart: unless-stopped
 
-  # ============== MinerU Sidecar (PDF / 图片解析；按 profile 启用) ==============
-  # 拉起方式：docker compose --profile mineru up -d mineru
-  # 同时在 .env 中把 MINERU_ENABLED=true，backend 会自动走 MinerU；失败会降级 pypdf
-  mineru:
-    profiles: ["mineru"]
+  # ============== MinerU CPU（pipeline；profile mineru / mineru-cpu）==============
+  # .env：MINERU_ENABLED=true，MINERU_BASE_URL=http://mineru-cpu:8000（或 http://mineru:8000 + offline 覆盖别名）
+  # 与 115 一致用 cpu-offline 镜像：加 -f docker-compose.mineru-offline.yml，见该文件说明
+  mineru-cpu:
+    profiles: ["mineru", "mineru-cpu"]
     build:
       context: ./backend
       dockerfile: Dockerfile.mineru-cpu
-    image: ${MINERU_IMAGE:-zs-rag-mineru:cpu}
-    container_name: zs-rag-mineru
+    image: ${MINERU_CPU_IMAGE:-zs-rag-mineru:cpu}
+    container_name: zs-rag-mineru-cpu
     environment:
       MINERU_MODEL_SOURCE: ${MINERU_MODEL_SOURCE:-modelscope}
     volumes:
       - mineru_models:/models
-    # 如需 GPU VLM 模式：用官方镜像 mineru:latest 并加 deploy.resources + MINERU_BACKEND=vlm-vllm-engine
     ports:
       - "${MINERU_PORT:-8001}:8000"
     healthcheck:
-      # 首次启动会下载模型（~数 GB），start_period 放宽到 10 分钟
       test: ["CMD-SHELL", "curl -fsS http://localhost:8000/docs >/dev/null || exit 1"]
       interval: 30s
       timeout: 10s
@@ -232,21 +242,59 @@ services:
       - zs-rag-network
     restart: unless-stopped
 
+  # ============== MinerU GPU（VLM + vLLM；profile mineru-gpu，需 NVIDIA T4+）======
+  # .env：MINERU_ENABLED=true，MINERU_BASE_URL=http://mineru-gpu:8000，MINERU_BACKEND=vlm-vllm-engine
+  # 拉起：docker compose --profile mineru-gpu up -d mineru-gpu
+  mineru-gpu:
+    profiles: ["mineru-gpu"]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.mineru-gpu
+      args:
+        VLLM_BASE_IMAGE: ${MINERU_VLLM_BASE_IMAGE:-vllm/vllm-openai:v0.11.2}
+    image: ${MINERU_GPU_IMAGE:-zs-rag-mineru:gpu}
+    container_name: zs-rag-mineru-gpu
+    environment:
+      MINERU_MODEL_SOURCE: ${MINERU_MODEL_SOURCE:-modelscope}
+      NVIDIA_VISIBLE_DEVICES: ${MINERU_GPU_DEVICES:-0}
+    volumes:
+      - mineru_models_gpu:/models
+    ports:
+      - "${MINERU_GPU_PORT:-8002}:8000"
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health >/dev/null || curl -fsS http://localhost:8000/docs >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 900s
+    networks:
+      - zs-rag-network
+    restart: unless-stopped
+
   # ============== OpenDataLoader Hybrid Sidecar（扫描件 / 复杂表格；按 profile 启用） ==============
-  # 拉起：docker compose --profile odl-hybrid up -d opendataloader-hybrid
-  # 知识库配置开启 pdf_parser_hybrid 或 .env ODL_HYBRID=true
+  # 拉起（内网/offline 必用预构建镜像，勿用下方默认 python:3.12-slim 在线安装）：
+  #   docker build -f backend/Dockerfile.odl-hybrid -t zs-rag-odl-hybrid:latest backend
+  #   docker compose -f docker-compose.yml -f docker-compose.odl-hybrid.yml \
+  #     --profile odl-hybrid up -d --no-build opendataloader-hybrid
+  # 知识库配置开启 pdf hybrid 或 .env ODL_HYBRID=true
   opendataloader-hybrid:
     profiles: ["odl-hybrid"]
-    image: python:3.12-slim
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.odl-hybrid
+    image: ${ODL_HYBRID_IMAGE:-zs-rag-odl-hybrid:latest}
     container_name: zs-rag-odl-hybrid
-    working_dir: /srv
-    command:
-      - sh
-      - -c
-      - |
-        apt-get update -qq && apt-get install -y -qq --no-install-recommends default-jre-headless curl \
-        && pip install -q --no-cache-dir 'opendataloader-pdf[hybrid]' \
-        && opendataloader-pdf-hybrid --host 0.0.0.0 --port 5002
     ports:
       - "${ODL_HYBRID_PORT:-5002}:5002"
     healthcheck:
@@ -254,7 +302,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 10
-      start_period: 300s
+      start_period: 120s
     networks:
       - zs-rag-network
     restart: unless-stopped
@@ -265,7 +313,8 @@ services:
     container_name: zs-rag-frontend
     working_dir: /app
     environment:
-      - VITE_API_BASE_URL=${VITE_API_BASE_URL:-http://192.168.11.19:8000}
+      # 留空时浏览器走同源，Vite dev proxy 转发到 backend:8000（见 web/vite.config.ts）
+      - VITE_API_BASE_URL=${VITE_API_BASE_URL:-}
       # 大 PDF 下载超时（毫秒），默认 3 分钟
       - VITE_FILE_DOWNLOAD_TIMEOUT_MS=${VITE_FILE_DOWNLOAD_TIMEOUT_MS:-180000}
       - NODE_ENV=development
@@ -293,6 +342,7 @@ volumes:
   neo4j_data:
   opensearch_data:
   mineru_models:
+  mineru_models_gpu:
 
 # ============== Networks ==============
 networks:

@@ -1,22 +1,28 @@
 """
 MinerU HTTP 客户端 + content_list.json → ParsedDocument 映射。
 
-职责范围（结合 plan 的"〇、格式分工"）：
-- 仅处理 PDF 和图片（PNG/JPG/JPEG/BMP/TIF/TIFF/WEBP）
-- DOCX/XLSX/PPTX 等不在本模块处理，由 document_parser.py 里的本地解析器负责
-- PDF 场景：失败抛 MineruUnavailableError，由上层 _parse_pdf 降级到 pypdf
-- 图片场景：失败抛 MineruUnavailableError，由上层转成 UnsupportedDocumentError（现阶段无降级路径）
+职责范围：
+- 按 MINERU_FORMATS 白名单接管 PDF、图片及 Office/表格/文本等后缀
+- 具体是否走 MinerU 由知识库 parsers.*.engine 与 document_parser.parse_document 决定
+- PDF：失败抛 MineruUnavailableError，由上层 _parse_pdf 降级到 pypdf
+- 图片 / 用户显式选择 mineru 的 Office·CSV·文本：失败由上层转为 UnsupportedDocumentError
 """
 
 from __future__ import annotations
 
+import hashlib
+import io
+import json
 import logging
 import re
 import threading
 import time
+import zipfile
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -28,13 +34,38 @@ from app.core.document_parser import (
     _CLASS_ORDER,
     _update_heading_path,
     build_table_segments_from_rows,
+    build_table_segments_smart,
 )
+from app.core.heading_match import normalize_heading_match_text
 
 logger = logging.getLogger(__name__)
 
 
 class MineruUnavailableError(Exception):
     """MinerU 服务不可达 / 超时 / 返回异常。上层据此决定降级或报错。"""
+
+
+# MinerU 写临时目录时对文件名敏感：括号、中文冒号等会导致 pipeline 快速失败（HTTP 409）
+_MINERU_UNSAFE_UPLOAD_CHARS = re.compile(
+    r'[\\/:*?"<>|()\uFF08\uFF09\uFF1A\uFF1B]|[\x00-\x1f]'
+)
+
+
+def _mineru_safe_upload_filename(file_name: str) -> str:
+    """上传 /file_parse 时使用的安全文件名（仅 ASCII，避免 pipeline 写临时目录失败）。"""
+    path = Path(file_name)
+    suffix = path.suffix.lower() if path.suffix else ".pdf"
+    stem = path.stem or "document"
+    safe_stem = _MINERU_UNSAFE_UPLOAD_CHARS.sub("_", stem)
+    safe_stem = re.sub(r"_+", "_", safe_stem).strip("._ ")
+    ascii_stem = re.sub(r"[^A-Za-z0-9._-]", "", safe_stem)
+    ascii_stem = re.sub(r"_+", "_", ascii_stem).strip("._-")
+    if len(ascii_stem) < 3:
+        digest = hashlib.sha256(file_name.encode("utf-8")).hexdigest()[:16]
+        ascii_stem = f"doc_{digest}"
+    if len(ascii_stem) > 120:
+        ascii_stem = ascii_stem[:120]
+    return f"{ascii_stem}{suffix}"
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +187,37 @@ def _grid_to_html_table(rows: list[list[str]], *, header_rows: int = 1) -> str:
 # ---------------------------------------------------------------------------
 
 _LEVEL_TO_CLASS = {1: "chapter", 2: "section"}
+_MINERU_ATTACHMENT_LABEL_RE = re.compile(
+    r"^附件\s*[\d一二三四五六七八九十]*\s*[：:]?\s*$",
+    re.IGNORECASE,
+)
+_MINERU_PAGE_TABLE_CONTEXT_MAX = 120
+_MINERU_FOOTER_TEXT_RE = re.compile(
+    r"(文件下载链接|https?://|\.pdf\s*$|分享到|【打印】|【关闭】|版权所有|ICP备|政府网站)",
+    re.IGNORECASE,
+)
+
+
+def _mineru_text_looks_like_title(text: str) -> bool:
+    """MinerU 有时把居中标题标成普通 text（无 text_level），需保留为标题上下文。"""
+    t = re.sub(r"\s+", " ", (text or "").strip())
+    if not t or len(t) > 80:
+        return False
+    if re.search(r"[。！？；;]$", t):
+        return False
+    if _MINERU_FOOTER_TEXT_RE.search(t):
+        return False
+    if re.match(r"^附件[：:]", t) and len(t) > 24:
+        return False
+    return True
+
+
+def _mineru_should_skip_layout_type(typ: str, text: str) -> bool:
+    if typ not in {"header", "footer", "page_number"}:
+        return False
+    if typ == "header" and text and _MINERU_ATTACHMENT_LABEL_RE.match(text.strip()):
+        return False
+    return True
 
 
 def _text_level_to_class(text_level: int | None) -> str:
@@ -255,6 +317,25 @@ class MineruResult:
         current_heading_path: str | None = None
         table_counter = 0
         heading_count = 0
+        page_table_context: dict[int, list[str]] = {}
+
+        def _queue_page_table_context(page: int | None, text: str) -> None:
+            if page is None:
+                return
+            t = text.strip()
+            if not t:
+                return
+            bucket = page_table_context.setdefault(page, [])
+            if not bucket or bucket[-1] != t:
+                bucket.append(t)
+
+        def _take_page_table_context(page: int | None) -> str:
+            if page is None:
+                return ""
+            lines = page_table_context.pop(page, [])
+            if not lines:
+                return ""
+            return "\n\n".join(lines)
 
         for cl_index, item in enumerate(self.content_list):
             if not isinstance(item, dict):
@@ -264,19 +345,29 @@ class MineruResult:
             page_no = (page_idx + 1) if isinstance(page_idx, int) else None
             bbox = item.get("bbox") if isinstance(item.get("bbox"), list) else None
             text_level = item.get("text_level")
+            raw_text = _plain_text(item.get("text") or item.get("content"))
 
-            # 页眉/页码：不是正文，直接丢弃
-            if typ in {"header", "footer", "page_number"}:
+            if _mineru_should_skip_layout_type(typ, raw_text):
                 continue
 
+            treat_header_attachment_as_heading = typ == "header" and bool(
+                raw_text and _MINERU_ATTACHMENT_LABEL_RE.match(raw_text.strip())
+            )
+
             # 3.x 版本的标题在 type=text + text_level；旧版可能是 type=title
-            is_heading = typ == "title" or (typ == "text" and text_level)
+            is_heading = (
+                typ == "title"
+                or (typ == "text" and text_level)
+                or treat_header_attachment_as_heading
+                or (typ == "text" and _mineru_text_looks_like_title(raw_text))
+            )
             if is_heading:
-                text = _plain_text(item.get("text") or item.get("content"))
+                text = raw_text
                 if not text:
                     continue
                 cls = _text_level_to_class(text_level)
-                current_heading_path = _update_heading_path(heading_stack, cls, text)
+                current_heading_path = _update_heading_path(heading_stack, cls, normalize_heading_match_text(text))
+                _queue_page_table_context(page_no, text)
                 _append_segment(
                     segments,
                     parts,
@@ -324,6 +415,8 @@ class MineruResult:
                     page_no=page_no,
                     metadata=meta,
                 )
+                if len(text) <= _MINERU_PAGE_TABLE_CONTEXT_MAX:
+                    _queue_page_table_context(page_no, text)
             elif typ == "table":
                 body = item.get("table_body") or item.get("html") or item.get("content")
                 if not isinstance(body, str):
@@ -332,13 +425,20 @@ class MineruResult:
                 table_html = body.strip() if body.strip().startswith("<") else ""
                 if not table_html and rows:
                     table_html = _grid_to_html_table(rows)
-                table_segments = build_table_segments_from_rows(
+                caption = _plain_text(item.get("table_caption"))
+                if caption:
+                    _queue_page_table_context(page_no, caption)
+                context_prefix = _take_page_table_context(page_no)
+                table_segments = build_table_segments_smart(
                     rows,
                     table_counter,
                     offset_ref,
                     parts,
                     current_heading_path,
+                    table_body=body,
                     table_body_html=table_html or None,
+                    page_no=page_no,
+                    context_prefix=context_prefix or None,
                 )
                 for seg in table_segments:
                     meta = dict(seg.metadata or {})
@@ -348,8 +448,7 @@ class MineruResult:
                     if page_no is not None:
                         seg.page_no = page_no
                 segments.extend(table_segments)
-                caption = _plain_text(item.get("table_caption"))
-                if caption:
+                if caption and not any(caption in (s.text or "") for s in table_segments):
                     _append_segment(
                         segments,
                         parts,
@@ -366,8 +465,8 @@ class MineruResult:
                     )
                 table_counter += 1
             elif typ == "image":
-                caption = _plain_text(item.get("image_caption"))
-                ocr = _plain_text(item.get("image_ocr_text") or item.get("caption"))
+                caption = _image_caption_text(item)
+                ocr = _image_ocr_text(item)
                 parts_img = [p for p in (caption, ocr) if p]
                 if not parts_img:
                     continue
@@ -383,6 +482,9 @@ class MineruResult:
                         "heading_path": current_heading_path,
                         "bbox": bbox,
                         "img_path": item.get("img_path"),
+                        "content_list_index": cl_index,
+                        **({"image_caption": caption} if caption else {}),
+                        **({"image_ocr_text": ocr} if ocr else {}),
                     },
                 )
 
@@ -405,8 +507,93 @@ class MineruResult:
 def _plain_text(value: Any) -> str:
     if value is None:
         return ""
+    if isinstance(value, list):
+        if not value:
+            return ""
+        if all(isinstance(x, str) for x in value):
+            joined = " ".join(x.strip() for x in value if x and str(x).strip())
+            return re.sub(r"\s+", " ", joined).strip()
+        return ""
+    if isinstance(value, dict):
+        return ""
     s = str(value).strip()
+    if s in {"[]", "{}"}:
+        return ""
     return re.sub(r"\s+", " ", s)
+
+
+def _image_caption_text(item: dict[str, Any]) -> str:
+    return _plain_text(item.get("image_caption"))
+
+
+def _image_ocr_text(item: dict[str, Any]) -> str:
+    for key in ("image_ocr_text", "ocr_text", "caption", "description", "text"):
+        text = _plain_text(item.get(key))
+        if text:
+            return text
+    return ""
+
+
+def _image_needs_ocr(item: dict[str, Any]) -> bool:
+    if str(item.get("type") or "").lower() != "image":
+        return False
+    return not _image_caption_text(item) and not _image_ocr_text(item)
+
+
+def _strip_md_images(md: str) -> str:
+    text = re.sub(r"!\[[^\]]*\]\([^)]+\)", " ", md)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _extract_md_from_payload(payload: Any) -> str | None:
+    if isinstance(payload, dict):
+        for key in ("md_content", "markdown", "md"):
+            md = payload.get(key)
+            if isinstance(md, str) and md.strip():
+                return md
+        for v in payload.values():
+            got = _extract_md_from_payload(v)
+            if got:
+                return got
+    elif isinstance(payload, list):
+        for v in payload:
+            got = _extract_md_from_payload(v)
+            if got:
+                return got
+    return None
+
+
+def _parse_zip_response(zip_bytes: bytes) -> tuple[list[dict[str, Any]], str | None, dict[str, bytes]]:
+    """从 MinerU ZIP 响应提取 content_list、markdown 与内嵌图片 bytes（按文件名索引）。"""
+    content_list: list[dict[str, Any]] = []
+    markdown: str | None = None
+    images: dict[str, bytes] = {}
+
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        content_list_name = ""
+        for name in zf.namelist():
+            lower = name.lower()
+            if lower.endswith("_content_list.json") and "content_list_v2" not in lower:
+                if not content_list_name or len(name) < len(content_list_name):
+                    content_list_name = name
+            elif lower.endswith(".md") and "/images/" not in lower and markdown is None:
+                markdown = zf.read(name).decode("utf-8", errors="replace")
+            elif "/images/" in lower or lower.startswith("images/"):
+                blob = zf.read(name)
+                images[Path(name).name] = blob
+                tail = name.split("images/", 1)[-1]
+                if tail:
+                    images[tail] = blob
+        if content_list_name:
+            raw = json.loads(zf.read(content_list_name))
+            if isinstance(raw, list):
+                content_list = raw
+
+    return content_list, markdown, images
+
+
+_OFFICE_EMBEDDED_IMAGE_SUFFIXES = frozenset({"docx", "pptx", "ppt"})
+_MAX_IMAGE_OCR_WORKERS = 4
 
 
 def _preserve_newlines(value: Any) -> str:
@@ -458,6 +645,15 @@ _MIME_MAP = {
     "tif": "image/tiff",
     "tiff": "image/tiff",
     "webp": "image/webp",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "xls": "application/vnd.ms-excel",
+    "xlsm": "application/vnd.ms-excel.sheet.macroEnabled.12",
+    "csv": "text/csv",
+    "md": "text/markdown",
+    "txt": "text/plain",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "ppt": "application/vnd.ms-powerpoint",
 }
 
 
@@ -491,23 +687,30 @@ class MineruGateway:
         url = self.base_url.rstrip("/") + "/file_parse"
         suffix = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else "pdf"
         mime = _MIME_MAP.get(suffix, "application/octet-stream")
-        files = {"files": (file_name, file_bytes, mime)}
+        use_zip = suffix in _OFFICE_EMBEDDED_IMAGE_SUFFIXES
+        upload_name = _mineru_safe_upload_filename(file_name)
+        files = {"files": (upload_name, file_bytes, mime)}
         data = {
             "backend": self.backend,
-            "lang": self.lang,
+            "lang_list": [self.lang],
+            "parse_method": "ocr" if use_zip else "auto",
             "return_md": "true",
             "return_content_list": "true",
             "return_middle_json": "false",
             "return_layout_pdf": "false",
-            "response_format_zip": "false",
+            "return_images": "true" if use_zip else "false",
+            "response_format_zip": "true" if use_zip else "false",
         }
         n_bytes = len(file_bytes)
         mb = n_bytes / (1024 * 1024)
         if log:
+            name_note = f"上传名 {upload_name}" if upload_name != file_name else f"文件「{file_name}」"
             log(
-                f"MinerU：POST {url}，文件「{file_name}」{n_bytes} 字节（约 {mb:.2f} MB），"
+                f"MinerU：POST {url}，{name_note}，{n_bytes} 字节（约 {mb:.2f} MB），"
                 f"backend={self.backend} lang={self.lang}，超时上限 {self.timeout}s。"
             )
+            if use_zip:
+                log("MinerU：Office 文档将使用 ZIP 响应并提取内嵌图片，供二次 OCR。")
             log("MinerU：正在上传并等待服务端解析（版面分析/OCR，大文件可能需数分钟）…")
         t0 = time.monotonic()
         try:
@@ -522,36 +725,157 @@ class MineruGateway:
         if log:
             log(f"MinerU：HTTP 响应 {resp.status_code}，耗时 {elapsed}s，响应体约 {body_len} 字节。")
         if resp.status_code >= 400:
+            detail = resp.text[:800]
+            try:
+                err_body = resp.json()
+                if isinstance(err_body, dict):
+                    for key in ("error", "message", "detail", "stderr", "traceback"):
+                        val = err_body.get(key)
+                        if val:
+                            detail = str(val)[:800]
+                            break
+            except ValueError:
+                pass
             raise MineruUnavailableError(
-                f"MinerU HTTP {resp.status_code}：{resp.text[:200]}"
+                f"MinerU HTTP {resp.status_code}：{detail}"
             )
-        if log:
-            log("MinerU：正在解析响应 JSON…")
-        try:
-            payload = resp.json()
-        except ValueError as e:
-            raise MineruUnavailableError(f"MinerU 返回非 JSON：{resp.text[:200]}") from e
-        if log and isinstance(payload, dict):
-            keys = ", ".join(sorted(payload.keys())[:12])
-            more = "…" if len(payload) > 12 else ""
-            log(f"MinerU：JSON 顶层字段（节选）：{keys}{more}")
-        if log:
-            log("MinerU：正在提取 content_list / markdown…")
-        content_list, md = _extract_content_list_and_md(payload)
-        if not content_list:
-            raise MineruUnavailableError(
-                "MinerU 返回 payload 中未找到 content_list（可能是 API 版本不匹配或解析失败）"
-            )
+
+        content_type = (resp.headers.get("content-type") or "").lower()
+        is_zip = use_zip or content_type.startswith("application/zip") or resp.content[:2] == b"PK"
+        payload: dict[str, Any] | None = None
+
+        if is_zip:
+            if log:
+                log("MinerU：正在解析 ZIP 响应（content_list + 内嵌图片）…")
+            content_list, md, images = _parse_zip_response(resp.content)
+            if not content_list:
+                raise MineruUnavailableError("MinerU ZIP 响应中未找到 content_list")
+            self._enrich_content_list_images(content_list, images, log=log)
+        else:
+            if log:
+                log("MinerU：正在解析响应 JSON…")
+            try:
+                payload = resp.json()
+            except ValueError as e:
+                raise MineruUnavailableError(f"MinerU 返回非 JSON：{resp.text[:200]}") from e
+            if log and isinstance(payload, dict):
+                keys = ", ".join(sorted(payload.keys())[:12])
+                more = "…" if len(payload) > 12 else ""
+                log(f"MinerU：JSON 顶层字段（节选）：{keys}{more}")
+            if log:
+                log("MinerU：正在提取 content_list / markdown…")
+            content_list, md = _extract_content_list_and_md(payload)
+            if not content_list:
+                raise MineruUnavailableError(
+                    "MinerU 返回 payload 中未找到 content_list（可能是 API 版本不匹配或解析失败）"
+                )
+
         md_len = len(md) if md else 0
         if log:
-            log(f"MinerU：已得到 content_list 共 {len(content_list)} 条；markdown 约 {md_len} 字符。")
+            img_with_text = sum(
+                1 for item in content_list if isinstance(item, dict) and str(item.get("type")).lower() == "image" and _image_ocr_text(item)
+            )
+            log(
+                f"MinerU：已得到 content_list 共 {len(content_list)} 条；markdown 约 {md_len} 字符；"
+                f"含 OCR 文本的内嵌图 {img_with_text} 张。"
+            )
         return MineruResult(
             content_list=content_list,
             markdown=md,
             source_file_name=file_name,
-            raw_payload=payload if isinstance(payload, dict) else None,
+            raw_payload=payload,
             http_status=resp.status_code,
         )
+
+    def _enrich_content_list_images(
+        self,
+        content_list: list[dict[str, Any]],
+        images: dict[str, bytes],
+        *,
+        log: Callable[[str], None] | None = None,
+    ) -> int:
+        """Word/PPT 内嵌图 MinerU 常不自带 OCR；对缺文本的图片块逐张二次 OCR。"""
+        todo: list[tuple[int, dict[str, Any]]] = [
+            (idx, item)
+            for idx, item in enumerate(content_list)
+            if isinstance(item, dict) and _image_needs_ocr(item)
+        ]
+        if not todo:
+            return 0
+        if not images:
+            if log:
+                log("MinerU：content_list 含图片块但未从 ZIP 拿到图片文件，跳过内嵌图 OCR。")
+            return 0
+
+        if log:
+            log(f"MinerU：内嵌图 {len(todo)} 张缺少 OCR 文本，开始二次 OCR（并发 {_MAX_IMAGE_OCR_WORKERS}）…")
+
+        enriched = 0
+
+        def _run_one(entry: tuple[int, dict[str, Any]]) -> tuple[int, str]:
+            idx, item = entry
+            img_path = str(item.get("img_path") or "")
+            key = Path(img_path).name
+            blob = images.get(key) or images.get(img_path.lstrip("/"))
+            if not blob:
+                return idx, ""
+            ocr = self._ocr_image_bytes(blob, key)
+            return idx, ocr
+
+        with ThreadPoolExecutor(max_workers=_MAX_IMAGE_OCR_WORKERS) as pool:
+            futures = [pool.submit(_run_one, entry) for entry in todo]
+            for fut in as_completed(futures):
+                idx, ocr = fut.result()
+                if not ocr:
+                    continue
+                item = content_list[idx]
+                item["image_ocr_text"] = ocr
+                enriched += 1
+
+        if log:
+            log(f"MinerU：内嵌图 OCR 完成，{enriched}/{len(todo)} 张获得可检索文本。")
+        return enriched
+
+    def _ocr_image_bytes(self, image_bytes: bytes, file_name: str) -> str:
+        """对单张图片调用 MinerU OCR，返回纯文本（去掉 Markdown 图片占位）。"""
+        url = self.base_url.rstrip("/") + "/file_parse"
+        suffix = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else "png"
+        mime = _MIME_MAP.get(suffix, "application/octet-stream")
+        data = {
+            "backend": self.backend,
+            "lang_list": [self.lang],
+            "parse_method": "ocr",
+            "return_md": "true",
+            "return_content_list": "false",
+            "return_middle_json": "false",
+            "response_format_zip": "false",
+        }
+        upload_name = _mineru_safe_upload_filename(file_name)
+        files = {"files": (upload_name, image_bytes, mime)}
+        try:
+            with httpx.Client(timeout=min(self.timeout, 120)) as client:
+                resp = client.post(url, files=files, data=data)
+        except httpx.HTTPError:
+            return ""
+        if resp.status_code >= 400:
+            return ""
+        try:
+            payload = resp.json()
+        except ValueError:
+            return ""
+        md = _extract_md_from_payload(payload)
+        if md:
+            return _strip_md_images(md)
+        content_list, _ = _extract_content_list_and_md(payload)
+        texts: list[str] = []
+        for item in content_list:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("type") or "").lower() in {"text", "title"}:
+                t = _plain_text(item.get("text") or item.get("content"))
+                if t:
+                    texts.append(t)
+        return _strip_md_images(" ".join(texts))
 
 
 _gateway_lock = threading.Lock()

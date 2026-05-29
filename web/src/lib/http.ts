@@ -1,6 +1,7 @@
 import axios from 'axios'
+import { resolveApiBaseUrl } from './apiBaseUrl'
 
-const baseURL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+const baseURL = resolveApiBaseUrl()
 
 /** 普通 API 请求（默认 30s） */
 const defaultTimeoutMs = Number(import.meta.env.VITE_HTTP_TIMEOUT_MS) || 30_000
@@ -37,11 +38,25 @@ http.interceptors.request.use((config) => {
   return config
 })
 
+function isLoginRequest(url: string | undefined): boolean {
+  if (!url) return false
+  return url.includes('/auth/login')
+}
+
 // 响应拦截器 - 统一错误处理
 http.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
+      const requestUrl = error.config?.url ?? ''
+      const onLoginPage =
+        typeof window !== 'undefined' && window.location.pathname === '/login'
+
+      // 登录失败或未建立会话的 401：留在登录页展示错误，勿清 token / 硬跳转
+      if (isLoginRequest(requestUrl) || onLoginPage) {
+        return Promise.reject(error)
+      }
+
       // Token 过期，清除本地存储并跳转到登录页（iframe 内跳转会破坏嵌入体验，交由页面自行展示错误）
       localStorage.removeItem('auth_token')
       localStorage.removeItem('current_user')

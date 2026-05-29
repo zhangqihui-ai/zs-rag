@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     app_port: int = 8000
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/zs_rag"
     cors_origins: str = Field(default="http://localhost:5173,http://localhost:80,http://localhost:3000")
+    cors_allow_lan_regex: bool = Field(
+        default=True,
+        description="为 true 时除 CORS_ORIGINS 外，正则放行 localhost/127.0.0.1/192.168.* 任意端口",
+    )
     request_id_header: str = "X-Request-ID"
     
     # Admin initialization
@@ -91,8 +95,12 @@ class Settings(BaseSettings):
         description="知识库切片全文索引名称（接入同步时使用）",
     )
 
-    # MinerU 文档解析（仅用于 PDF + 图片；DOCX/XLSX 仍走本地解析器）
-    mineru_enabled: bool = Field(default=False, description="是否启用 MinerU 解析 PDF/图片")
+    # MinIO（Milvus 对象存储依赖；Console 登录凭据）
+    minio_root_user: str = Field(default="minioadmin", description="MinIO 管理员用户名")
+    minio_root_password: str = Field(default="minioadmin", description="MinIO 管理员密码")
+
+    # MinerU 文档解析（PDF/图片及可选 Office·CSV·文本；具体引擎由知识库 parsers 配置）
+    mineru_enabled: bool = Field(default=False, description="是否启用 MinerU HTTP 解析服务")
     mineru_base_url: str = Field(default="http://mineru:8000", description="MinerU HTTP API base URL")
     mineru_backend: str = Field(
         default="pipeline",
@@ -101,8 +109,8 @@ class Settings(BaseSettings):
     mineru_lang: str = Field(default="ch", description="MinerU OCR 语言：ch/en/korean/japan...")
     mineru_timeout: int = Field(default=300, description="单文件解析超时（秒），扫描件建议更大")
     mineru_formats: str = Field(
-        default="pdf,png,jpg,jpeg,bmp,tif,tiff,webp",
-        description="MinerU 接管的文件后缀白名单（逗号分隔）。DOCX/XLSX/PPTX 不要加进来",
+        default="pdf,png,jpg,jpeg,bmp,tif,tiff,webp,docx,xlsx,xlsm,xls,csv,md,txt",
+        description="MinerU 可解析后缀白名单（逗号分隔）；图片等自动路径使用；知识库显式选 mineru 引擎时不强制在此列表",
     )
 
     @property
@@ -122,6 +130,17 @@ class Settings(BaseSettings):
     )
     odl_timeout: int = Field(default=120, description="OpenDataLoader Hybrid 单次请求超时（秒）")
 
+    # 宿主机暴露端口（未设置或 0 表示未映射，前端不可直接访问）
+    postgres_exposed_port: int | None = Field(default=None, description="PostgreSQL 宿主机映射端口")
+    milvus_exposed_port: int | None = Field(default=None, description="Milvus gRPC 宿主机映射端口")
+    milvus_web_exposed_port: int | None = Field(default=None, description="Milvus WebUI HTTP 宿主机映射端口")
+    minio_console_exposed_port: int | None = Field(default=None, description="MinIO Console 宿主机映射端口")
+    opensearch_exposed_port: int | None = Field(default=None, description="OpenSearch 宿主机映射端口")
+    neo4j_http_exposed_port: int | None = Field(default=None, description="Neo4j Browser HTTP 宿主机映射端口")
+    backend_exposed_port: int | None = Field(default=None, description="后端 API 宿主机映射端口")
+    mineru_exposed_port: int | None = Field(default=None, description="MinerU 宿主机映射端口")
+    odl_hybrid_exposed_port: int | None = Field(default=None, description="ODL Hybrid 宿主机映射端口")
+
     @property
     def normalized_cors_origins(self) -> list[str]:
         if isinstance(self.cors_origins, str):
@@ -129,11 +148,17 @@ class Settings(BaseSettings):
         return self.cors_origins
 
     @property
-    def cors_allow_origin_regex(self) -> str | None:
-        """开发环境下允许局域网任意 IP（避免页面与 CORS_ORIGINS 中硬编码 IP 不一致导致 OPTIONS 400）。"""
-        if self.app_env.lower() != "development":
-            return None
+    def cors_lan_origin_regex_pattern(self) -> str:
+        """内网常见入口：localhost、127.0.0.1、192.168.*（任意端口）。"""
         return r"https?://(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3})(:\d+)?$"
+
+    @property
+    def cors_allow_origin_regex(self) -> str | None:
+        if self.cors_allow_lan_regex:
+            return self.cors_lan_origin_regex_pattern
+        if self.app_env.lower() == "development":
+            return self.cors_lan_origin_regex_pattern
+        return None
 
 
 @lru_cache

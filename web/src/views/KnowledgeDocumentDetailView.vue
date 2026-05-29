@@ -86,7 +86,19 @@
                   <h2 class="doc-split-title">{{ rightPaneTitle }}</h2>
                   <p class="doc-split-sub">{{ rightPaneSub }}</p>
                 </div>
-                <div class="doc-view-mode-segment" role="tablist" aria-label="右侧内容视图">
+                <div class="doc-split-chunks-head-actions">
+                  <button
+                    v-if="parseViewCopyVisible"
+                    class="btn btn-ghost btn-row-compact doc-parse-copy-btn"
+                    type="button"
+                    :disabled="parseViewCopyDisabled"
+                    :title="parseViewCopyDisabled ? '暂无可复制内容' : '复制全部解析内容'"
+                    @click="copyParseViewContent"
+                  >
+                    <AppIcon name="copy" :size="14" />
+                    {{ parseViewCopyLabel }}
+                  </button>
+                  <div class="doc-view-mode-segment" role="tablist" aria-label="右侧内容视图">
                   <button
                     type="button"
                     role="tab"
@@ -129,26 +141,9 @@
                     表格
                   </button>
                 </div>
+                </div>
               </div>
               <div v-show="rightView === 'chunks'" class="doc-split-chunks-toolbar">
-                <div class="doc-split-tabs" role="tablist" aria-label="切片展示方式">
-                  <button
-                    type="button"
-                    role="tab"
-                    :class="['doc-split-tab', { active: chunkDisplayMode === 'full' }]"
-                    @click="chunkDisplayMode = 'full'"
-                  >
-                    全文
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    :class="['doc-split-tab', { active: chunkDisplayMode === 'preview' }]"
-                    @click="chunkDisplayMode = 'preview'"
-                  >
-                    省略
-                  </button>
-                </div>
                 <label class="doc-split-search">
                   <AppIcon name="search" class="doc-split-search-icon" :size="16" />
                   <input
@@ -160,7 +155,7 @@
                   />
                 </label>
                 <div v-if="chunkTotal > 0" class="doc-split-pagination-top">
-                  <span class="doc-split-total-top">共 {{ chunkTotal }} 条</span>
+                  <span class="doc-split-total-top">共 {{ chunkTotal }} 切片</span>
                   <div class="doc-split-page-controls-top">
                     <button
                       type="button"
@@ -326,20 +321,44 @@
                                 >Chunk-{{ chunk.chunk_index + 1 }} · {{ chunkCharCount(chunk) }} 字符</span
                               >
                               <div class="doc-chunk-head-badges">
-                                <span class="doc-chunk-kind">{{ chunkKindLabel(chunk) }}</span>
+                                <span
+                                  :class="[
+                                    'doc-chunk-kind',
+                                    {
+                                      'doc-chunk-kind--table': chunkBlockType(chunk) === 'table',
+                                      'doc-chunk-kind--image': chunkBlockType(chunk) === 'image',
+                                      'doc-chunk-kind--heading': chunkBlockType(chunk) === 'heading',
+                                    },
+                                  ]"
+                                >
+                                  {{ chunkKindLabel(chunk) }}
+                                </span>
                                 <span
                                   :class="['doc-chunk-vec', chunk.vector_status === 'indexed' ? 'indexed' : 'pending']"
                                 >
                                   {{ chunkVectorLabel(chunk) }}
                                 </span>
+                                <button
+                                  v-if="chunkEnrichmentEditable(chunk)"
+                                  class="btn btn-ghost btn-row-compact doc-chunk-edit-btn"
+                                  type="button"
+                                  title="编辑关键词与假设问题"
+                                  @click.stop="openChunkEditModal(chunk)"
+                                >
+                                  编辑
+                                </button>
                               </div>
                             </div>
                           </div>
-                          <div
-                            v-if="chunkTableHtmlForDisplay(chunk)"
-                            class="doc-chunk-table-wrap"
-                            v-html="chunkTableHtmlForDisplay(chunk)"
-                          />
+                          <p v-if="chunkEnrichmentSummary(chunk)" class="doc-chunk-enrich-summary">
+                            关键词：{{ chunkEnrichmentSummary(chunk) }}
+                          </p>
+                          <template v-if="chunkTableHtmlForDisplay(chunk)">
+                            <p v-if="chunkTableContextForDisplay(chunk)" class="doc-chunk-context">
+                              {{ chunkTableContextForDisplay(chunk) }}
+                            </p>
+                            <div class="doc-chunk-table-wrap" v-html="chunkTableHtmlForDisplay(chunk)" />
+                          </template>
                           <p v-else class="doc-chunk-body">{{ chunkDisplayText(chunk) }}</p>
                         </article>
                       </div>
@@ -353,6 +372,16 @@
         </div>
       </template>
     </div>
+
+    <ChunkEnrichmentEditModal
+      :open="chunkEditOpen"
+      :kb-id="kbId"
+      :chunk="chunkEditTarget"
+      :kind-label="chunkEditTarget ? chunkKindLabel(chunkEditTarget) : undefined"
+      :table-html="chunkEditTarget ? chunkTableHtmlForDisplay(chunkEditTarget) : undefined"
+      @close="closeChunkEditModal"
+      @saved="onChunkEnrichmentSaved"
+    />
   </Layout>
 </template>
 
@@ -368,11 +397,12 @@ import {
   type KnowledgeDocument,
 } from '../api/knowledge-base'
 import AppIcon from '../components/AppIcon.vue'
+import ChunkEnrichmentEditModal from '../components/ChunkEnrichmentEditModal.vue'
 import DocumentOriginalPreview from '../components/DocumentOriginalPreview.vue'
 const DocumentPdfMineruLayout = defineAsyncComponent(() => import('../components/DocumentPdfMineruLayout.vue'))
 import Layout from '../components/Layout.vue'
 import ScrollRowWithVSlider from '../components/ScrollRowWithVSlider.vue'
-import { groupMineruItemsByPage, chunkTableHtml, mineruBlockPlainText, mineruBlockTableHtml, mineruBlockIsTableRenderable, shouldShowMineruBlock, type MineruContentItem } from '../lib/mineruContentDisplay'
+import { groupMineruItemsByPage, chunkTableContextPrefix, chunkTableHtml, mineruBlockPlainText, mineruBlockTableHtml, mineruBlockIsTableRenderable, shouldShowMineruBlock, type MineruContentItem } from '../lib/mineruContentDisplay'
 import {
   buildDocxPageAnchorTexts,
   chunkMatchesDocxBlock,
@@ -390,6 +420,7 @@ import {
   type DocxContentBlock,
 } from '../lib/docxContentDisplay'
 import { findMineruBlockForChunk, parseRouteFocusInt } from '../lib/documentCitationFocus'
+import { copyToClipboard } from '../lib/copy-to-clipboard'
 
 const route = useRoute()
 
@@ -411,6 +442,9 @@ const chunkKeyword = ref('')
 const chunkKeywordInput = ref('')
 const chunkDisplayMode = ref<'full' | 'preview'>('full')
 
+const chunkEditOpen = ref(false)
+const chunkEditTarget = ref<KnowledgeChunk | null>(null)
+
 type RightView = 'chunks' | 'markdown' | 'json' | 'tables'
 const rightView = ref<RightView>('chunks')
 const mineruMdText = ref('')
@@ -421,6 +455,8 @@ const mineruJsonText = ref('')
 const mineruJsonLoading = ref(false)
 const mineruJsonError = ref('')
 const mineruJsonLoaded = ref(false)
+const parseViewCopyLabel = ref('全选复制')
+let parseViewCopyResetTimer: ReturnType<typeof window.setTimeout> | null = null
 
 const mineruContentList = ref<MineruContentItem[]>([])
 const docxContentList = ref<DocxContentBlock[]>([])
@@ -513,6 +549,10 @@ onMounted(() => {
 
 onUnmounted(() => {
   cancelAnimationFrame(chunkScrollRaf)
+  if (parseViewCopyResetTimer != null) {
+    window.clearTimeout(parseViewCopyResetTimer)
+    parseViewCopyResetTimer = null
+  }
   const doc = window.document
   doc.removeEventListener('fullscreenchange', syncDocSplitFullscreen)
   doc.removeEventListener('webkitfullscreenchange', syncDocSplitFullscreen)
@@ -596,7 +636,13 @@ const isDocxDocument = computed(() => {
   return (d.file_ext || '').toLowerCase() === 'docx'
 })
 
+/** python-docx 解析：侧车 docx_content_list.json */
 const docxViewEnabled = computed(() => isDocxDocument.value && docxContentList.value.length > 0)
+
+/** docx 走 MinerU 引擎：侧车 mineru_content_list.json，Markdown/JSON 走 MinerU 接口 */
+const docxMineruViewEnabled = computed(
+  () => isDocxDocument.value && mineruContentList.value.length > 0 && !docxViewEnabled.value,
+)
 
 const docxTableBlocks = computed(() => docxContentList.value.filter(isDocxTableBlock))
 
@@ -901,12 +947,63 @@ const rightPaneTitle = computed(() => {
   return '切片结果'
 })
 
+const parseViewCopyVisible = computed(() => rightView.value === 'markdown' || rightView.value === 'json')
+
+const parseViewCopyText = computed(() => {
+  if (rightView.value === 'json') {
+    return mineruJsonText.value.trim()
+  }
+  if (rightView.value === 'markdown') {
+    const raw = mineruMdText.value.trim()
+    if (raw) {
+      return raw
+    }
+    if (docxContentList.value.length) {
+      return docxContentList.value.map(docxBlockPlainText).filter(Boolean).join('\n\n')
+    }
+    if (mineruContentList.value.length) {
+      return mineruContentList.value
+        .filter(shouldShowMineruBlock)
+        .map(mineruBlockPlainText)
+        .filter(Boolean)
+        .join('\n\n')
+    }
+  }
+  return ''
+})
+
+const parseViewCopyBusy = computed(() => {
+  if (rightView.value === 'markdown') {
+    return mineruMdLoading.value
+  }
+  if (rightView.value === 'json') {
+    return mineruJsonLoading.value
+  }
+  return false
+})
+
+const parseViewCopyDisabled = computed(() => {
+  if (parseViewCopyBusy.value) {
+    return true
+  }
+  if (rightView.value === 'markdown' && mineruMdError.value) {
+    return true
+  }
+  if (rightView.value === 'json' && mineruJsonError.value) {
+    return true
+  }
+  return !parseViewCopyText.value
+})
+
 const rightPaneSub = computed(() => {
   if (rightView.value === 'markdown') {
     if (docxViewEnabled.value) {
       return '左侧为 Word 原文预览（含图片）；右侧按 Word 页码展示解析块，点击可联动高亮'
     }
     if (mineruMarkdownPages.value.length) {
+      if (docxMineruViewEnabled.value) {
+        return 'Word 经 MinerU 解析；按 content_list 分页展示解析块'
+      }
       return '按 content_list 分页展示；点击左侧 PDF 色块或右侧段落可双向联动高亮'
     }
     return '与解析引擎返回的 md_content 一致（侧车文件 mineru_markdown.md）'
@@ -914,6 +1011,9 @@ const rightPaneSub = computed(() => {
   if (rightView.value === 'json') {
     if (docxViewEnabled.value) {
       return '与 Word 解析 content_list 一致（侧车文件 docx_content_list.json）'
+    }
+    if (docxMineruViewEnabled.value) {
+      return 'Word 经 MinerU 解析（侧车文件 mineru_content_list.json）'
     }
     return '与解析引擎返回的 content_list 一致（侧车文件 mineru_content_list.json）'
   }
@@ -934,6 +1034,11 @@ const rightPaneSub = computed(() => {
 
 function resetMineruViewCache() {
   rightView.value = 'chunks'
+  parseViewCopyLabel.value = '全选复制'
+  if (parseViewCopyResetTimer != null) {
+    window.clearTimeout(parseViewCopyResetTimer)
+    parseViewCopyResetTimer = null
+  }
   mineruMdText.value = ''
   mineruMdError.value = ''
   mineruMdLoaded.value = false
@@ -966,12 +1071,12 @@ async function loadParseMarkdown() {
   if (!parseViewEnabled.value) {
     return
   }
-  if (isDocxDocument.value && docxContentList.value.length > 0) {
+  if (docxViewEnabled.value) {
     mineruMdError.value = ''
     mineruMdLoaded.value = true
     return
   }
-  if (!isDocxDocument.value && mineruContentList.value.length > 0) {
+  if (mineruContentList.value.length > 0) {
     mineruMdError.value = ''
     mineruMdLoaded.value = true
     return
@@ -982,7 +1087,7 @@ async function loadParseMarkdown() {
   mineruMdLoading.value = true
   mineruMdError.value = ''
   try {
-    if (isDocxDocument.value) {
+    if (isDocxDocument.value && docMetadata()?.parser_backend !== 'mineru') {
       mineruMdText.value = await knowledgeBaseApi.getDocumentDocxMarkdown(kbId.value, docId.value)
     } else {
       mineruMdText.value = await knowledgeBaseApi.getDocumentMineruMarkdown(kbId.value, docId.value)
@@ -999,7 +1104,7 @@ async function loadParseJson() {
   if (!parseViewEnabled.value) {
     return
   }
-  if (docxContentList.value.length > 0) {
+  if (docxViewEnabled.value) {
     mineruJsonText.value = JSON.stringify(docxContentList.value, null, 2)
     mineruJsonError.value = ''
     mineruJsonLoaded.value = true
@@ -1018,7 +1123,7 @@ async function loadParseJson() {
   mineruJsonError.value = ''
   try {
     let raw: string
-    if (isDocxDocument.value) {
+    if (isDocxDocument.value && docMetadata()?.parser_backend !== 'mineru') {
       raw = await knowledgeBaseApi.getDocumentDocxContentListText(kbId.value, docId.value)
     } else {
       raw = await knowledgeBaseApi.getDocumentMineruContentListText(kbId.value, docId.value)
@@ -1042,6 +1147,26 @@ async function loadMineruMarkdown() {
 
 async function loadMineruJson() {
   await loadParseJson()
+}
+
+async function copyParseViewContent() {
+  const text = parseViewCopyText.value
+  if (!text) {
+    return
+  }
+  const ok = await copyToClipboard(text)
+  if (!ok) {
+    alert('复制失败，请手动选择文本')
+    return
+  }
+  parseViewCopyLabel.value = '已复制'
+  if (parseViewCopyResetTimer != null) {
+    window.clearTimeout(parseViewCopyResetTimer)
+  }
+  parseViewCopyResetTimer = window.setTimeout(() => {
+    parseViewCopyLabel.value = '全选复制'
+    parseViewCopyResetTimer = null
+  }, 1600)
 }
 
 function selectParseBlock(index: number) {
@@ -1142,6 +1267,19 @@ function formatFileSize(value: number | null) {
   return `${(value / (1024 * 1024)).toFixed(1)} MB`
 }
 
+function chunkBlockType(chunk: KnowledgeChunk): string | null {
+  const m = chunk.metadata
+  if (!m || typeof m !== 'object') {
+    return null
+  }
+  if ((m as { source?: string }).source === 'mineru_graph_preview') {
+    const t = String((m as { type?: string }).type || '').toLowerCase()
+    return t || null
+  }
+  const block = (m as { block?: string }).block
+  return block || null
+}
+
 function chunkKindLabel(chunk: KnowledgeChunk): string {
   const m = chunk.metadata
   if (m && typeof m === 'object') {
@@ -1158,9 +1296,15 @@ function chunkKindLabel(chunk: KnowledgeChunk): string {
       const t = String((m as { type?: string }).type || 'text').toLowerCase()
       return typeMap[t] || t
     }
-    const block = (m as { block?: string }).block
+    const block = chunkBlockType(chunk)
     if (block === 'table') {
       return '表格'
+    }
+    if (block === 'image') {
+      return '图片'
+    }
+    if (block === 'heading') {
+      return '标题'
     }
     if (block === 'document_preamble') {
       return '文前'
@@ -1250,6 +1394,66 @@ function chunkDisplayText(chunk: KnowledgeChunk): string {
 
 function chunkTableHtmlForDisplay(chunk: KnowledgeChunk): string {
   return chunkTableHtml(chunk, mineruContentList.value)
+}
+
+function chunkTableContextForDisplay(chunk: KnowledgeChunk): string {
+  return chunkTableContextPrefix(chunk)
+}
+
+function chunkEnrichmentKeywords(chunk: KnowledgeChunk): string[] {
+  if (Array.isArray(chunk.enrichment_keywords) && chunk.enrichment_keywords.length > 0) {
+    return chunk.enrichment_keywords
+  }
+  const raw = chunk.metadata?.enrichment_keywords
+  if (Array.isArray(raw)) {
+    return raw.map((item) => String(item).trim()).filter(Boolean)
+  }
+  return []
+}
+
+function chunkEnrichmentEditable(chunk: KnowledgeChunk): boolean {
+  if (chunk.id <= 0 || usesGraphSegmentPreview.value) {
+    return false
+  }
+  const source = String(chunk.metadata?.source ?? '')
+  return source !== 'mineru_graph_preview' && source !== 'lightrag_text_chunk'
+}
+
+function chunkEnrichmentSummary(chunk: KnowledgeChunk): string {
+  const kw = chunkEnrichmentKeywords(chunk)
+  if (kw.length === 0) {
+    return ''
+  }
+  const preview = kw.slice(0, 4).join('、')
+  return kw.length > 4 ? `${preview}…` : preview
+}
+
+function closeChunkEditModal() {
+  chunkEditOpen.value = false
+  chunkEditTarget.value = null
+}
+
+async function openChunkEditModal(chunk: KnowledgeChunk) {
+  if (!chunkEnrichmentEditable(chunk) || Number.isNaN(kbId.value)) {
+    return
+  }
+  try {
+    const fresh = await knowledgeBaseApi.getChunk(kbId.value, chunk.id)
+    chunkEditTarget.value = fresh
+    chunkEditOpen.value = true
+  } catch (value) {
+    chunksError.value = getKnowledgeBaseErrorMessage(value, '加载切片失败')
+  }
+}
+
+function onChunkEnrichmentSaved(updated: KnowledgeChunk) {
+  const index = chunkItems.value.findIndex((item) => item.id === updated.id)
+  if (index >= 0) {
+    chunkItems.value[index] = updated
+  }
+  if (focusedChunkData.value?.id === updated.id) {
+    focusedChunkData.value = updated
+  }
 }
 
 function applyChunkKeyword() {
@@ -1585,10 +1789,18 @@ watch(isPdfDocument, (pdf) => {
 .doc-split-page {
   max-width: 100%;
   margin: 0;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
 }
 
 .doc-split-main {
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
 }
 
 .doc-split-main:fullscreen {
@@ -1606,12 +1818,13 @@ watch(isPdfDocument, (pdf) => {
 }
 
 .doc-split-topbar {
+  flex-shrink: 0;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 16px;
+  gap: 10px;
+  margin-bottom: 10px;
 }
 
 .doc-split-fs-btn {
@@ -1628,7 +1841,7 @@ watch(isPdfDocument, (pdf) => {
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  margin-bottom: 16px;
+  margin-bottom: 0;
   font-size: 0.88rem;
   color: var(--text-secondary);
 }
@@ -1660,12 +1873,19 @@ watch(isPdfDocument, (pdf) => {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 18px;
   align-items: stretch;
-  height: min(78vh, 920px);
+  flex: 1;
+  min-height: 0;
 }
 
 @media (max-width: 1100px) {
   .doc-split-grid {
     grid-template-columns: 1fr;
+    flex: none;
+    height: auto;
+  }
+
+  .doc-split-pane {
+    min-height: 70vh;
   }
 }
 
@@ -1776,6 +1996,21 @@ watch(isPdfDocument, (pdf) => {
 .doc-split-chunks-head-text {
   flex: 1;
   min-width: 0;
+}
+
+.doc-split-chunks-head-actions {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 10px;
+}
+
+.doc-parse-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
 }
 
 .doc-view-mode-segment {
@@ -2166,12 +2401,12 @@ watch(isPdfDocument, (pdf) => {
 .doc-split-search {
   display: flex;
   align-items: center;
-  gap: 8px;
-  flex: 1;
+  gap: 6px;
+  flex: 0 1 auto;
   min-width: 160px;
-  max-width: 320px;
-  padding: 0 10px;
-  border-radius: 12px;
+  max-width: 240px;
+  padding: 0 12px;
+  border-radius: 999px;
   border: 1px solid var(--border-color);
   background: var(--bg-secondary);
 }
@@ -2181,8 +2416,8 @@ watch(isPdfDocument, (pdf) => {
   background: transparent;
   flex: 1;
   min-width: 0;
-  padding: 8px 0;
-  font-size: 0.85rem;
+  padding: 4px 0;
+  font-size: 0.8rem;
 }
 
 .doc-split-search-input:focus {
@@ -2319,12 +2554,51 @@ watch(isPdfDocument, (pdf) => {
   margin-left: auto;
 }
 
+.doc-chunk-edit-btn {
+  min-width: 0;
+  padding: 2px 8px;
+  font-size: 0.72rem;
+  line-height: 1.3;
+}
+
+.doc-chunk-enrich-summary {
+  margin: -2px 0 8px 24px;
+  font-size: 0.75rem;
+  line-height: 1.45;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .doc-chunk-kind {
   padding: 2px 8px;
   border-radius: 8px;
   background: var(--bg-secondary);
   border: 1px solid var(--border-color);
   color: var(--text-secondary);
+}
+
+.doc-chunk-kind--table {
+  background: rgba(59, 130, 246, 0.08);
+  border-color: rgba(59, 130, 246, 0.25);
+  color: #2563eb;
+}
+
+.doc-chunk-kind--image {
+  background: rgba(168, 85, 247, 0.1);
+  border-color: rgba(168, 85, 247, 0.28);
+  color: #9333ea;
+}
+
+.doc-chunk-kind--heading {
+  background: rgba(245, 158, 11, 0.1);
+  border-color: rgba(245, 158, 11, 0.28);
+  color: #d97706;
+}
+
+.doc-chunk-card:has(.doc-chunk-kind--image) {
+  border-color: rgba(168, 85, 247, 0.22);
 }
 
 .doc-chunk-vec {
@@ -2342,6 +2616,16 @@ watch(isPdfDocument, (pdf) => {
 .doc-chunk-vec.pending {
   background: var(--bg-secondary);
   color: var(--text-tertiary);
+}
+
+.doc-chunk-context {
+  margin: 0 0 10px;
+  font-size: 0.82rem;
+  line-height: 1.55;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-weight: 600;
 }
 
 .doc-chunk-body {

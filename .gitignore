@@ -23,10 +23,19 @@ backend/storage/knowledge_files/*
 backend/storage/lightrag/*
 !backend/storage/lightrag/.gitkeep
 
+# MinerU 模型包（打进 mineru:cpu 镜像前由 scripts/export-mineru-models-bundle.sh 生成）
+backend/mineru_models_bundle/*
+!backend/mineru_models_bundle/.gitkeep
+
 # 离线 Docker 构建依赖（体积大，见 backend/scripts/download_offline_*.sh）
 backend/offline_deps/**/*.whl
 backend/offline_deps/**/*.tar.gz
 backend/offline_deps/**/*.zip
+# 离线模型权重（超过 GitHub 大小限制，仅本地/构建时存在）
+backend/offline_deps/**/*.pth
+backend/offline_deps/**/*.safetensors
+backend/offline_deps/docling-models/
+backend/offline_deps/easyocr-models/
 backend/alembic/versions/__pycache__/
 
 # IDE
@@ -37,5 +46,6 @@ node_modules/
 web/node_modules/
 web/dist/
 web/.vite/
+web/public/pdf.worker.min.mjs
 .DS_Store
 *.docx

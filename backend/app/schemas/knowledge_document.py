@@ -115,9 +115,33 @@ class KnowledgeChunkResponse(BaseModel):
     heading_path: str | None
     vector_status: str
     vector_id: str | None
+    keyword_text: str | None = None
+    enrichment_keywords: list[str] = Field(default_factory=list)
+    enrichment_questions: list[str] = Field(default_factory=list)
     metadata: dict | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class KnowledgeChunkEnrichmentUpdate(BaseModel):
+    keywords: list[str] = Field(default_factory=list, max_length=12)
+    questions: list[str] = Field(default_factory=list, max_length=5)
+
+
+class KnowledgeChunkEnrichmentRegenerateResponse(BaseModel):
+    keywords: list[str] = Field(default_factory=list)
+    questions: list[str] = Field(default_factory=list)
+
+
+class ChunkSourceContextResponse(BaseModel):
+    text: str
+    highlight_start: int = 0
+    highlight_end: int = 0
+    start_offset: int | None = None
+    end_offset: int | None = None
+    truncated_before: bool = False
+    truncated_after: bool = False
+    fallback: bool = False
 
 
 class KnowledgeChunkListResponse(BaseModel):

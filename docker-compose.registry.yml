@@ -11,7 +11,7 @@
 #   docker compose -f docker-compose.yml -f docker-compose.registry.yml up -d --no-build
 #
 # 可选 profile 同样在命令后追加，例如：
-#   docker compose -f docker-compose.yml -f docker-compose.registry.yml --profile mineru up -d --no-build
+#   CPU: --profile mineru-cpu   GPU: --profile mineru-gpu
 
 services:
   postgres:
@@ -38,8 +38,11 @@ services:
   frontend:
     image: ${REGISTRY}/${IMAGE_NAMESPACE}/node:20-alpine
 
-  mineru:
+  mineru-cpu:
     image: ${REGISTRY}/${IMAGE_NAMESPACE}/mineru:cpu
+
+  mineru-gpu:
+    image: ${REGISTRY}/${IMAGE_NAMESPACE}/mineru:gpu
 
   opendataloader-hybrid:
     image: ${REGISTRY}/${IMAGE_NAMESPACE}/python:3.12-slim

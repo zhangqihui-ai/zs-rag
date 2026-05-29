@@ -275,11 +275,28 @@ onUnmounted(() => {
   height: auto;
 }
 
+.document-original-html :deep(span.doc-original-highlight),
 .document-original-html :deep(mark.doc-original-highlight) {
-  background: color-mix(in srgb, var(--brand) 28%, #fef08a);
-  border-radius: 2px;
-  padding: 0 1px;
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--brand) 35%, transparent);
+  display: inline-block;
+  background: rgba(254, 242, 242, 0.92);
+  border: 2px solid #ef4444;
+  border-radius: 6px;
+  padding: 2px 6px;
+  margin: 1px 0;
+  box-shadow:
+    0 0 0 3px rgba(239, 68, 68, 0.18),
+    0 4px 14px rgba(239, 68, 68, 0.12);
+  color: inherit;
+}
+
+.document-original-html :deep(.doc-original-highlight-block) {
+  background: rgba(254, 242, 242, 0.55) !important;
+  border: 2px solid #ef4444 !important;
+  border-radius: 8px;
+  box-shadow:
+    0 0 0 3px rgba(239, 68, 68, 0.16),
+    inset 0 0 0 1px rgba(239, 68, 68, 0.08);
+  scroll-margin-block: 48px;
 }
 
 .document-original-html :deep(.docx-page-sentinel) {

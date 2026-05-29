@@ -127,6 +127,12 @@
       <circle cx="12" cy="8" r="4" />
       <path d="M5 20a7 7 0 0 1 14 0" />
     </template>
+    <template v-else-if="name === 'key'">
+      <circle cx="8" cy="8" r="3" />
+      <path d="M10.5 10.5 20 20" />
+      <path d="M16 16l2 2" />
+      <path d="M18 14l2 2" />
+    </template>
     <template v-else-if="name === 'arrow-up-right'">
       <path d="M7 17 17 7" />
       <path d="M9 7h8v8" />
@@ -137,6 +143,9 @@
     </template>
     <template v-else-if="name === 'chevron-down'">
       <path d="m6 9 6 6 6-6" />
+    </template>
+    <template v-else-if="name === 'chevron-up'">
+      <path d="m6 15 6-6 6 6" />
     </template>
     <template v-else-if="name === 'status'">
       <path d="M5 14.5 9 10l3 3 7-7" />

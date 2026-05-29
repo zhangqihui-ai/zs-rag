@@ -1,0 +1,69 @@
+# ==========================================================================
+# MinerU（GPU / VLM + vLLM）sidecar
+# --------------------------------------------------------------------------
+# - 基于官方 MinerU 推荐的 vllm/vllm-openai 镜像（T4 / Volta 7.5+，显存建议 ≥8GB）。
+# - 与 CPU pipeline 不同：backend 需设 MINERU_BACKEND=vlm-vllm-engine。
+# - 模型首次启动下载到 /models 卷（建议 mineru_models_gpu 卷，与 CPU 分卷）。
+# - 宿主机需：NVIDIA 驱动 + nvidia-container-toolkit；compose 使用 profile mineru-gpu。
+#
+# 构建（内网请先 sync vllm 到私有仓库并设 MINERU_VLLM_BASE_IMAGE）：
+#   docker build -f Dockerfile.mineru-gpu -t zs-rag-mineru:gpu backend
+# 完全无法 apt（纯离线）时跳过系统包（vLLM 镜像通常已含 curl/python）：
+#   docker build -f Dockerfile.mineru-gpu --build-arg SKIP_APT_PACKAGES=1 -t zs-rag-mineru:gpu backend
+# ==========================================================================
+ARG VLLM_BASE_IMAGE=vllm/vllm-openai:v0.11.2
+FROM ${VLLM_BASE_IMAGE}
+
+ARG APT_MIRROR=mirrors.aliyun.com
+# 1 = 不跑 apt（纯离线且无法访问任何 apt 镜像站时使用）
+ARG SKIP_APT_PACKAGES=0
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    MINERU_MODEL_SOURCE=modelscope \
+    HF_HOME=/models \
+    MODELSCOPE_CACHE=/models \
+    MINERU_TOOLS_CONFIG_JSON=/models/mineru.json
+
+# 字体与 OpenCV 依赖。vLLM 基于 Ubuntu 22.04，默认源多为 archive.ubuntu.com / NVIDIA CUDA，内网需改镜像站。
+RUN set -eux; \
+    if [ "${SKIP_APT_PACKAGES}" = "1" ]; then \
+        echo "SKIP_APT_PACKAGES=1: skip apt-get (offline)"; \
+        exit 0; \
+    fi; \
+    mkdir -p /etc/apt/sources.list.d.bak; \
+    mv /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d.bak/ 2>/dev/null || true; \
+    mv /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d.bak/ 2>/dev/null || true; \
+    printf '%s\n' \
+        "deb https://${APT_MIRROR}/ubuntu/ jammy main restricted universe multiverse" \
+        "deb https://${APT_MIRROR}/ubuntu/ jammy-updates main restricted universe multiverse" \
+        "deb https://${APT_MIRROR}/ubuntu/ jammy-security main restricted universe multiverse" \
+        > /etc/apt/sources.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        fonts-noto-core \
+        fonts-noto-cjk \
+        fontconfig \
+        libgl1 \
+        curl \
+        ca-certificates; \
+    fc-cache -fv; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*
+
+# 国内 PyPI；纯离线需在构建机预下载 wheel 并改用在线机构建（见 DEPLOYMENT.md）
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
+    PIP_DEFAULT_TIMEOUT=600
+RUN python3 -m pip install --no-cache-dir -U pip \
+    && python3 -m pip install --no-cache-dir "mineru[core]>=3.0.0" --break-system-packages \
+    && python3 -m pip cache purge
+
+RUN mkdir -p /models /workdir
+WORKDIR /workdir
+
+EXPOSE 8000
+
+ENTRYPOINT ["/bin/bash", "-c", "export MINERU_MODEL_SOURCE=${MINERU_MODEL_SOURCE:-modelscope} && exec \"$@\"", "--"]
+CMD ["mineru-api", "--host", "0.0.0.0", "--port", "8000"]

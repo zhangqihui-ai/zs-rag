@@ -123,6 +123,7 @@ def _keyword_query_bool(
     enterprise_space_id: int,
     document_ids: list[int] | None,
     limit: int,
+    exclude_standalone_image_ocr: bool = False,
 ) -> dict[str, Any]:
     filter_q: list[dict[str, Any]] = [
         {"term": {"knowledge_base_id": knowledge_base_id}},
@@ -163,6 +164,10 @@ def _keyword_query_bool(
             "filter": filter_q,
         }
 
+    if exclude_standalone_image_ocr:
+        must_not = bool_query.setdefault("must_not", [])
+        must_not.append({"term": {"block": "image"}})
+
     return {
         "size": max(1, min(limit, 100)),
         "_source": ["chunk_uid", "chunk_id"],
@@ -189,6 +194,8 @@ _INDEX_BODY: dict[str, Any] = {
             "page_no": {"type": "integer"},
             "keyword_text": {"type": "text"},
             "content": {"type": "text"},
+            "block": {"type": "keyword"},
+            "chunk_role": {"type": "keyword"},
         }
     },
 }
@@ -283,6 +290,7 @@ def bulk_upsert_chunks(
         for ch in chunks:
             meta = {"index": {"_index": idx, "_id": ch.chunk_uid}}
             kw = (ch.keyword_text or ch.content or "").strip()
+            meta = ch.metadata_json if isinstance(ch.metadata_json, dict) else {}
             doc = {
                 "chunk_uid": ch.chunk_uid,
                 "chunk_id": int(ch.id),
@@ -295,6 +303,12 @@ def bulk_upsert_chunks(
                 "keyword_text": kw,
                 "content": (ch.content or "")[:200_000],
             }
+            block = meta.get("block")
+            if block:
+                doc["block"] = str(block)
+            chunk_role = meta.get("chunk_role")
+            if chunk_role:
+                doc["chunk_role"] = str(chunk_role)
             if doc["page_no"] is None:
                 del doc["page_no"]
             lines.append(json.dumps(meta, ensure_ascii=False))
@@ -349,6 +363,7 @@ def keyword_search_candidates(
     query: str,
     limit: int,
     document_ids: list[int] | None,
+    exclude_standalone_image_ocr: bool = False,
 ) -> list[dict[str, Any]]:
     """
     返回与 _keyword_candidates（PG）相同结构：chunk, document_name, keyword_score。
@@ -367,6 +382,7 @@ def keyword_search_candidates(
         enterprise_space_id=enterprise_space_id,
         document_ids=document_ids,
         limit=limit,
+        exclude_standalone_image_ocr=exclude_standalone_image_ocr,
     )
 
     if logger.isEnabledFor(logging.DEBUG):

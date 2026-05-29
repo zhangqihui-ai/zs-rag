@@ -1,0 +1,21 @@
+# OpenDataLoader Hybrid sidecar：使用预构建镜像，避免启动时 apt/pip（内网必用）
+#
+# 有网机构建并推送（示例）：
+#   docker build -f backend/Dockerfile.odl-hybrid -t 192.168.252.252:5566/zs-rag/odl-hybrid:latest backend
+#   docker push 192.168.252.252:5566/zs-rag/odl-hybrid:latest
+#
+# 启动：
+#   docker compose -f docker-compose.yml -f docker-compose.odl-hybrid.yml \
+#     --profile odl-hybrid up -d --no-build opendataloader-hybrid
+#
+# .env：
+#   ODL_HYBRID_IMAGE=192.168.252.252:5566/zs-rag/odl-hybrid:latest
+#   ODL_HYBRID_URL=http://opendataloader-hybrid:5002
+
+services:
+  opendataloader-hybrid:
+    image: ${ODL_HYBRID_IMAGE:-zs-rag-odl-hybrid:latest}
+    pull_policy: if_not_present
+    build: !reset null
+    command: !reset null
+    working_dir: !reset null

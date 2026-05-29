@@ -4,6 +4,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     Float,
     ForeignKey,
@@ -42,7 +43,21 @@ class ChatConversation(Base):
     temperature: Mapped[float] = mapped_column(Float, default=0.7, nullable=False)
     max_tokens: Mapped[int] = mapped_column(Integer, default=2000, nullable=False)
     top_p: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
+    temperature_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    max_tokens_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    top_p_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    max_history_messages: Mapped[int] = mapped_column(Integer, default=20, nullable=False)
+    max_history_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    refine_multiturn: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    opening_greeting: Mapped[str | None] = mapped_column(Text, nullable=True)
+    empty_response: Mapped[str | None] = mapped_column(Text, nullable=True)
+    suggest_next_questions_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    suggest_next_questions_model_id: Mapped[int | None] = mapped_column(
+        ForeignKey("ai_model.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    suggest_next_questions_prompt_mode: Mapped[str] = mapped_column(String(20), default="system", nullable=False)
+    suggest_next_questions_custom_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     sessions: Mapped[list["ChatSession"]] = relationship(
         "ChatSession",

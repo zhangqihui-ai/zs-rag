@@ -173,6 +173,10 @@ def enrich_chunk_candidates(
 
     for i, candidate in enumerate(candidates, start=1):
         meta = dict(candidate.metadata or {})
+        if meta.get("block") == "image":
+            if emit and (i <= 3 or i == total or i % 50 == 0):
+                emit(f"入库增强进度 {i}/{total}（跳过图片 OCR）…")
+            continue
         try:
             result = enrich_chunk_with_llm(
                 content=candidate.content,

@@ -62,6 +62,23 @@
         </div>
 
         <div v-if="hybridStrategyProxy === 'weight'" class="retrieval-config-field">
+          <span class="field-label retrieval-config-field-label">
+            融合方式
+            <span class="retrieval-config-help" :title="helpFusionMethod" tabindex="0" role="note">?</span>
+          </span>
+          <div class="retrieval-config-fusion" role="radiogroup" aria-label="融合方式">
+            <label :class="['retrieval-config-fusion-chip', { active: fusionMethodProxy === 'weighted' }]">
+              <input v-model="fusionMethodProxy" type="radio" value="weighted" />
+              <span>加权求和</span>
+            </label>
+            <label :class="['retrieval-config-fusion-chip', { active: fusionMethodProxy === 'rrf' }]">
+              <input v-model="fusionMethodProxy" type="radio" value="rrf" />
+              <span>RRF（按排名）</span>
+            </label>
+          </div>
+        </div>
+
+        <div v-if="hybridStrategyProxy === 'weight'" class="retrieval-config-field">
           <div class="retrieval-config-slider-head">
             <span class="field-label">
               向量相似度权重
@@ -185,6 +202,21 @@
           </div>
         </div>
       </div>
+
+      <div class="retrieval-config-field retrieval-config-field--switch">
+        <label class="retrieval-config-switch-row">
+          <span class="switch">
+            <input v-model="includeImageOcrProxy" type="checkbox" />
+          </span>
+          <span class="field-label retrieval-config-switch-label">
+            含截图 OCR 切片
+            <span class="retrieval-config-help" :title="helpIncludeImageOcr" tabindex="0" role="note">?</span>
+          </span>
+        </label>
+        <p class="retrieval-config-field-hint">
+          默认关闭，检索时排除独立图片 OCR 块；UI/截图类问句仍可能自动召回（降权）。
+        </p>
+      </div>
     </div>
   </div>
 </template>
@@ -203,6 +235,7 @@ import AppIcon from '../AppIcon.vue'
 import RerankModelPicker from './RerankModelPicker.vue'
 
 export type HybridStrategy = 'weight' | 'rerank'
+export type FusionMethod = 'weighted' | 'rrf'
 
 export interface RetrievalFormState {
   mode: RetrievalMode
@@ -211,8 +244,10 @@ export interface RetrievalFormState {
   score_threshold: number
   vector_weight: number
   hybrid_strategy: HybridStrategy
+  fusion_method: FusionMethod
   rerank_enabled: boolean
   rerank_model_id: number | null
+  include_image_ocr: boolean
 }
 
 const props = defineProps<{ modelValue: RetrievalFormState }>()
@@ -253,9 +288,13 @@ const helpVectorWeight =
   '向量相似度权重：向量分支与全文（关键词）分支的权重之和为 1.0。调大向量权重偏向语义匹配，调大全文权重偏向关键词命中。中文法条、制度类文档建议 0.3～0.4，以关键词命中为主。'
 const helpRerank =
   'Rerank 模型将根据候选文档列表与用户问题的语义匹配度进行重新排序，从而改进语义排序的结果。'
+const helpFusionMethod =
+  '融合方式（混合检索）：加权求和=将向量/全文分各自归一化后按权重相加；RRF=按各通道名次做加权倒数排名融合（score=Σ w/(k+rank)，k=60），跨量纲更稳、不受单路异常分影响，向量/关键词权重仍生效。中文法条/制度类语料可优先试 RRF。'
 const helpTopK = 'Top K：召回返回的候选结果数量。数值越大召回越多，但噪声也可能增加。'
 const helpScoreThreshold =
   'Score 阈值（0~1）：混合检索专用。开启后，向量路与全文路会各自将当次召回的候选在本路内归一化到 0~1，仅保留 ≥ 阈值的片段进入权重融合；低于阈值的弱命中不会参与混合排序。平台默认 0.5（偏精准）；若召回偏少可降至 0.3～0.4。关闭后仍会用内置规则去掉仅命中「需要」「对方」等泛词的噪声。单用向量/全文模式时，向量原始分通常远小于 1，阈值主要适用于混合检索。'
+const helpIncludeImageOcr =
+  '开启后允许独立 block=image 的截图 OCR 切片参与检索（会降权）；关闭时默认排除，避免 OCR 重复词抢排名。问句含「界面」「截图」「豫事办」等 UI 词时仍可能自动放宽。'
 
 function emitPatch(patch: Partial<RetrievalFormState>) {
   emit('update:modelValue', { ...props.modelValue, ...patch })
@@ -274,8 +313,10 @@ const scoreThresholdEnabledProxy = makeProxy('score_threshold_enabled')
 const scoreThresholdProxy = makeProxy('score_threshold')
 const vectorWeightProxy = makeProxy('vector_weight')
 const hybridStrategyProxy = makeProxy('hybrid_strategy')
+const fusionMethodProxy = makeProxy('fusion_method')
 const rerankEnabledProxy = makeProxy('rerank_enabled')
 const rerankModelIdProxy = makeProxy('rerank_model_id')
+const includeImageOcrProxy = makeProxy('include_image_ocr')
 
 const rerankModels = ref<ModelItem[]>([])
 const rerankLoading = ref(false)
@@ -506,6 +547,40 @@ onMounted(() => {
   line-height: 1.5;
 }
 
+.retrieval-config-fusion {
+  display: inline-flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.retrieval-config-fusion-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.retrieval-config-fusion-chip.active {
+  border-color: var(--brand-primary);
+  color: var(--brand-primary);
+  background: var(--brand-primary-light, rgba(59, 130, 246, 0.12));
+  font-weight: 600;
+}
+
+.retrieval-config-fusion-chip input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
 .retrieval-config-field {
   display: grid;
   gap: 8px;
@@ -536,6 +611,13 @@ onMounted(() => {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+}
+
+.retrieval-config-field-hint {
+  margin: 6px 0 0;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  line-height: 1.45;
 }
 
 .retrieval-config-switch-text {

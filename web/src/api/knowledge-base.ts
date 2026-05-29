@@ -114,6 +114,9 @@ export interface KnowledgeDocument {
   file_size: number | null
   storage_type: string
   parser_type: string
+  /** 实际解析引擎（metadata.parser_backend） */
+  parser_engine?: string | null
+  parser_engine_label?: string | null
   chunk_size: number
   chunk_overlap: number
   status: string
@@ -131,7 +134,7 @@ export interface KnowledgeDocument {
 /** 服务端持久化的解析/重建索引日志 */
 export interface KnowledgeDocumentParseLog {
   kind: 'parse' | 'reindex' | null
-  phase: 'success' | 'error' | null
+  phase: 'running' | 'success' | 'error' | null
   lines: { t: string; text: string }[]
   updated_at: string | null
 }
@@ -151,9 +154,33 @@ export interface KnowledgeChunk {
   heading_path: string | null
   vector_status: string
   vector_id: string | null
+  keyword_text?: string | null
+  enrichment_keywords?: string[]
+  enrichment_questions?: string[]
   metadata: Record<string, unknown> | null
   created_at: string
   updated_at: string
+}
+
+export interface KnowledgeChunkEnrichmentUpdatePayload {
+  keywords: string[]
+  questions: string[]
+}
+
+export interface KnowledgeChunkEnrichmentRegenerateResponse {
+  keywords: string[]
+  questions: string[]
+}
+
+export interface ChunkSourceContext {
+  text: string
+  highlight_start: number
+  highlight_end: number
+  start_offset: number | null
+  end_offset: number | null
+  truncated_before: boolean
+  truncated_after: boolean
+  fallback: boolean
 }
 
 export interface PaginatedResponse<T> {
@@ -171,6 +198,10 @@ export interface KnowledgeSearchRequest {
   score_threshold?: number | null
   /** 混合检索：向量分支权重（0~1），全文关键词权重为 1-w；缺省后端 0.5 */
   vector_weight?: number | null
+  /** 混合检索通道融合方式：weighted=加权求和（默认）；rrf=加权倒数排名融合 */
+  fusion_method?: 'weighted' | 'rrf' | null
+  /** 是否召回独立 block=image 的截图 OCR 切片；缺省 false */
+  include_image_ocr?: boolean | null
   document_ids?: number[]
 }
 
@@ -181,6 +212,13 @@ export interface KnowledgeSearchResult {
   document_name: string
   chunk_index: number
   content: string
+  content_preview?: string | null
+  char_count?: number | null
+  start_offset?: number | null
+  end_offset?: number | null
+  heading_path?: string | null
+  enrichment_keywords?: string[]
+  enrichment_questions?: string[]
   score: number
   vector_score: number | null
   keyword_score: number | null
@@ -189,6 +227,9 @@ export interface KnowledgeSearchResult {
     document_name: string
     page_no: number | null
     chunk_index: number
+    heading_path?: string | null
+    location_label?: string | null
+    block?: string | null
   }
   /** 多库检索时由后端填充 */
   knowledge_base_id?: number | null
@@ -412,6 +453,23 @@ export const knowledgeBaseApi = {
   getChunk(kbId: number, chunkId: number) {
     return unwrap<KnowledgeChunk>(http.get(`/knowledge-bases/${kbId}/chunks/${chunkId}`))
   },
+  getChunkSourceContext(kbId: number, chunkId: number, contextChars = 320) {
+    return unwrap<ChunkSourceContext>(
+      http.get(`/knowledge-bases/${kbId}/chunks/${chunkId}/source-context`, {
+        params: { context_chars: contextChars },
+      }),
+    )
+  },
+  updateChunkEnrichment(kbId: number, chunkId: number, payload: KnowledgeChunkEnrichmentUpdatePayload) {
+    return unwrap<KnowledgeChunk>(
+      http.patch(`/knowledge-bases/${kbId}/chunks/${chunkId}`, payload),
+    )
+  },
+  regenerateChunkEnrichment(kbId: number, chunkId: number) {
+    return unwrap<KnowledgeChunkEnrichmentRegenerateResponse>(
+      http.post(`/knowledge-bases/${kbId}/chunks/${chunkId}/regenerate-enrichment`),
+    )
+  },
   search(kbId: number, payload: KnowledgeSearchRequest) {
     return unwrap<KnowledgeSearchResponse>(http.post(`/knowledge-bases/${kbId}/search`, payload))
   },
@@ -421,9 +479,7 @@ export const knowledgeBaseApi = {
   },
 }
 
-function getApiBaseUrl(): string {
-  return import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
-}
+import { resolveApiBaseUrl } from '../lib/apiBaseUrl'
 
 export type DocumentProcessStreamMode = 'parse' | 'reindex'
 
@@ -456,7 +512,7 @@ export async function streamDocumentProcess(
 ): Promise<KnowledgeDocument> {
   const token = localStorage.getItem('auth_token')
   const enterpriseSpace = localStorage.getItem('current_enterprise_space')
-  const base = getApiBaseUrl().replace(/\/$/, '')
+  const base = resolveApiBaseUrl().replace(/\/$/, '')
   const path =
     mode === 'parse'
       ? `/knowledge-bases/${kbId}/documents/${documentId}/parse-stream`

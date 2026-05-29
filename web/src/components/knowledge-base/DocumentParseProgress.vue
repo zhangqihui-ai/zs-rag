@@ -16,7 +16,7 @@ const emit = defineEmits<{
       <span class="doc-parse-progress-track" aria-hidden="true">
         <span class="doc-parse-progress-fill" :style="{ width: `${Math.min(Math.max(percent, 0), 100)}%` }" />
       </span>
-      <span class="doc-parse-progress-pct">{{ percent.toFixed(2) }}%</span>
+      <span class="doc-parse-progress-pct">{{ Math.round(percent) }}%</span>
     </button>
     <button
       class="doc-parse-progress-cancel"
@@ -34,16 +34,16 @@ const emit = defineEmits<{
 .doc-parse-progress {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  max-width: 148px;
-  min-width: 0;
+  gap: 6px;
+  min-width: 176px;
+  flex-shrink: 0;
 }
 
 .doc-parse-progress-main {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  flex: 1;
+  gap: 8px;
+  flex: 1 1 auto;
   min-width: 0;
   padding: 2px 4px;
   border: none;
@@ -58,7 +58,7 @@ const emit = defineEmits<{
 
 .doc-parse-progress-track {
   display: block;
-  width: 72px;
+  width: 88px;
   height: 4px;
   border-radius: 999px;
   background: rgba(59, 130, 246, 0.12);
@@ -80,6 +80,9 @@ const emit = defineEmits<{
   color: var(--text-secondary, #64748b);
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+  min-width: 2.5em;
+  text-align: right;
 }
 
 .doc-parse-progress-cancel {

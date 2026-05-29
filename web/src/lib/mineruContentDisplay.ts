@@ -304,6 +304,35 @@ function tableHtmlFromMetadata(meta: Record<string, unknown>): string {
   return ''
 }
 
+/** 表格切片中附件/标题等上下文（表格 HTML 渲染之外的前缀文本）。 */
+export function chunkTableContextPrefix(chunk: KnowledgeChunk): string {
+  const m = chunk.metadata
+  if (!m || typeof m !== 'object') {
+    return ''
+  }
+  const meta = m as Record<string, unknown>
+  if (meta.block !== 'table') {
+    return ''
+  }
+  const stored = meta.table_context_prefix
+  if (typeof stored === 'string' && stored.trim()) {
+    return stored.trim()
+  }
+  const content = (chunk.content || '').trim()
+  if (!content) {
+    return ''
+  }
+  const mdTable = content.match(/^([\s\S]+?)\n\|[^\n]+\|\n\|[-:\s|]+\|/)
+  if (mdTable?.[1]?.trim()) {
+    return mdTable[1].trim()
+  }
+  const htmlTable = content.match(/^([\s\S]+?)<table[\s>]/i)
+  if (htmlTable?.[1]?.trim()) {
+    return htmlTable[1].trim()
+  }
+  return ''
+}
+
 export function chunkTableHtml(
   chunk: KnowledgeChunk,
   items: MineruContentItem[],
@@ -352,6 +381,53 @@ export function chunkTableHtml(
 
 export function chunkShowsTableView(chunk: KnowledgeChunk, items: MineruContentItem[]): boolean {
   return chunkTableHtml(chunk, items).length > 0
+}
+
+/**
+ * 全文（所有页）shown 块的 bbox 内容包络最大值。
+ * 同一文档各页物理尺寸一致，用全文包络比「单页内容最大值」更稳定，
+ * 可避免某页内容稀疏时低估页面尺寸导致框定位漂移。
+ */
+export function mineruContentExtent(items: MineruContentItem[]): { maxX: number; maxY: number } {
+  let maxX = 0
+  let maxY = 0
+  for (const it of items) {
+    if (!shouldShowMineruBlock(it)) {
+      continue
+    }
+    const b = it.bbox
+    if (!Array.isArray(b) || b.length < 4) {
+      continue
+    }
+    const x1 = Number(b[2])
+    const y1 = Number(b[3])
+    if (Number.isFinite(x1)) {
+      maxX = Math.max(maxX, x1)
+    }
+    if (Number.isFinite(y1)) {
+      maxY = Math.max(maxY, y1)
+    }
+  }
+  return { maxX, maxY }
+}
+
+/**
+ * 由内容包络 + PDF 真实页纵横比，推算 MinerU 坐标系下的整页尺寸。
+ * MinerU content_list 不携带 page_size，且坐标系按页缩放（非 PDF 点），
+ * 仅用「内容最大坐标」当页尺寸会丢掉页面留白（尤其底部），导致框被整体下拉。
+ * 这里保持与 PDF 一致的纵横比并保证内容完全落入，使 x/y 采用统一缩放。
+ * @param aspectHW PDF 页高/页宽（baseHeight / baseWidth）
+ */
+export function mineruPageBox(
+  extent: { maxX: number; maxY: number },
+  aspectHW: number,
+): { pageW: number; pageH: number } {
+  const ratio = Number.isFinite(aspectHW) && aspectHW > 0 ? aspectHW : 1
+  const maxX = extent.maxX > 0 ? extent.maxX : 1
+  const maxY = extent.maxY > 0 ? extent.maxY : 1
+  const pageW = Math.max(maxX, maxY / ratio)
+  const pageH = pageW * ratio
+  return { pageW, pageH }
 }
 
 export function pageScaleFromItems(items: MineruContentItem[], pageIdx0: number): { mx: number; my: number } {

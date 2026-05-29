@@ -3,17 +3,7 @@
  * Each event is one line: `data: <json>\n\n` where json matches legacy WebSocket payloads.
  */
 
-const sseBaseUrl = (): string => {
-  const env = import.meta.env.VITE_API_BASE_URL as string | undefined
-  if (env != null && String(env).trim().length > 0) {
-    return String(env).replace(/\/$/, '')
-  }
-  if (typeof window !== 'undefined') {
-    const { protocol, hostname } = window.location
-    return `${protocol}//${hostname}:8000`
-  }
-  return 'http://localhost:8000'
-}
+import { resolveApiBaseUrl } from './apiBaseUrl'
 
 export async function streamChatCompletion(
   sessionId: string,
@@ -23,7 +13,7 @@ export async function streamChatCompletion(
 ): Promise<void> {
   const token = localStorage.getItem('auth_token') || ''
   const enterpriseSpace = localStorage.getItem('current_enterprise_space')
-  const res = await fetch(`${sseBaseUrl()}/api/v1/chats/sessions/${sessionId}/stream`, {
+  const res = await fetch(`${resolveApiBaseUrl()}/api/v1/chats/sessions/${sessionId}/stream`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

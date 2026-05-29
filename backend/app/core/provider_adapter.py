@@ -105,13 +105,23 @@ class BaseProvider(ABC):
         messages: list[dict[str, Any]],
         *,
         timeout: httpx.Timeout | float | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        top_p: float | None = None,
     ) -> ProviderResponse:
         start_time = time.time()
         try:
+            payload: dict[str, Any] = {"model": model_name, "messages": messages}
+            if temperature is not None:
+                payload["temperature"] = temperature
+            if max_tokens is not None:
+                payload["max_tokens"] = max_tokens
+            if top_p is not None:
+                payload["top_p"] = top_p
             response = self.client.post(
                 f"{self.config.base_url.rstrip('/')}/chat/completions",
                 headers={**self.request_headers(), "Content-Type": "application/json"},
-                json={"model": model_name, "messages": messages},
+                json=payload,
                 timeout=timeout,
             )
             response.raise_for_status()
@@ -142,11 +152,23 @@ class BaseProvider(ABC):
             )
 
     def chat_stream_chunks(
-        self, model_name: str, messages: list[dict[str, Any]]
+        self,
+        model_name: str,
+        messages: list[dict[str, Any]],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        top_p: float | None = None,
     ) -> Iterator[str]:
         """OpenAI-compatible SSE stream; yields text deltas from choices[].delta.content."""
         url = f"{self.config.base_url.rstrip('/')}/chat/completions"
-        payload = {"model": model_name, "messages": messages, "stream": True}
+        payload: dict[str, Any] = {"model": model_name, "messages": messages, "stream": True}
+        if temperature is not None:
+            payload["temperature"] = temperature
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        if top_p is not None:
+            payload["top_p"] = top_p
         stream_timeout = httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)
         with self.client.stream(
             "POST",

@@ -5,6 +5,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.core.knowledge_retrieval_defaults import DEFAULT_TOP_K
 
+DEFAULT_OPENING_GREETING = "你好，我是你的智能助手，有什么需要帮助的吗？"
+
 
 class ChatStreamRequest(BaseModel):
     content: str = Field(..., min_length=1, description="用户本轮输入（纯文本）")
@@ -93,10 +95,65 @@ class ChatConfigurationBase(BaseModel):
     temperature: float = Field(0.7, ge=0.0, le=2.0)
     max_tokens: int = Field(2000, ge=1)
     top_p: float = Field(1.0, ge=0.0, le=1.0)
+    temperature_enabled: bool = Field(
+        default=False,
+        description="为 true 时向模型传入 temperature；为 false 时使用模型/厂商默认。",
+    )
+    max_tokens_enabled: bool = Field(
+        default=False,
+        description="为 true 时向模型传入 max_tokens；为 false 时使用模型/厂商默认。",
+    )
+    top_p_enabled: bool = Field(
+        default=False,
+        description="为 true 时向模型传入 top_p；为 false 时使用模型/厂商默认。",
+    )
     system_prompt: str | None = Field(
         default=None,
         max_length=100_000,
         description="系统提示词；可用 {knowledge} 占位。为空时使用服务端默认模板。",
+    )
+    max_history_messages: int = Field(
+        default=20,
+        ge=0,
+        le=100,
+        description="发给大模型的最近消息条数；0 表示单轮、不使用历史。",
+    )
+    max_history_tokens: int | None = Field(
+        default=None,
+        ge=1,
+        le=128_000,
+        description="可选：历史消息 token 上限（字符估算）；与 max_history_messages 取更严限制。",
+    )
+    refine_multiturn: bool = Field(
+        default=False,
+        description="多轮 query 改写：结合历史将省略问句补全后再检索知识库。",
+    )
+    opening_greeting: str | None = Field(
+        default=DEFAULT_OPENING_GREETING,
+        max_length=10_000,
+        description="新建会话时的开场白（以助手消息写入）。",
+    )
+    empty_response: str | None = Field(
+        default=None,
+        max_length=10_000,
+        description="已选知识库但检索无命中时的固定回复；为空则仍走大模型。",
+    )
+    suggest_next_questions_enabled: bool = Field(
+        default=True,
+        description="是否在助手回复后生成下一步问题建议。",
+    )
+    suggest_next_questions_model_id: int | None = Field(
+        default=None,
+        description="生成建议所用模型；为空则使用对话主模型。",
+    )
+    suggest_next_questions_prompt_mode: str = Field(
+        default="system",
+        description="提示词模式：system（内置）或 custom（自定义）。",
+    )
+    suggest_next_questions_custom_prompt: str | None = Field(
+        default=None,
+        max_length=10_000,
+        description="自定义下一步问题生成提示词；prompt_mode=custom 时生效。",
     )
 
 
@@ -157,6 +214,15 @@ class ChatConversationResponse(BaseModel):
     system_prompt: str | None = None
     show_citations: bool = True
     retrieval_top_k: int = DEFAULT_TOP_K
+    max_history_messages: int = 20
+    max_history_tokens: int | None = None
+    refine_multiturn: bool = False
+    opening_greeting: str | None = None
+    empty_response: str | None = None
+    suggest_next_questions_enabled: bool = True
+    suggest_next_questions_model_id: int | None = None
+    suggest_next_questions_prompt_mode: str = "system"
+    suggest_next_questions_custom_prompt: str | None = None
 
     class Config:
         from_attributes = True

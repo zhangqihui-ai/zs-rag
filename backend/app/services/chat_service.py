@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 import time
 import uuid
 from collections.abc import Iterator
@@ -23,6 +25,7 @@ from app.models.knowledge_base import KnowledgeBase
 from app.models.model_management import AIModel, AIModelDefault, AIModelProvider
 from app.core.knowledge_retrieval_defaults import DEFAULT_TOP_K
 from app.schemas.chat import (
+    DEFAULT_OPENING_GREETING,
     ChatConfigurationResponse,
     ChatConfigurationUpdate,
     ChatConversationCreate,
@@ -54,6 +57,246 @@ _CITATION_HINT_SUFFIX = (
     "\n\n（请在回答中引用上述片段时，在对应句末使用角标 [1]、[2] 等与编号对应；"
     "综合多条时可写 [1][2]。未用到的编号勿标注。）"
 )
+
+DEFAULT_MAX_HISTORY_MESSAGES = 20
+
+_REFINE_MULTITURN_PROMPT = (
+    "根据下面的对话历史，将用户的最新问题改写为完整、可独立理解的检索查询。"
+    "只输出改写后的查询文本，不要解释或加引号。"
+)
+
+DEFAULT_SUGGEST_NEXT_QUESTIONS_PROMPT = (
+    "请预测用户最可能追问的 3 个问题，每个问题不超过 20 字，"
+    "使用与助手最新回复相同的语言，仅输出 JSON 数组，例如 [\"问题1\", \"问题2\", \"问题3\"]。"
+)
+
+DEFAULT_SUGGEST_NEXT_QUESTIONS_PROMPT_EN = (
+    "Please predict the three most likely follow-up questions a user would ask, "
+    "keep each question under 20 characters, use the same language as the assistant's latest response, "
+    'and output a JSON array like ["question1", "question2", "question3"].'
+)
+
+# 问候、能力介绍、身份/模型询问等：不触发知识库检索，走通用对话
+_NON_RETRIEVAL_GREETING_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^(你好|您好|嗨|哈喽|hello|hi|hey|morning|good morning)$", re.I),
+    re.compile(r"^(谢谢|多谢|感谢|thanks|thank you|thx)$", re.I),
+    re.compile(r"^(再见|拜拜|bye|goodbye|see you)$", re.I),
+)
+
+_NON_RETRIEVAL_META_SUBSTRINGS: tuple[str, ...] = (
+    "你能做什么",
+    "你会做什么",
+    "你能帮我什么",
+    "你能帮我做什么",
+    "你有什么功能",
+    "你会什么",
+    "你能干什么",
+    "介绍一下你自己",
+    "介绍你自己",
+    "自我介绍一下",
+    "你是谁",
+    "你是什么",
+    "你叫什么",
+    "什么模型",
+    "用的什么模型",
+    "使用什么模型",
+    "what can you do",
+    "who are you",
+    "what are you",
+)
+
+
+def _normalize_query_for_retrieval_routing(query: str) -> str:
+    q = (query or "").strip()
+    q = re.sub(r"[\?？!！。．,\，、；;：:]+$", "", q).strip()
+    return q.casefold() if q.isascii() else q
+
+
+def should_skip_knowledge_retrieval(user_query: str) -> bool:
+    """Meta / greeting / small-talk queries should not hit the knowledge base."""
+    q = _normalize_query_for_retrieval_routing(user_query)
+    if not q:
+        return True
+    for pattern in _NON_RETRIEVAL_GREETING_PATTERNS:
+        if pattern.match(q):
+            return True
+    q_fold = q.casefold()
+    q_compact = re.sub(r"\s+", "", q_fold)
+    for hint in _NON_RETRIEVAL_META_SUBSTRINGS:
+        h = hint.casefold()
+        if h in q_fold or h.replace(" ", "") in q_compact:
+            return True
+    return False
+
+
+def _clamp_max_history_messages(raw: Any) -> int:
+    if raw is None:
+        return DEFAULT_MAX_HISTORY_MESSAGES
+    try:
+        return max(0, min(100, int(raw)))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_HISTORY_MESSAGES
+
+
+def _parse_max_history_tokens(raw: Any) -> int | None:
+    if raw is None:
+        return None
+    try:
+        val = int(raw)
+        return val if val > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _estimate_text_tokens(text: str) -> int:
+    s = text or ""
+    return max(1, len(s) // 4) if s else 0
+
+
+def load_session_messages_for_llm(
+    db: Session,
+    *,
+    session_id: str,
+    conv: ChatConversation | None,
+) -> list[dict[str, str]]:
+    """Load recent session messages for LLM context (user/assistant only)."""
+    max_msgs = _clamp_max_history_messages(getattr(conv, "max_history_messages", None))
+    if max_msgs == 0:
+        return []
+
+    max_tokens = _parse_max_history_tokens(getattr(conv, "max_history_tokens", None))
+
+    stmt = (
+        select(ChatMessage)
+        .where(ChatMessage.session_id == session_id)
+        .order_by(ChatMessage.created_at.desc())
+        .limit(max_msgs)
+    )
+    history = list(reversed(db.execute(stmt).scalars().all()))
+    hist_dicts = [{"role": str(m.role), "content": str(m.content)} for m in history]
+
+    if max_tokens is not None and hist_dicts:
+        trimmed_rev: list[dict[str, str]] = []
+        used = 0
+        for msg in reversed(hist_dicts):
+            t = _estimate_text_tokens(str(msg.get("content") or ""))
+            if used + t > max_tokens:
+                break
+            trimmed_rev.append(msg)
+            used += t
+        hist_dicts = list(reversed(trimmed_rev))
+
+    return hist_dicts
+
+
+def _maybe_refine_retrieval_query(
+    db: Session,
+    *,
+    conv: ChatConversation | None,
+    enterprise_space_id: int,
+    user_query: str,
+    history: list[dict[str, str]],
+) -> str:
+    if conv is None or not bool(getattr(conv, "refine_multiturn", False)):
+        return user_query
+    q = (user_query or "").strip()
+    if not q or len(history) < 1:
+        return user_query
+    try:
+        provider_cfg, api_model_name = _resolve_chat_llm(
+            db, conv=conv, enterprise_space_id=enterprise_space_id
+        )
+    except AppError:
+        return user_query
+    if not provider_cfg or not api_model_name:
+        return user_query
+
+    recent = history[-6:]
+    lines: list[str] = []
+    for m in recent:
+        role = str(m.get("role") or "")
+        content = str(m.get("content") or "").strip()
+        if role in ("user", "assistant") and content:
+            lines.append(f"{role}: {content}")
+    lines.append(f"user: {q}")
+    messages = [
+        {"role": "system", "content": _REFINE_MULTITURN_PROMPT},
+        {"role": "user", "content": "\n".join(lines)},
+    ]
+    try:
+        provider = get_provider(provider_cfg)
+        resp = provider.chat(api_model_name, messages, timeout=30.0)
+        if not resp.success or not resp.data:
+            return user_query
+        refined = _extract_assistant_from_openai_completion(resp.data).strip()
+        return refined or user_query
+    except Exception:
+        return user_query
+
+
+def _resolve_opening_greeting_on_create(config_data: dict) -> str | None:
+    if "opening_greeting" not in config_data:
+        return DEFAULT_OPENING_GREETING
+    val = config_data["opening_greeting"]
+    if val is None:
+        return None
+    text = str(val).strip()
+    return text or None
+
+
+def _seed_opening_greeting_if_configured(
+    db: Session, *, session_id: str, conv: ChatConversation | None
+) -> None:
+    if conv is None:
+        return
+    greeting = (conv.opening_greeting or "").strip()
+    if not greeting:
+        return
+    add_chat_message(db, session_id=session_id, role="assistant", content=greeting)
+
+
+def _empty_response_if_configured(conv: ChatConversation | None, *, kb_block: str) -> str | None:
+    if conv is None or (kb_block or "").strip():
+        return None
+    kb_ids = list(conv.knowledge_base_ids or [])
+    if not kb_ids:
+        return None
+    msg = (conv.empty_response or "").strip()
+    return msg or None
+
+
+def _retrieve_for_user_turn(
+    db: Session,
+    *,
+    conv: ChatConversation | None,
+    enterprise_space_id: int,
+    user_query: str,
+    history_for_refine: list[dict[str, str]],
+) -> tuple[str, list[dict[str, Any]], str | None]:
+    """Returns (kb_block_for_system, citations, empty_reply_if_configured)."""
+    kb_ids = list(conv.knowledge_base_ids or []) if conv else []
+    if kb_ids and should_skip_knowledge_retrieval(user_query):
+        return "", [], None
+
+    retrieval_query = _maybe_refine_retrieval_query(
+        db,
+        conv=conv,
+        enterprise_space_id=enterprise_space_id,
+        user_query=user_query,
+        history=history_for_refine,
+    )
+    kb_block, cites = _retrieve_knowledge_block_and_citations(
+        db,
+        enterprise_space_id=enterprise_space_id,
+        knowledge_base_ids=list(conv.knowledge_base_ids or []) if conv else [],
+        query=retrieval_query,
+        merge_top_k=_merge_top_k_for_conversation(conv),
+        lightrag_query_mode=str(getattr(conv, "lightrag_query_mode", None) or "mix"),
+    )
+    empty_reply = _empty_response_if_configured(conv, kb_block=kb_block)
+    if empty_reply is None and kb_block:
+        kb_block = kb_block + (_CITATION_HINT_SUFFIX if getattr(conv, "show_citations", True) else "")
+    return kb_block, cites, empty_reply
 
 
 def _clamp_retrieval_top_k(raw: Any) -> int:
@@ -130,12 +373,21 @@ def _retrieve_knowledge_block_and_citations(
     ref = 0
 
     if classic_ids:
+        primary_kb = kb_by_id[classic_ids[0]]
+        stored = (primary_kb.config or {}).get("retrieval") if isinstance(primary_kb.config, dict) else {}
+        include_image_ocr = None
+        if isinstance(stored, dict) and "include_image_ocr" in stored:
+            include_image_ocr = bool(stored.get("include_image_ocr"))
         try:
             data = search_knowledge_bases_multi(
                 db,
                 space_id=enterprise_space_id,
                 knowledge_base_ids=classic_ids,
-                payload=KnowledgeSearchRequest(query=q[:2000], top_k=cap),
+                payload=KnowledgeSearchRequest(
+                    query=q[:2000],
+                    top_k=cap,
+                    include_image_ocr=include_image_ocr,
+                ),
             )
             for item in data.get("results") or []:
                 raw_kb = item.get("knowledge_base_id")
@@ -296,8 +548,35 @@ def _config_response(conv: ChatConversation) -> ChatConfigurationResponse:
         temperature=float(conv.temperature),
         max_tokens=int(conv.max_tokens),
         top_p=float(conv.top_p),
+        temperature_enabled=bool(getattr(conv, "temperature_enabled", False)),
+        max_tokens_enabled=bool(getattr(conv, "max_tokens_enabled", False)),
+        top_p_enabled=bool(getattr(conv, "top_p_enabled", False)),
         system_prompt=conv.system_prompt,
+        max_history_messages=_clamp_max_history_messages(getattr(conv, "max_history_messages", None)),
+        max_history_tokens=_parse_max_history_tokens(getattr(conv, "max_history_tokens", None)),
+        refine_multiturn=bool(getattr(conv, "refine_multiturn", False)),
+        opening_greeting=conv.opening_greeting,
+        empty_response=conv.empty_response,
+        suggest_next_questions_enabled=bool(getattr(conv, "suggest_next_questions_enabled", False)),
+        suggest_next_questions_model_id=getattr(conv, "suggest_next_questions_model_id", None),
+        suggest_next_questions_prompt_mode=str(
+            getattr(conv, "suggest_next_questions_prompt_mode", None) or "system"
+        ),
+        suggest_next_questions_custom_prompt=getattr(conv, "suggest_next_questions_custom_prompt", None),
     )
+
+
+def _llm_sampling_kwargs(conv: ChatConversation | None) -> dict[str, float | int]:
+    if conv is None:
+        return {}
+    out: dict[str, float | int] = {}
+    if bool(getattr(conv, "temperature_enabled", False)):
+        out["temperature"] = float(conv.temperature)
+    if bool(getattr(conv, "max_tokens_enabled", False)):
+        out["max_tokens"] = int(conv.max_tokens)
+    if bool(getattr(conv, "top_p_enabled", False)):
+        out["top_p"] = float(conv.top_p)
+    return out
 
 
 def _resolve_chat_llm(
@@ -370,6 +649,107 @@ def _resolve_chat_llm(
     if len(provs) == 1:
         return provs[0], name
     return None, name
+
+
+def _resolve_suggest_questions_llm(
+    db: Session, *, conv: ChatConversation, enterprise_space_id: int
+) -> tuple[AIModelProvider | None, str]:
+    model_id = getattr(conv, "suggest_next_questions_model_id", None)
+    if model_id is not None:
+        model = db.execute(
+            select(AIModel)
+            .options(selectinload(AIModel.provider))
+            .where(
+                AIModel.id == model_id,
+                AIModel.enterprise_space_id == enterprise_space_id,
+                AIModel.model_type == "llm",
+                AIModel.is_enabled.is_(True),
+            )
+        ).scalar_one_or_none()
+        if model is None or model.provider is None:
+            raise AppError(
+                status_code=400,
+                code="SUGGEST_MODEL_NOT_FOUND",
+                message="下一步问题建议绑定的模型不存在、未启用或已删除，请重新选择",
+            )
+        api_name = (model.model_name or model.model_code or "").strip()
+        if not api_name:
+            raise AppError(
+                status_code=500,
+                code="SUGGEST_MODEL_MISCONFIGURED",
+                message="下一步问题建议模型缺少 model_name / model_code",
+            )
+        return model.provider, api_name
+    return _resolve_chat_llm(db, conv=conv, enterprise_space_id=enterprise_space_id)
+
+
+def _effective_suggest_questions_prompt(conv: ChatConversation | None) -> str:
+    mode = str(getattr(conv, "suggest_next_questions_prompt_mode", None) or "system")
+    if mode == "custom":
+        custom = (getattr(conv, "suggest_next_questions_custom_prompt", None) or "").strip()
+        if custom:
+            return custom
+    return DEFAULT_SUGGEST_NEXT_QUESTIONS_PROMPT
+
+
+def _parse_suggested_questions(raw: str) -> list[str]:
+    text = (raw or "").strip()
+    if not text:
+        return []
+    fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+    if fence:
+        text = fence.group(1).strip()
+    candidates = [text]
+    bracket = re.search(r"\[[\s\S]*\]", text)
+    if bracket:
+        candidates.append(bracket.group(0))
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, list):
+            out = [str(x).strip() for x in data if str(x).strip()]
+            if out:
+                return out[:3]
+    return []
+
+
+def generate_suggested_next_questions(
+    db: Session,
+    *,
+    conv: ChatConversation | None,
+    enterprise_space_id: int,
+    user_content: str,
+    assistant_content: str,
+) -> list[str]:
+    if conv is None or not bool(getattr(conv, "suggest_next_questions_enabled", False)):
+        return []
+    ac = (assistant_content or "").strip()
+    if not ac or ac.startswith("【错误】") or ac.startswith("Echo:"):
+        return []
+    try:
+        provider_cfg, api_model_name = _resolve_suggest_questions_llm(
+            db, conv=conv, enterprise_space_id=enterprise_space_id
+        )
+    except AppError:
+        return []
+    if not provider_cfg or not api_model_name:
+        return []
+    prompt = _effective_suggest_questions_prompt(conv)
+    messages = [
+        {"role": "system", "content": prompt},
+        {"role": "user", "content": f"用户: {user_content.strip()}\n\n助手: {ac}"},
+    ]
+    try:
+        provider = get_provider(provider_cfg)
+        resp = provider.chat(api_model_name, messages, timeout=30.0)
+        if not resp.success or not resp.data:
+            return []
+        raw = _extract_assistant_from_openai_completion(resp.data)
+        return _parse_suggested_questions(raw)
+    except Exception:
+        return []
 
 
 def _touch_conversation(db: Session, conversation_id: str) -> None:
@@ -447,7 +827,19 @@ def create_chat_conversation(
         temperature=float(config_data.get("temperature", 0.7)),
         max_tokens=int(config_data.get("max_tokens", 2000)),
         top_p=float(config_data.get("top_p", 1.0)),
+        temperature_enabled=bool(config_data.get("temperature_enabled", False)),
+        max_tokens_enabled=bool(config_data.get("max_tokens_enabled", False)),
+        top_p_enabled=bool(config_data.get("top_p_enabled", False)),
         system_prompt=config_data.get("system_prompt"),
+        max_history_messages=_clamp_max_history_messages(config_data.get("max_history_messages")),
+        max_history_tokens=_parse_max_history_tokens(config_data.get("max_history_tokens")),
+        refine_multiturn=bool(config_data.get("refine_multiturn", False)),
+        opening_greeting=_resolve_opening_greeting_on_create(config_data),
+        empty_response=config_data.get("empty_response"),
+        suggest_next_questions_enabled=bool(config_data.get("suggest_next_questions_enabled", True)),
+        suggest_next_questions_model_id=config_data.get("suggest_next_questions_model_id"),
+        suggest_next_questions_prompt_mode=str(config_data.get("suggest_next_questions_prompt_mode") or "system"),
+        suggest_next_questions_custom_prompt=config_data.get("suggest_next_questions_custom_prompt"),
     )
     db.add(conv)
     db.flush()
@@ -460,6 +852,8 @@ def create_chat_conversation(
         title="会话 1",
     )
     db.add(first_session)
+    db.flush()
+    _seed_opening_greeting_if_configured(db, session_id=first_session.id, conv=conv)
     db.commit()
     db.refresh(conv)
     return conv
@@ -527,6 +921,9 @@ def create_session_in_conversation(
     )
     db.add(db_obj)
     _touch_conversation(db, conversation_id)
+    db.flush()
+    conv = db.get(ChatConversation, conversation_id)
+    _seed_opening_greeting_if_configured(db, session_id=db_obj.id, conv=conv)
     db.commit()
     db.refresh(db_obj)
     return db_obj
@@ -669,6 +1066,25 @@ def _next_stream_chunk(stream_iter: Iterator[str]) -> str | object:
         return _STREAM_STOP
 
 
+def _yield_suggest_question_events(
+    db: Session,
+    *,
+    conv: ChatConversation | None,
+    enterprise_space_id: int,
+    user_content: str,
+    assistant_content: str,
+) -> Iterator[dict[str, object]]:
+    questions = generate_suggested_next_questions(
+        db,
+        conv=conv,
+        enterprise_space_id=enterprise_space_id,
+        user_content=user_content,
+        assistant_content=assistant_content,
+    )
+    if questions:
+        yield {"type": "suggested_questions", "questions": questions}
+
+
 def complete_chat_turn_blocking(
     db: Session,
     *,
@@ -738,30 +1154,47 @@ def iter_chat_stream_events(
 
     if provider_cfg and api_model_name:
         try:
-            history = db.execute(
-                select(ChatMessage)
-                .where(ChatMessage.session_id == session_id)
-                .order_by(ChatMessage.created_at.asc())
-                .limit(20)
-            ).scalars().all()
-
-            messages = [{"role": msg.role, "content": msg.content} for msg in history]
-            kb_block, turn_citations = _retrieve_knowledge_block_and_citations(
+            messages = load_session_messages_for_llm(db, session_id=session_id, conv=conv)
+            prior_history = messages[:-1] if messages else []
+            kb_block, turn_citations, empty_reply = _retrieve_for_user_turn(
                 db,
+                conv=conv,
                 enterprise_space_id=session_obj.enterprise_space_id,
-                knowledge_base_ids=list(conv.knowledge_base_ids or []) if conv else [],
-                query=user_content,
-                merge_top_k=_merge_top_k_for_conversation(conv),
-                lightrag_query_mode=str(getattr(conv, "lightrag_query_mode", None) or "mix"),
+                user_query=user_content,
+                history_for_refine=prior_history,
             )
-            if kb_block:
-                kb_block = kb_block + (
-                    _CITATION_HINT_SUFFIX if getattr(conv, "show_citations", True) else ""
+            if empty_reply is not None:
+                assistant_content = empty_reply
+                yield {"type": "assistant_delta", "content": assistant_content}
+                saved = add_chat_message(
+                    db,
+                    session_id=session_id,
+                    role="assistant",
+                    content=assistant_content,
+                    citations=None,
                 )
+                yield {
+                    "type": "assistant_done",
+                    "id": saved.id,
+                    "session_id": saved.session_id,
+                    "role": saved.role,
+                    "content": saved.content,
+                    "created_at": saved.created_at.isoformat(),
+                    "citations": [],
+                }
+                yield from _yield_suggest_question_events(
+                    db,
+                    conv=conv,
+                    enterprise_space_id=session_obj.enterprise_space_id,
+                    user_content=user_content,
+                    assistant_content=assistant_content,
+                )
+                return
             messages = inject_system_into_messages(messages, conv, knowledge_block=kb_block)
 
             provider = get_provider(provider_cfg)
-            stream_iter = iter(provider.chat_stream_chunks(api_model_name, messages))
+            sampling = _llm_sampling_kwargs(conv)
+            stream_iter = iter(provider.chat_stream_chunks(api_model_name, messages, **sampling))
             while True:
                 chunk = _next_stream_chunk(stream_iter)
                 if chunk is _STREAM_STOP:
@@ -795,6 +1228,13 @@ def iter_chat_stream_events(
         "created_at": saved.created_at.isoformat(),
         "citations": list(saved.citations or []),
     }
+    yield from _yield_suggest_question_events(
+        db,
+        conv=conv,
+        enterprise_space_id=session_obj.enterprise_space_id,
+        user_content=user_content,
+        assistant_content=assistant_content,
+    )
 
 
 def _extract_assistant_from_openai_completion(data: Any) -> str:
@@ -854,7 +1294,7 @@ def build_completion_messages(
     session: ChatSession,
     request_messages: list[OpenAICompatMessage] | list[dict[str, Any]] | None,
     question: str | None,
-) -> tuple[list[dict[str, str]], str, list[dict[str, Any]]]:
+) -> tuple[list[dict[str, str]], str, list[dict[str, Any]], str | None]:
     conv = db.get(ChatConversation, session.conversation_id)
     normalized = _normalize_openai_messages_list(request_messages)
     if normalized:
@@ -866,17 +1306,17 @@ def build_completion_messages(
                 code="INVALID_MESSAGES",
                 message="messages must include a user message with non-empty content",
             )
-        kb_block, cites = _retrieve_knowledge_block_and_citations(
+        history_for_refine = normalized[:-1] if len(normalized) > 1 else []
+        kb_block, cites, empty_reply = _retrieve_for_user_turn(
             db,
+            conv=conv,
             enterprise_space_id=session.enterprise_space_id,
-            knowledge_base_ids=list(conv.knowledge_base_ids or []) if conv else [],
-            query=user_text,
-            merge_top_k=_merge_top_k_for_conversation(conv),
-            lightrag_query_mode=str(getattr(conv, "lightrag_query_mode", None) or "mix"),
+            user_query=user_text,
+            history_for_refine=history_for_refine,
         )
-        if kb_block:
-            kb_block = kb_block + (_CITATION_HINT_SUFFIX if getattr(conv, "show_citations", True) else "")
-        return inject_system_into_messages(normalized, conv, knowledge_block=kb_block), user_text, cites
+        if empty_reply is not None:
+            return normalized, user_text, [], empty_reply
+        return inject_system_into_messages(normalized, conv, knowledge_block=kb_block), user_text, cites, None
     q = (question or "").strip()
     if not q:
         raise AppError(
@@ -884,25 +1324,18 @@ def build_completion_messages(
             code="MESSAGES_NORMALIZATION_EMPTY",
             message="messages 无有效条目；请提供 question 或有效的 messages",
         )
-    history = db.execute(
-        select(ChatMessage)
-        .where(ChatMessage.session_id == session.id)
-        .order_by(ChatMessage.created_at.asc())
-        .limit(20)
-    ).scalars().all()
-    hist_dicts = [{"role": m.role, "content": m.content} for m in history]
-    merged = [*hist_dicts, {"role": "user", "content": q}]
-    kb_block, cites = _retrieve_knowledge_block_and_citations(
+    hist_dicts = load_session_messages_for_llm(db, session_id=session.id, conv=conv)
+    kb_block, cites, empty_reply = _retrieve_for_user_turn(
         db,
+        conv=conv,
         enterprise_space_id=session.enterprise_space_id,
-        knowledge_base_ids=list(conv.knowledge_base_ids or []) if conv else [],
-        query=q,
-        merge_top_k=_merge_top_k_for_conversation(conv),
-        lightrag_query_mode=str(getattr(conv, "lightrag_query_mode", None) or "mix"),
+        user_query=q,
+        history_for_refine=hist_dicts,
     )
-    if kb_block:
-        kb_block = kb_block + (_CITATION_HINT_SUFFIX if getattr(conv, "show_citations", True) else "")
-    return inject_system_into_messages(merged, conv, knowledge_block=kb_block), q, cites
+    merged = [*hist_dicts, {"role": "user", "content": q}]
+    if empty_reply is not None:
+        return merged, q, [], empty_reply
+    return inject_system_into_messages(merged, conv, knowledge_block=kb_block), q, cites, None
 
 
 def iter_openai_completion_events(
@@ -916,6 +1349,7 @@ def iter_openai_completion_events(
     llm_messages: list[dict[str, str]],
     turn_citations: list[dict[str, Any]] | None = None,
     response_model: str | None = None,
+    forced_assistant_content: str | None = None,
 ) -> Iterator[dict[str, Any]]:
     session_obj = get_chat_session(
         db, session_id=session_id, user_id=user_id, enterprise_space_id=enterprise_space_id
@@ -984,10 +1418,24 @@ def iter_openai_completion_events(
             )
             return
 
-    if provider_cfg and api_model_name:
+    if forced_assistant_content is not None:
+        assistant_content = forced_assistant_content
+        yield build_chat_completion_chunk(
+            completion_id=completion_id,
+            created=created,
+            model=model_label,
+            chat_id=chat_id,
+            session_id=session_id,
+            content=assistant_content,
+            role="assistant",
+            finish_reason=None,
+            usage=None,
+        )
+    elif provider_cfg and api_model_name:
         try:
             provider = get_provider(provider_cfg)
-            stream_iter = iter(provider.chat_stream_chunks(api_model_name, llm_messages))
+            sampling = _llm_sampling_kwargs(conv)
+            stream_iter = iter(provider.chat_stream_chunks(api_model_name, llm_messages, **sampling))
             while True:
                 chunk = _next_stream_chunk(stream_iter)
                 if chunk is _STREAM_STOP:
@@ -1065,6 +1513,7 @@ def run_chat_completion_blocking(
     llm_messages: list[dict[str, str]],
     turn_citations: list[dict[str, Any]] | None = None,
     response_model: str | None = None,
+    forced_assistant_content: str | None = None,
 ) -> dict[str, Any]:
     session_obj = get_chat_session(
         db, session_id=session_id, user_id=user_id, enterprise_space_id=enterprise_space_id
@@ -1101,7 +1550,9 @@ def run_chat_completion_blocking(
                 "content": assistant_content,
             }
 
-    if provider_cfg and api_model_name:
+    if forced_assistant_content is not None:
+        assistant_content = forced_assistant_content
+    elif provider_cfg and api_model_name:
         provider = get_provider(provider_cfg)
         resp = provider.chat(api_model_name, llm_messages)
         if not resp.success:

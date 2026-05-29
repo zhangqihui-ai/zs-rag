@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import desc, func, literal, or_, select
@@ -11,7 +12,14 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.embedding_gateway import generate_query_embedding
 from app.core.errors import AppError
-from app.core.knowledge_retrieval_defaults import DEFAULT_VECTOR_WEIGHT
+from app.core.knowledge_retrieval_defaults import (
+    DEFAULT_AUTO_IMAGE_OCR_ON_UI_QUERY,
+    DEFAULT_FUSION_METHOD,
+    DEFAULT_IMAGE_OCR_SCORE_FACTOR,
+    DEFAULT_INCLUDE_IMAGE_OCR,
+    DEFAULT_RRF_K,
+    DEFAULT_VECTOR_WEIGHT,
+)
 from app.core.milvus_client import search_vectors
 from app.models.knowledge_base import KnowledgeBase, KnowledgeChunk, KnowledgeDocument, KnowledgeDocumentStatus
 from app.schemas.retrieval import KnowledgeSearchRequest
@@ -31,6 +39,8 @@ MIN_KEYWORD_RELEVANCE_SCORE = 1.5
 MIN_KEYWORD_HYBRID_SCORE = 3.0
 # 全文无有效命中时，向量路 Top1 分数低于此值则不强行向量兜底
 MIN_VECTOR_FALLBACK_SCORE = 0.45
+# RRF 平滑常数（加权倒数排名融合）
+RRF_K = DEFAULT_RRF_K
 
 # 问句二字滑窗产生的跨词边界片段，参与匹配但不计分
 _NOISE_BIGRAMS: frozenset[str] = frozenset(
@@ -48,6 +58,42 @@ _NOISE_BIGRAMS: frozenset[str] = frozenset(
         "卫杀",
         "人需",
         "刑吗",
+    }
+)
+
+# 问句模板词：不参与强锚点，辅助层也极低权重
+_QUERY_TEMPLATE_TERMS: frozenset[str] = frozenset(
+    {
+        "如何",
+        "怎么",
+        "怎样",
+        "咋样",
+        "哪些",
+        "什么",
+        "是否",
+        "能否",
+        "可不可以",
+        "有没有",
+        "干嘛",
+        "请问",
+        "哪儿",
+        "哪里",
+        "多少",
+        "为啥",
+        "为什么",
+        "办理",
+        "申请",
+        "查询",
+        "相关",
+        "有哪些",
+        "是什么",
+        "什么意思",
+        "指的是",
+        "一下",
+        "帮我",
+        "告诉",
+        "能否",
+        "可不可以",
     }
 )
 
@@ -104,6 +150,168 @@ def _expand_colloquial_query(query: str) -> str:
     return q
 
 
+@dataclass(frozen=True)
+class QueryTermLayers:
+    """问句词项分层：强锚点（2~8 字实体）+ 二字滑窗辅助。"""
+
+    anchors: tuple[str, ...]
+    specific_anchors: tuple[str, ...]
+    auxiliaries: tuple[str, ...]
+
+
+def _dedupe_terms(terms: list[str]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in terms:
+        t = raw.strip()
+        if len(t) < 2 or t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+    return tuple(out)
+
+
+def _entity_parts_from_query(query: str) -> list[str]:
+    """从连续中文块中剥离问句模板词，得到实体片段（2~8 字）。"""
+    parts: list[str] = []
+    for run in re.finditer(r"[\u4e00-\u9fff]{2,}", query):
+        block = run.group(0)
+        peeled = block
+        for template in sorted(_QUERY_TEMPLATE_TERMS, key=len, reverse=True):
+            peeled = peeled.replace(template, "|")
+        for piece in peeled.split("|"):
+            piece = piece.strip()
+            if len(piece) >= 2 and piece not in _QUERY_TEMPLATE_TERMS:
+                parts.append(piece)
+    return parts
+
+
+def _expand_anchors_from_part(part: str) -> list[str]:
+    anchors = [part]
+    n = len(part)
+    if n >= 4:
+        anchors.append(part[:3])
+        anchors.append(part[-2:])
+        if n == 4:
+            anchors.append(part[:2])
+    elif n == 3:
+        anchors.append(part[:2])
+        anchors.append(part[1:3])
+    return anchors
+
+
+def _required_anchor_satisfied(text: str, entity_parts: tuple[str, ...]) -> bool:
+    """按实体片段长度决定必达锚点，避免「新生儿医保」问句仅命中「医保」过线。"""
+    if not entity_parts:
+        return True
+    for part in entity_parts:
+        if len(part) >= 5:
+            if _keyword_term_hits(text, part) or _keyword_term_hits(text, part[:3]):
+                return True
+        elif len(part) == 4:
+            if (
+                _keyword_term_hits(text, part)
+                or _keyword_term_hits(text, part[:2])
+                or _keyword_term_hits(text, part[-2:])
+            ):
+                return True
+        elif len(part) == 3:
+            if _keyword_term_hits(text, part) or _keyword_term_hits(text, part[:2]):
+                return True
+        elif _keyword_term_hits(text, part):
+            return True
+    return False
+
+
+def _extract_query_term_layers(query: str) -> QueryTermLayers:
+    """
+    强锚点：问句实体（2~8 字，含「医保」「落户」等二字领域词）；
+    辅助项：二字滑窗，仅用于 recall/加分，不作必达。
+    """
+    q = query.strip()
+    entity_parts = _dedupe_terms(_entity_parts_from_query(q))
+    anchor_candidates: list[str] = list(entity_parts)
+    for part in entity_parts:
+        anchor_candidates.extend(_expand_anchors_from_part(part))
+    for tok in re.split(r"[\s\u3000]+", q):
+        tok = tok.strip()
+        if len(tok) >= 2 and re.search(r"[A-Za-z0-9]", tok) and tok not in _QUERY_TEMPLATE_TERMS:
+            anchor_candidates.append(tok)
+
+    anchors = _dedupe_terms([a for a in anchor_candidates if a not in _QUERY_TEMPLATE_TERMS])
+    specific = entity_parts if entity_parts else anchors
+
+    auxiliaries: list[str] = []
+    for run in re.finditer(r"[\u4e00-\u9fff]{2,}", q):
+        text = run.group(0)
+        if len(text) == 2:
+            auxiliaries.append(text)
+        else:
+            auxiliaries.extend(text[i : i + 2] for i in range(len(text) - 1))
+    anchor_set = set(anchors)
+    auxiliaries = [
+        t
+        for t in auxiliaries
+        if t not in anchor_set
+        and t not in _QUERY_TEMPLATE_TERMS
+        and t not in _NOISE_BIGRAMS
+        and t not in _LOW_VALUE_KEYWORD_TERMS
+    ]
+    return QueryTermLayers(
+        anchors=anchors,
+        specific_anchors=specific,
+        auxiliaries=_dedupe_terms(auxiliaries),
+    )
+
+
+def _anchor_term_weight(term: str) -> float:
+    if term in _QUERY_TEMPLATE_TERMS or term in _NOISE_BIGRAMS:
+        return 0.0
+    if len(term) >= 5 and re.fullmatch(r"[\u4e00-\u9fff]+", term):
+        return 3.0
+    if len(term) == 4 and re.fullmatch(r"[\u4e00-\u9fff]+", term):
+        return 2.5
+    if len(term) == 3 and re.fullmatch(r"[\u4e00-\u9fff]+", term):
+        return 2.0
+    if len(term) == 2 and re.fullmatch(r"[\u4e00-\u9fff]+", term):
+        return 1.5
+    if re.search(r"[A-Za-z0-9]", term):
+        return 1.2
+    return 1.0
+
+
+def _auxiliary_term_weight(term: str) -> float:
+    if term in _QUERY_TEMPLATE_TERMS or term in _NOISE_BIGRAMS:
+        return 0.0
+    if term in _LOW_VALUE_KEYWORD_TERMS:
+        return 0.15
+    if len(term) == 2 and re.fullmatch(r"[\u4e00-\u9fff]+", term):
+        return 0.45
+    if re.search(r"[A-Za-z0-9]", term):
+        return 0.35
+    return 0.25
+
+
+def _layered_keyword_match_score(text: str, layers: QueryTermLayers) -> float:
+    if not text or not layers.anchors:
+        return 0.0
+
+    if not _required_anchor_satisfied(text, layers.specific_anchors):
+        return 0.0
+
+    anchor_score = 0.0
+    for anchor in layers.anchors:
+        if _keyword_term_hits(text, anchor):
+            anchor_score += _anchor_term_weight(anchor)
+
+    aux_score = 0.0
+    for term in layers.auxiliaries:
+        if _keyword_term_hits(text, term):
+            aux_score += _auxiliary_term_weight(term)
+
+    return anchor_score + aux_score
+
+
 def _keyword_term_weight(term: str) -> float:
     if term in _NOISE_BIGRAMS:
         return 0.0
@@ -132,6 +340,7 @@ def _keyword_term_hits(text: str, term: str) -> bool:
 
 
 def _keyword_match_score(text: str, terms: list[str]) -> float:
+    """兼容旧测试：按扁平词项列表打分（无锚点必达）。"""
     if not text or not terms:
         return 0.0
     score = 0.0
@@ -150,12 +359,11 @@ def _rescore_keyword_candidates(
     query: str,
     limit: int,
 ) -> list[dict[str, Any]]:
-    terms = _keyword_fallback_ilike_terms(query)
-    if not terms:
-        terms = [query.strip()]
+    layers = _extract_query_term_layers(query)
     for item in candidates:
         text = item["chunk"].keyword_text or item["chunk"].content or ""
-        item["keyword_score"] = _keyword_match_score(text, terms)
+        item["keyword_score"] = _layered_keyword_match_score(text, layers)
+    candidates = [item for item in candidates if float(item.get("keyword_score") or 0) > 0]
     candidates.sort(
         key=lambda item: (-float(item["keyword_score"] or 0), item["chunk"].id),
     )
@@ -236,22 +444,17 @@ def _escape_for_ilike(s: str) -> str:
 def _keyword_fallback_ilike_terms(query: str) -> list[str]:
     """
     从问句中提取若干子串，用作 ILIKE 的 OR 后备检索。
-    解决：中文问句整句较少连续出现在切片中，plainto_tsquery(simple) 又常匹配不到，导致全文检索恒为 0 条。
+    优先强锚点短语，再补二字滑窗辅助 recall。
     """
     q = query.strip()
     if not q:
         return []
-    terms: list[str] = []
+    layers = _extract_query_term_layers(q)
+    terms: list[str] = list(layers.anchors) + list(layers.auxiliaries)
     for tok in re.split(r"[\s\u3000]+", q):
         t = tok.strip()
         if len(t) >= 2 and re.search(r"[A-Za-z0-9]", t):
             terms.append(t)
-    for m in re.finditer(r"[\u4e00-\u9fff]{2,}", q):
-        run = m.group(0)
-        if len(run) == 2:
-            terms.append(run)
-        else:
-            terms.extend(run[i : i + 2] for i in range(0, len(run) - 1))
     if len(q) == 1 and "\u4e00" <= q <= "\u9fff":
         terms.append(q)
     seen: set[str] = set()
@@ -276,7 +479,199 @@ def _render_result_content(chunk: KnowledgeChunk) -> str:
             if child.strip():
                 return f"{parent_preview.rstrip()}\n\n—— 命中片段 ——\n{child.strip()}"
             return parent_preview.strip()
-    return chunk.content
+    return chunk.content or ""
+
+
+def _content_preview(text: str, *, max_chars: int = 240) -> str:
+    stripped = (text or "").strip()
+    if len(stripped) <= max_chars:
+        return stripped
+    return stripped[: max_chars - 1].rstrip() + "…"
+
+
+def _extract_enrichment(meta: dict[str, Any] | None) -> tuple[list[str], list[str]]:
+    if not isinstance(meta, dict):
+        return [], []
+    kw_raw = meta.get("enrichment_keywords") or []
+    q_raw = meta.get("enrichment_questions") or []
+    keywords = (
+        [str(k).strip() for k in kw_raw if str(k).strip()]
+        if isinstance(kw_raw, list)
+        else []
+    )
+    questions = (
+        [str(q).strip() for q in q_raw if str(q).strip()]
+        if isinstance(q_raw, list)
+        else []
+    )
+    return keywords, questions
+
+
+def _chunk_block_type(meta: dict[str, Any] | None) -> str | None:
+    if not isinstance(meta, dict):
+        return None
+    block = meta.get("block")
+    return str(block).strip() if block else None
+
+
+def _chunk_location_label(chunk: KnowledgeChunk) -> str | None:
+    from app.core.heading_match import normalize_heading_match_text
+
+    meta = chunk.metadata_json if isinstance(chunk.metadata_json, dict) else {}
+    heading = (chunk.heading_path or meta.get("heading_path") or "").strip()
+    if heading:
+        parts = [p.strip() for p in heading.split(" / ") if p.strip()]
+        if parts:
+            return normalize_heading_match_text(parts[-1])
+    block = meta.get("block")
+    if block == "image":
+        return "图片 OCR"
+    if block == "document_preamble":
+        return "文前"
+    if block == "table":
+        return "表格"
+    if chunk.page_no is not None and chunk.page_no > 1:
+        return f"第 {chunk.page_no} 页"
+    return None
+
+
+def _citation_page_no(chunk: KnowledgeChunk) -> int | None:
+    """Word/MinerU 单页文档 page_no 常为 1，不在引文中展示无区分度的页码。"""
+    if chunk.page_no is None or chunk.page_no <= 1:
+        return None
+    return chunk.page_no
+
+
+def _normalize_content_for_dedup(text: str) -> str:
+    return re.sub(r"\s+", "", (text or "").strip())
+
+
+def _content_overlap_ratio(a: str, b: str) -> float:
+    na = _normalize_content_for_dedup(a)
+    nb = _normalize_content_for_dedup(b)
+    if not na or not nb:
+        return 0.0
+    if na == nb:
+        return 1.0
+    shorter, longer = (na, nb) if len(na) <= len(nb) else (nb, na)
+    if shorter in longer:
+        return len(shorter) / max(len(longer), 1)
+    prefix_len = min(len(shorter), 120)
+    if prefix_len >= 40 and shorter[:prefix_len] == longer[:prefix_len]:
+        return prefix_len / max(len(longer), 1)
+    return 0.0
+
+
+_UI_IMAGE_OCR_QUERY_RE = re.compile(
+    r"(界面|截图|页面|App|小程序|按钮|点击|屏幕|图片|豫事办|支付宝)",
+    re.IGNORECASE,
+)
+
+
+def _chunk_metadata_dict(chunk: KnowledgeChunk) -> dict[str, Any]:
+    meta = chunk.metadata_json
+    return meta if isinstance(meta, dict) else {}
+
+
+def _is_standalone_image_ocr_chunk(chunk: KnowledgeChunk) -> bool:
+    meta = _chunk_metadata_dict(chunk)
+    return meta.get("block") == "image" and not meta.get("image_ocr_attached")
+
+
+def _result_is_standalone_image_ocr(item: dict[str, Any]) -> bool:
+    meta = item.get("metadata")
+    if not isinstance(meta, dict):
+        cite = item.get("citation")
+        if isinstance(cite, dict) and cite.get("block") == "image":
+            return True
+        return False
+    return meta.get("block") == "image" and not meta.get("image_ocr_attached")
+
+
+def _query_wants_image_ocr(query: str) -> bool:
+    return bool(_UI_IMAGE_OCR_QUERY_RE.search((query or "").strip()))
+
+
+def _stored_retrieval_config(knowledge_base: KnowledgeBase) -> dict[str, Any]:
+    cfg = knowledge_base.config if isinstance(knowledge_base.config, dict) else {}
+    raw = cfg.get("retrieval")
+    return raw if isinstance(raw, dict) else {}
+
+
+def _resolve_image_ocr_retrieval(
+    knowledge_base: KnowledgeBase,
+    payload: KnowledgeSearchRequest,
+    query: str,
+) -> tuple[bool, float, bool]:
+    """返回 (allow_standalone_image_ocr, score_factor, exclude_at_engine)."""
+    stored = _stored_retrieval_config(knowledge_base)
+    include = (
+        payload.include_image_ocr
+        if payload.include_image_ocr is not None
+        else bool(stored.get("include_image_ocr", DEFAULT_INCLUDE_IMAGE_OCR))
+    )
+    auto_ui = bool(stored.get("auto_image_ocr_on_ui_query", DEFAULT_AUTO_IMAGE_OCR_ON_UI_QUERY))
+    if not include and auto_ui and _query_wants_image_ocr(query):
+        include = True
+    try:
+        factor = float(stored.get("image_ocr_score_factor", DEFAULT_IMAGE_OCR_SCORE_FACTOR))
+    except (TypeError, ValueError):
+        factor = DEFAULT_IMAGE_OCR_SCORE_FACTOR
+    if not math.isfinite(factor) or factor <= 0:
+        factor = DEFAULT_IMAGE_OCR_SCORE_FACTOR
+    exclude_at_engine = not include
+    return include, factor, exclude_at_engine
+
+
+def _apply_chunk_role_filters(
+    results: list[dict[str, Any]],
+    *,
+    include_image_ocr: bool,
+    image_ocr_score_factor: float,
+) -> list[dict[str, Any]]:
+    if not results:
+        return results
+    out: list[dict[str, Any]] = []
+    for item in results:
+        if not include_image_ocr and _result_is_standalone_image_ocr(item):
+            continue
+        row = dict(item)
+        if include_image_ocr and _result_is_standalone_image_ocr(row):
+            row["score"] = float(row.get("score") or 0) * image_ocr_score_factor
+        out.append(row)
+    if include_image_ocr:
+        out.sort(key=lambda row: float(row.get("score") or 0), reverse=True)
+    return out
+
+
+def _dedupe_search_results(results: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    """去掉同文档内高度重叠的切片，避免检索列表看起来重复。"""
+    kept: list[dict[str, Any]] = []
+    for item in results:
+        content = str(item.get("content") or "")
+        document_id = item.get("document_id")
+        handled = False
+        for i, prev in enumerate(kept):
+            if prev.get("document_id") != document_id:
+                continue
+            if _content_overlap_ratio(content, str(prev.get("content") or "")) < 0.72:
+                continue
+            item_is_image = _result_is_standalone_image_ocr(item)
+            prev_is_image = _result_is_standalone_image_ocr(prev)
+            if item_is_image and not prev_is_image:
+                handled = True
+                break
+            if prev_is_image and not item_is_image:
+                kept[i] = item
+                handled = True
+                break
+            handled = True
+            break
+        if not handled:
+            kept.append(item)
+        if len(kept) >= limit:
+            break
+    return kept
 
 
 def _serialize_search_result(
@@ -287,21 +682,39 @@ def _serialize_search_result(
     vector_score: float | None = None,
     keyword_score: float | None = None,
 ) -> dict[str, Any]:
+    meta = chunk.metadata_json if isinstance(chunk.metadata_json, dict) else {}
+    enrichment_keywords, enrichment_questions = _extract_enrichment(meta)
+    content = _render_result_content(chunk)
+    heading_path = chunk.heading_path or (
+        str(meta.get("heading_path")).strip() if meta.get("heading_path") else None
+    )
+    block = _chunk_block_type(meta)
+    location_label = _chunk_location_label(chunk)
     return {
         "chunk_id": chunk.id,
         "chunk_uid": chunk.chunk_uid,
         "document_id": chunk.document_id,
         "document_name": document_name,
         "chunk_index": chunk.chunk_index,
-        "content": _render_result_content(chunk),
+        "content": content,
+        "content_preview": _content_preview(content),
+        "char_count": chunk.char_count,
+        "start_offset": chunk.start_offset,
+        "end_offset": chunk.end_offset,
+        "heading_path": heading_path,
+        "enrichment_keywords": enrichment_keywords,
+        "enrichment_questions": enrichment_questions,
         "score": float(score),
         "vector_score": float(vector_score) if vector_score is not None else None,
         "keyword_score": float(keyword_score) if keyword_score is not None else None,
         "metadata": chunk.metadata_json,
         "citation": {
             "document_name": document_name,
-            "page_no": chunk.page_no,
+            "page_no": _citation_page_no(chunk),
             "chunk_index": chunk.chunk_index,
+            "heading_path": heading_path,
+            "location_label": location_label,
+            "block": block,
         },
     }
 
@@ -324,6 +737,21 @@ def _stored_vector_weight(knowledge_base: KnowledgeBase) -> float | None:
     return f
 
 
+def _resolve_fusion_method(
+    knowledge_base: KnowledgeBase,
+    payload: KnowledgeSearchRequest,
+) -> str:
+    """混合检索通道融合方式：payload 优先 > 知识库 config.retrieval.fusion_method > 默认 weighted。"""
+    val = getattr(payload, "fusion_method", None)
+    if val in ("weighted", "rrf"):
+        return val
+    stored = _stored_retrieval_config(knowledge_base)
+    sv = stored.get("fusion_method")
+    if sv in ("weighted", "rrf"):
+        return sv
+    return DEFAULT_FUSION_METHOD
+
+
 def _normalize_scores(
     values: dict[str, float],
     *,
@@ -339,6 +767,34 @@ def _normalize_scores(
             return {key: 0.0 for key in values}
         return {key: (1.0 if maximum > 0 else 0.0) for key in values}
     return {key: (value - minimum) / (maximum - minimum) for key, value in values.items()}
+
+
+def _normalize_scores_relative(
+    values: dict[str, float],
+    *,
+    zero_if_flat_below: float | None = None,
+) -> dict[str, float]:
+    """按最大值归一化（top=1.0），不像 min-max 那样把批次最小值强制压到 0。
+
+    min-max 归一化会让每批结果里最弱的一条恒为 0.0，从而：
+    - 真正相关、只是略弱于头部的切片被显示成 0 分、并可能被 score_threshold 误过滤；
+    - 阈值在不同 query 间不可比（末位永远 0、首位永远 1）。
+
+    本函数保留各通道分数与头部的相对比例（value / max），让弱于头部的相关命中
+    仍有与其绝对分相称的非零分；仅用于融合排序/展示，不参与召回门控预过滤。
+    """
+    if not values:
+        return {}
+    scores = list(values.values())
+    maximum = max(scores)
+    minimum = min(scores)
+    if maximum <= 0:
+        return {key: 0.0 for key in values}
+    if maximum == minimum:
+        if zero_if_flat_below is not None and maximum < zero_if_flat_below:
+            return {key: 0.0 for key in values}
+        return {key: 1.0 for key in values}
+    return {key: max(0.0, value) / maximum for key, value in values.items()}
 
 
 def _max_channel_score(candidates: list[dict[str, Any]], score_key: str) -> float:
@@ -361,28 +817,50 @@ def _hybrid_cross_domain_guard(
     """
     混合检索：向量路整体置信不足且全文仅弱命中时，视为跨库/跨主题误召回，应返回空。
     例如医保库问「正当防卫判刑吗」——全文仅「正当权益+需要」凑 1.85 分。
+
+    已通过关键词路 MIN_KEYWORD_HYBRID_SCORE（默认 3.0）门槛的命中视为同库有效召回，
+    避免如「新生儿如何办理」仅命中「新生+生儿」时被误判为空结果。
     """
-    if not keyword_candidates or not merged:
+    if not merged:
         return True
-    top_vector = _max_channel_score(vector_candidates, "vector_score")
+    if not keyword_candidates:
+        return True
+
     max_keyword = _max_channel_score(keyword_candidates, "keyword_score")
+    if max_keyword >= MIN_KEYWORD_HYBRID_SCORE:
+        return True
+
     has_vector_boost = any(item.get("vector_score") is not None for item in merged.values())
     if has_vector_boost:
         return True
-    if top_vector >= MIN_VECTOR_FALLBACK_SCORE and max_keyword >= MIN_KEYWORD_HYBRID_SCORE:
-        return True
-    if max_keyword >= MIN_KEYWORD_HYBRID_SCORE + 1.5:
+    top_vector = _max_channel_score(vector_candidates, "vector_score")
+    if top_vector >= MIN_VECTOR_FALLBACK_SCORE and max_keyword >= MIN_KEYWORD_RELEVANCE_SCORE:
         return True
     return False
 
 
-def _document_filters(kb_id: int, document_ids: list[int] | None) -> list[Any]:
+def _document_filters(
+    kb_id: int,
+    document_ids: list[int] | None,
+    *,
+    exclude_standalone_image_ocr: bool = False,
+) -> list[Any]:
     filters: list[Any] = [
         KnowledgeChunk.knowledge_base_id == kb_id,
         KnowledgeDocument.status == KnowledgeDocumentStatus.INDEXED.value,
     ]
     if document_ids:
         filters.append(KnowledgeChunk.document_id.in_(document_ids))
+    if exclude_standalone_image_ocr:
+        meta_block = KnowledgeChunk.metadata_json["block"].as_string()
+        meta_attached = KnowledgeChunk.metadata_json["image_ocr_attached"].as_string()
+        filters.append(
+            or_(
+                meta_block.is_(None),
+                meta_block != "image",
+                meta_attached.isnot(None),
+            )
+        )
     return filters
 
 
@@ -393,8 +871,13 @@ def _keyword_candidates_postgres(
     query: str,
     limit: int,
     document_ids: list[int] | None,
+    exclude_standalone_image_ocr: bool = False,
 ) -> list[dict[str, Any]]:
-    filters = _document_filters(knowledge_base_id, document_ids)
+    filters = _document_filters(
+        knowledge_base_id,
+        document_ids,
+        exclude_standalone_image_ocr=exclude_standalone_image_ocr,
+    )
     tsquery = func.plainto_tsquery("simple", query)
     score = func.ts_rank_cd(KnowledgeChunk.search_vector, tsquery).label("keyword_score")
     rows = db.execute(
@@ -449,6 +932,7 @@ def _keyword_candidates(
     query: str,
     limit: int,
     document_ids: list[int] | None,
+    exclude_standalone_image_ocr: bool = False,
 ) -> list[dict[str, Any]]:
     if opensearch_chunk_service.is_enabled():
         try:
@@ -459,6 +943,7 @@ def _keyword_candidates(
                 query=query,
                 limit=limit,
                 document_ids=document_ids,
+                exclude_standalone_image_ocr=exclude_standalone_image_ocr,
             )
             if candidates:
                 return _rescore_keyword_candidates(candidates, query=query, limit=limit)
@@ -471,6 +956,7 @@ def _keyword_candidates(
         query=query,
         limit=limit,
         document_ids=document_ids,
+        exclude_standalone_image_ocr=exclude_standalone_image_ocr,
     )
 
 
@@ -544,6 +1030,19 @@ def search_knowledge_base(
         score_threshold = float(knowledge_base.default_score_threshold)
     document_ids = payload.document_ids or None
     query = _expand_colloquial_query(payload.query)
+    include_image_ocr, image_ocr_score_factor, exclude_image_ocr = _resolve_image_ocr_retrieval(
+        knowledge_base,
+        payload,
+        query,
+    )
+
+    def _finalize_results(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        filtered = _apply_chunk_role_filters(
+            raw,
+            include_image_ocr=include_image_ocr,
+            image_ocr_score_factor=image_ocr_score_factor,
+        )
+        return _dedupe_search_results(filtered, limit=top_k)
 
     if mode == "keyword":
         keyword_candidates = _keyword_candidates(
@@ -551,35 +1050,40 @@ def search_knowledge_base(
             enterprise_space_id=knowledge_base.enterprise_space_id,
             knowledge_base_id=knowledge_base.id,
             query=query,
-            limit=top_k,
+            limit=max(top_k * 3, top_k),
             document_ids=document_ids,
+            exclude_standalone_image_ocr=exclude_image_ocr,
         )
-        results = [
-            _serialize_search_result(
-                chunk=item["chunk"],
-                document_name=item["document_name"],
-                score=item["keyword_score"],
-                keyword_score=item["keyword_score"],
-            )
-            for item in keyword_candidates
-        ]
+        results = _finalize_results(
+            [
+                _serialize_search_result(
+                    chunk=item["chunk"],
+                    document_name=item["document_name"],
+                    score=item["keyword_score"],
+                    keyword_score=item["keyword_score"],
+                )
+                for item in keyword_candidates
+            ]
+        )
     elif mode == "vector":
         vector_candidates = _vector_candidates(
             db,
             knowledge_base=knowledge_base,
             query=query,
-            limit=top_k,
+            limit=max(top_k * 3, top_k),
             document_ids=document_ids,
         )
-        results = [
-            _serialize_search_result(
-                chunk=item["chunk"],
-                document_name=item["document_name"],
-                score=item["vector_score"],
-                vector_score=item["vector_score"],
-            )
-            for item in vector_candidates
-        ]
+        results = _finalize_results(
+            [
+                _serialize_search_result(
+                    chunk=item["chunk"],
+                    document_name=item["document_name"],
+                    score=item["vector_score"],
+                    vector_score=item["vector_score"],
+                )
+                for item in vector_candidates
+            ]
+        )
     else:
         vector_candidates = _vector_candidates(
             db,
@@ -595,6 +1099,7 @@ def search_knowledge_base(
             query=query,
             limit=top_k * 4,
             document_ids=document_ids,
+            exclude_standalone_image_ocr=exclude_image_ocr,
         )
         vector_candidates = _filter_hybrid_channel_candidates(
             vector_candidates,
@@ -621,6 +1126,7 @@ def search_knowledge_base(
             if stored_w is not None:
                 w_vector = stored_w
         w_keyword = 1.0 - w_vector
+        fusion_method = _resolve_fusion_method(knowledge_base, payload)
 
         merged: dict[str, dict[str, Any]] = {}
         if w_keyword <= 0.0:
@@ -691,22 +1197,22 @@ def search_knowledge_base(
             if item.get("vector_score") is not None
         }
         if w_keyword <= 0.0:
-            normalized_vector = _normalize_scores(
+            normalized_vector = _normalize_scores_relative(
                 {
                     item["chunk"].chunk_uid: float(item["vector_score"] or 0)
                     for item in vector_candidates
                 }
             )
         elif not keyword_candidates:
-            normalized_vector = _normalize_scores(
+            normalized_vector = _normalize_scores_relative(
                 {
                     item["chunk"].chunk_uid: float(item["vector_score"] or 0)
                     for item in vector_candidates
                 }
             )
         else:
-            normalized_vector = _normalize_scores(eligible_vector_scores)
-        normalized_keyword = _normalize_scores(keyword_scores, zero_if_flat_below=MIN_KEYWORD_HYBRID_SCORE)
+            normalized_vector = _normalize_scores_relative(eligible_vector_scores)
+        normalized_keyword = _normalize_scores_relative(keyword_scores, zero_if_flat_below=MIN_KEYWORD_HYBRID_SCORE)
 
         if not _hybrid_cross_domain_guard(
             keyword_candidates=keyword_candidates,
@@ -715,13 +1221,39 @@ def search_knowledge_base(
         ):
             results = []
         else:
+            # 加权 RRF：按各通道名次融合，对量纲不可比、单路异常分更稳健；
+            # 仅对 merged 内（已过护栏/预过滤）的命中重排，不改变召回成员，再归一化到 0~1。
+            keyword_rank_map = {
+                item["chunk"].chunk_uid: rank
+                for rank, item in enumerate(keyword_candidates, start=1)
+            }
+            vector_rank_map_full = {
+                item["chunk"].chunk_uid: rank
+                for rank, item in enumerate(vector_candidates, start=1)
+            }
+            display_scores: dict[str, float] = {}
+            if fusion_method == "rrf":
+                rrf_raw: dict[str, float] = {}
+                for chunk_uid, item in merged.items():
+                    score = 0.0
+                    if item["vector_score"] is not None and chunk_uid in vector_rank_map_full:
+                        score += w_vector * (1.0 / (RRF_K + vector_rank_map_full[chunk_uid]))
+                    if item["keyword_score"] is not None and chunk_uid in keyword_rank_map:
+                        score += w_keyword * (1.0 / (RRF_K + keyword_rank_map[chunk_uid]))
+                    rrf_raw[chunk_uid] = score
+                display_scores = _normalize_scores_relative(rrf_raw)
+            else:
+                for chunk_uid, item in merged.items():
+                    vector_score = item["vector_score"]
+                    v_norm = normalized_vector.get(chunk_uid, 0.0) if vector_score is not None else 0.0
+                    k_norm = normalized_keyword.get(chunk_uid, 0.0)
+                    display_scores[chunk_uid] = w_vector * v_norm + w_keyword * k_norm
+
             ranked: list[dict[str, Any]] = []
             for chunk_uid, item in merged.items():
                 vector_score = item["vector_score"]
                 keyword_score = item["keyword_score"]
-                v_norm = normalized_vector.get(chunk_uid, 0.0) if vector_score is not None else 0.0
-                k_norm = normalized_keyword.get(chunk_uid, 0.0)
-                final_score = w_vector * v_norm + w_keyword * k_norm
+                final_score = display_scores.get(chunk_uid, 0.0)
                 ranked.append(
                     _serialize_search_result(
                         chunk=item["chunk"],
@@ -734,7 +1266,7 @@ def search_knowledge_base(
             ranked.sort(key=lambda item: item["score"], reverse=True)
             if score_threshold is not None:
                 ranked = [item for item in ranked if item["score"] >= score_threshold]
-            results = ranked[:top_k]
+            results = _finalize_results(ranked)
 
     if score_threshold is not None and mode != "hybrid":
         results = [item for item in results if item["score"] >= score_threshold]
@@ -782,6 +1314,7 @@ def search_knowledge_bases_multi(
             score_threshold=payload.score_threshold,
             vector_weight=payload.vector_weight,
             document_ids=payload.document_ids,
+            include_image_ocr=payload.include_image_ocr,
         )
         try:
             one = search_knowledge_base(db, space_id=space_id, kb_id=kb_id, payload=inner)
@@ -796,7 +1329,7 @@ def search_knowledge_bases_multi(
             merged_rows.append(row)
 
     merged_rows.sort(key=lambda x: float(x.get("score") or 0.0), reverse=True)
-    merged_rows = merged_rows[:final_top]
+    merged_rows = _dedupe_search_results(merged_rows, limit=final_top)
 
     return {
         "query": payload.query,

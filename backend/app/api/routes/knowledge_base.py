@@ -33,6 +33,9 @@ from app.schemas.knowledge_base import (
     Neo4jConnectionUpdate,
 )
 from app.schemas.knowledge_document import (
+    ChunkSourceContextResponse,
+    KnowledgeChunkEnrichmentRegenerateResponse,
+    KnowledgeChunkEnrichmentUpdate,
     KnowledgeChunkListResponse,
     KnowledgeChunkResponse,
     KnowledgeDocumentListResponse,
@@ -70,6 +73,7 @@ from app.services.knowledge_document_service import (
     get_document_detail,
     get_document_or_error,
     get_document_parse_log,
+    get_chunk_source_context_serialized,
     get_knowledge_chunk_serialized,
     iter_document_process_sse_events,
     list_document_chunks,
@@ -82,6 +86,7 @@ from app.services.knowledge_document_service import (
     upload_document,
 )
 from app.services import opensearch_chunk_service
+from app.services.chunk_edit_service import regenerate_chunk_enrichment, update_chunk_enrichment
 from app.services.retrieval_service import search_knowledge_base, search_knowledge_bases_multi
 
 settings = get_settings()
@@ -631,7 +636,7 @@ def get_document_mineru_markdown(
         raise AppError(
             status_code=404,
             code="MINERU_MARKDOWN_NOT_FOUND",
-            message="暂无 MinerU Markdown：请使用当前版本重新解析或重建索引（仅 MinerU 解析的 PDF/图片会生成）",
+            message="暂无 MinerU Markdown：请使用当前版本重新解析或重建索引（MinerU 引擎解析的文档会生成）",
         )
     return FileResponse(
         path,
@@ -661,7 +666,7 @@ def get_document_mineru_content_list(
         raise AppError(
             status_code=404,
             code="MINERU_CONTENT_LIST_NOT_FOUND",
-            message="暂无 MinerU JSON：请使用当前版本重新解析或重建索引（仅 MinerU 解析的 PDF/图片会生成）",
+            message="暂无 MinerU JSON：请使用当前版本重新解析或重建索引（MinerU 引擎解析的文档会生成）",
         )
     return FileResponse(
         path,
@@ -840,6 +845,65 @@ def get_knowledge_chunk_endpoint(
 ) -> dict:
     """按 ID 获取切片正文（对话引文点击查看等）。"""
     return get_knowledge_chunk_serialized(db, space_id=current_space.id, kb_id=kb_id, chunk_id=chunk_id)
+
+
+@router.get("/{kb_id}/chunks/{chunk_id}/source-context", response_model=ChunkSourceContextResponse)
+def get_knowledge_chunk_source_context_endpoint(
+    kb_id: int,
+    chunk_id: int,
+    current_space: CurrentSpace,
+    membership: RequireMembership,
+    db: Session = Depends(get_db),
+    context_chars: int = Query(default=320, ge=80, le=1200),
+) -> dict:
+    """切片在解析全文中的定位片段（含前后上下文），供检索结果详情展示。"""
+    return get_chunk_source_context_serialized(
+        db,
+        space_id=current_space.id,
+        kb_id=kb_id,
+        chunk_id=chunk_id,
+        context_chars=context_chars,
+    )
+
+
+@router.patch("/{kb_id}/chunks/{chunk_id}", response_model=KnowledgeChunkResponse)
+def update_knowledge_chunk_enrichment_endpoint(
+    kb_id: int,
+    chunk_id: int,
+    payload: KnowledgeChunkEnrichmentUpdate,
+    current_space: CurrentSpace,
+    membership: RequireMembership,
+    db: Session = Depends(get_db),
+) -> dict:
+    """更新切片关键词与假设问题，并增量重算向量/检索索引。"""
+    return update_chunk_enrichment(
+        db,
+        space_id=current_space.id,
+        kb_id=kb_id,
+        chunk_id=chunk_id,
+        keywords=payload.keywords,
+        questions=payload.questions,
+    )
+
+
+@router.post(
+    "/{kb_id}/chunks/{chunk_id}/regenerate-enrichment",
+    response_model=KnowledgeChunkEnrichmentRegenerateResponse,
+)
+def regenerate_knowledge_chunk_enrichment_endpoint(
+    kb_id: int,
+    chunk_id: int,
+    current_space: CurrentSpace,
+    membership: RequireMembership,
+    db: Session = Depends(get_db),
+) -> dict:
+    """调用入库增强 LLM 为单块生成关键词与假设问题（不写库）。"""
+    return regenerate_chunk_enrichment(
+        db,
+        space_id=current_space.id,
+        kb_id=kb_id,
+        chunk_id=chunk_id,
+    )
 
 
 @router.post("/{kb_id}/search", response_model=KnowledgeSearchResponse)

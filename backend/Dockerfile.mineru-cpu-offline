@@ -1,0 +1,47 @@
+# ==========================================================================
+# MinerU CPU 离线镜像（在已有 mineru:cpu 上叠加模型，构建快）
+# --------------------------------------------------------------------------
+# 不重复 pip/apt，FROM 已构建好的 mineru:cpu，仅 COPY 模型到 /models。
+#
+# 步骤（有网构建机）：
+#   1) 已有镜像：192.168.252.252:5566/zs-rag/mineru:cpu（或本地 zs-rag-mineru:cpu）
+#   2) 预热并导出：./scripts/export-mineru-models-bundle.sh zs-rag-mineru
+#   3) 快速构建：
+#        docker build -f backend/Dockerfile.mineru-cpu-offline \
+#          --build-arg MINERU_CPU_IMAGE=192.168.252.252:5566/zs-rag/mineru:cpu \
+#          -t 192.168.252.252:5566/zs-rag/mineru:cpu-offline backend
+#   或：./scripts/push-images-to-registry.sh --offline --mineru-offline-only
+#
+# 目标机 .env：
+#   MINERU_CPU_IMAGE=192.168.252.252:5566/zs-rag/mineru:cpu-offline
+#   MINERU_MODEL_SOURCE=local
+#   不要挂载空的 mineru_models 卷（会覆盖镜像内 /models）
+# ==========================================================================
+ARG MINERU_CPU_IMAGE=zs-rag-mineru:cpu
+FROM ${MINERU_CPU_IMAGE}
+
+USER root
+
+# 构建时由 scripts/build-mineru-cpu-offline.sh 临时放开 .dockerignore 中的 mineru_models_bundle/
+COPY mineru_models_bundle/ /models/
+COPY scripts/generate-mineru-local-config.sh /usr/local/bin/generate-mineru-local-config.sh
+COPY scripts/mineru-api-entrypoint.sh /usr/local/bin/mineru-api-entrypoint.sh
+
+RUN set -eux; \
+    rm -rf /models/.lock 2>/dev/null || true; \
+    test "$(find /models -type f 2>/dev/null | head -1)" || { \
+      echo "错误: mineru_models_bundle/ 为空，请先 ./scripts/export-mineru-models-bundle.sh" >&2; \
+      exit 1; \
+    }; \
+    chmod +x /usr/local/bin/generate-mineru-local-config.sh /usr/local/bin/mineru-api-entrypoint.sh; \
+    /usr/local/bin/generate-mineru-local-config.sh /models; \
+    echo "Offline bundled models: $(du -sh /models | awk '{print $1}')"
+
+ENV MINERU_MODEL_SOURCE=local \
+    MINERU_TOOLS_CONFIG_JSON=/models/mineru.json
+
+WORKDIR /workdir
+EXPOSE 8000
+
+ENTRYPOINT ["/usr/local/bin/mineru-api-entrypoint.sh"]
+CMD ["mineru-api", "--host", "0.0.0.0", "--port", "8000"]

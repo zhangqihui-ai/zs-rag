@@ -91,6 +91,18 @@ def segments_to_chunk_candidates(segments: list[ParsedSegment]) -> list[ChunkCan
     return chunks
 
 
+def segment_has_atomic_blocks(segments: list[ParsedSegment]) -> bool:
+    return any(_segment_is_atomic_for_chunking(s) for s in segments)
+
+
+def _segment_is_atomic_for_chunking(segment: ParsedSegment) -> bool:
+    """表格整段、文档抬头、MinerU 图片 OCR 等解析阶段已语义完整的段，不再按长度/overlap 二次切分。"""
+    meta = segment.metadata or {}
+    if meta.get("block") in {"table", "document_preamble", "image"}:
+        return True
+    return False
+
+
 def chunk_segments(segments: list[ParsedSegment], chunk_size: int, chunk_overlap: int) -> list[ChunkCandidate]:
     chunks: list[ChunkCandidate] = []
     next_index = 0
@@ -98,6 +110,28 @@ def chunk_segments(segments: list[ParsedSegment], chunk_size: int, chunk_overlap
     for segment in segments:
         text = segment.text
         if not text.strip():
+            continue
+
+        if _segment_is_atomic_for_chunking(segment):
+            content, content_start, content_end = _trim_content(text, segment.start_offset or 0)
+            if content:
+                metadata = dict(segment.metadata or {})
+                if segment.page_no is not None:
+                    metadata.setdefault("page_no", segment.page_no)
+                if segment.heading_path:
+                    metadata.setdefault("heading_path", segment.heading_path)
+                chunks.append(
+                    ChunkCandidate(
+                        content=content,
+                        chunk_index=next_index,
+                        start_offset=content_start,
+                        end_offset=content_end,
+                        page_no=segment.page_no,
+                        heading_path=segment.heading_path,
+                        metadata=metadata,
+                    )
+                )
+                next_index += 1
             continue
 
         start = 0

@@ -8,10 +8,12 @@ from typing import Any
 from app.core.errors import AppError
 
 PDF_ENGINES = frozenset({"opendataloader", "mineru", "docling"})
-DOCX_ENGINES = frozenset({"python-docx"})
-EXCEL_ENGINES = frozenset({"html_table", "tsv"})
-CSV_ENGINES = frozenset({"standard"})
-TEXT_ENGINES = frozenset({"native"})
+PDF_RUNTIME_ENGINES = frozenset({"opendataloader", "mineru", "pypdf", "pypdf_fallback"})
+PDF_FALLBACK_SEQUENCE = ("opendataloader", "mineru", "pypdf")
+DOCX_ENGINES = frozenset({"python-docx", "mineru"})
+EXCEL_ENGINES = frozenset({"html_table", "tsv", "mineru"})
+CSV_ENGINES = frozenset({"standard", "mineru"})
+TEXT_ENGINES = frozenset({"native", "mineru"})
 
 DEFAULT_PARSERS: dict[str, dict[str, Any]] = {
     "pdf": {"engine": "opendataloader", "hybrid": False},
@@ -115,6 +117,54 @@ def resolve_parsers(kb_config: dict[str, Any] | None) -> ParserOptions:
     )
 
 
+def resolve_pdf_fallback_chain(primary: str | None) -> list[str]:
+    """
+    PDF 解析降级顺序：首选配置引擎，再按 opendataloader → mineru → pypdf 尝试。
+    docling 尚未接入运行时，跳过。
+    """
+    from app.core.config import get_settings
+
+    norm = (primary or "opendataloader").strip().lower()
+    if norm not in PDF_ENGINES and norm != "pypdf":
+        norm = "opendataloader"
+
+    settings = get_settings()
+    chain: list[str] = []
+    for eng in (norm, *PDF_FALLBACK_SEQUENCE):
+        if eng == "docling":
+            continue
+        if eng in chain:
+            continue
+        if eng == "mineru" and not settings.mineru_enabled:
+            continue
+        if eng == "opendataloader" and not settings.odl_enabled:
+            continue
+        chain.append(eng)
+    if "pypdf" not in chain:
+        chain.append("pypdf")
+    return chain
+
+
+def parser_engine_display_name(engine: str | None, *, fallback: bool = False) -> str:
+    key = (engine or "").strip().lower()
+    labels = {
+        "opendataloader": "OpenDataLoader",
+        "mineru": "MinerU",
+        "docling": "Docling",
+        "pypdf": "pypdf",
+        "pypdf_fallback": "pypdf",
+        "python-docx": "python-docx",
+        "html_table": "HTML 表格",
+        "tsv": "TSV",
+        "standard": "CSV",
+        "native": "文本",
+    }
+    label = labels.get(key, key.upper() if key else "—")
+    if fallback and key in {"mineru", "pypdf", "pypdf_fallback", "opendataloader"}:
+        return f"{label}（降级）"
+    return label
+
+
 def resolve_enrichment(kb_config: dict[str, Any] | None) -> EnrichmentOptions:
     cfg = kb_config if isinstance(kb_config, dict) else {}
     raw = cfg.get("enrichment")
@@ -166,6 +216,15 @@ def validate_parsers_patch(parsers: dict[str, Any]) -> None:
                     code="INVALID_PARSER_ENGINE",
                     message=f"parsers.{key}.engine 须为 {', '.join(sorted(allowed))} 之一",
                 )
+            if norm == "mineru":
+                from app.core.config import get_settings
+
+                if not get_settings().mineru_enabled:
+                    raise AppError(
+                        status_code=400,
+                        code="MINERU_NOT_ENABLED",
+                        message="MinerU 未启用。请在 .env 中设置 MINERU_ENABLED=true 并启动 mineru 服务后再选择 MinerU 解析器。",
+                    )
         if key == "pdf" and section.get("hybrid") is not None and not isinstance(section.get("hybrid"), bool):
             raise AppError(status_code=400, code="INVALID_PARSER_CONFIG", message="parsers.pdf.hybrid 须为 boolean")
 

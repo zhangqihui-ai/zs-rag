@@ -41,7 +41,7 @@ async def _execute_chat_completion(
         user_id=current_user.id,
         enterprise_space_id=current_space.id,
     )
-    llm_messages, user_text, turn_citations = chat_service.build_completion_messages(
+    llm_messages, user_text, turn_citations, empty_reply = chat_service.build_completion_messages(
         db,
         session=session,
         request_messages=payload.messages,
@@ -73,6 +73,7 @@ async def _execute_chat_completion(
                     llm_messages=llm_messages,
                     turn_citations=turn_citations,
                     response_model=response_model,
+                    forced_assistant_content=empty_reply,
                 )
                 for event in iterator:
                     line = json.dumps(event, ensure_ascii=False)
@@ -109,6 +110,7 @@ async def _execute_chat_completion(
             llm_messages=llm_messages,
             turn_citations=turn_citations,
             response_model=response_model,
+            forced_assistant_content=empty_reply,
         )
     except AppError:
         raise

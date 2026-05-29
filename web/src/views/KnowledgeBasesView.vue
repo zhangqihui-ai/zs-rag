@@ -130,31 +130,33 @@
               <textarea v-model.trim="form.description" class="textarea" maxlength="2000" placeholder="可选，描述用途与范围"></textarea>
             </label>
 
-            <label class="field">
+            <div class="field">
               <span class="field-label">知识库类型</span>
-              <select v-model="form.kb_type" class="select" :disabled="modalMode === 'edit'">
-                <option value="classic">经典知识库（Milvus + 混合检索）</option>
-                <option value="lightrag">图知识库（LightRAG 图谱 + 五模式检索）</option>
-              </select>
-            </label>
-
-            <div v-if="form.kb_type === 'classic'" class="form-grid two">
-              <label class="field inline-field">
-                <span class="field-label">启用向量数据库</span>
-                <label class="switch">
-                  <input v-model="form.vector_db_enabled" type="checkbox" />
-                </label>
-              </label>
-
-              <label class="field inline-field deprecated-field">
-                <span class="field-label">启用图数据库（已废弃）</span>
-                <label class="switch">
-                  <input v-model="form.graph_db_enabled" type="checkbox" disabled />
-                </label>
-              </label>
+              <div class="kb-type-picker" role="radiogroup" aria-label="知识库类型">
+                <button
+                  v-for="option in kbTypeOptions"
+                  :key="option.value"
+                  type="button"
+                  class="kb-type-option"
+                  :class="[option.tone, { 'is-active': form.kb_type === option.value }]"
+                  :disabled="modalMode === 'edit'"
+                  :aria-pressed="form.kb_type === option.value"
+                  @click="selectKbType(option.value)"
+                >
+                  <span class="kb-type-option-icon">
+                    <AppIcon :name="option.icon" :size="22" />
+                  </span>
+                  <span class="kb-type-option-body">
+                    <strong>{{ option.title }}</strong>
+                    <span>{{ option.subtitle }}</span>
+                  </span>
+                  <span v-if="form.kb_type === option.value" class="kb-type-option-check" aria-hidden="true">
+                    <AppIcon name="check" :size="16" />
+                  </span>
+                </button>
+              </div>
+              <p v-if="modalMode === 'edit'" class="field-hint">创建后不可更改知识库类型。</p>
             </div>
-
-            <p v-else class="field-hint">图知识库将自动启用 Neo4j + Milvus（LightRAG workspace 隔离），无需单独勾选图数据库。</p>
 
             <label v-if="modalMode === 'edit'" class="field">
               <span class="field-label">状态</span>
@@ -281,6 +283,37 @@ const form = reactive({
   status: 'active' as 'active' | 'inactive',
 })
 
+const kbTypeOptions = [
+  {
+    value: 'classic' as const,
+    title: '向量知识库',
+    subtitle: 'Milvus 向量存储 + 混合检索',
+    icon: 'vector-db',
+    tone: 'kb-type-option--vector',
+  },
+  {
+    value: 'lightrag' as const,
+    title: '图知识库',
+    subtitle: 'LightRAG 图谱 + 五模式检索',
+    icon: 'graph',
+    tone: 'kb-type-option--graph',
+  },
+]
+
+function selectKbType(value: 'classic' | 'lightrag') {
+  if (modalMode.value === 'edit') {
+    return
+  }
+  form.kb_type = value
+  if (value === 'classic') {
+    form.vector_db_enabled = true
+    form.graph_db_enabled = false
+  } else {
+    form.vector_db_enabled = true
+    form.graph_db_enabled = true
+  }
+}
+
 const createDefaults: Omit<KnowledgeBasePayload, 'name' | 'description' | 'vector_db_enabled' | 'graph_db_enabled'> = {
   embedding_model_id: null,
   default_chunk_size: 1024,
@@ -292,6 +325,7 @@ const createDefaults: Omit<KnowledgeBasePayload, 'name' | 'description' | 'vecto
     retrieval: {
       vector_weight: 0.3,
       hybrid_strategy: 'weight',
+      fusion_method: 'weighted',
       score_threshold_enabled: true,
     },
   },
@@ -841,10 +875,117 @@ onBeforeUnmount(() => {
   gap: 18px;
 }
 
-.inline-field {
+.kb-type-picker {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.kb-type-option {
+  position: relative;
   display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px;
+  border: 1.5px solid var(--border-color);
+  border-radius: 14px;
+  background: var(--bg-tertiary);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+}
+
+.kb-type-option:hover:not(:disabled) {
+  border-color: var(--brand-primary);
+  background: var(--bg-secondary);
+}
+
+.kb-type-option.is-active {
+  box-shadow: 0 0 0 3px var(--brand-primary-light);
+}
+
+.kb-type-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+.kb-type-option--vector.is-active {
+  border-color: rgba(59, 130, 246, 0.55);
+  background: rgba(59, 130, 246, 0.06);
+}
+
+.kb-type-option--graph.is-active {
+  border-color: rgba(239, 68, 68, 0.5);
+  background: rgba(239, 68, 68, 0.06);
+}
+
+.kb-type-option-icon {
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  flex-shrink: 0;
+}
+
+.kb-type-option--vector .kb-type-option-icon {
+  background: linear-gradient(135deg, #1d4ed8 0%, #3b82f6 100%);
+  color: #eff6ff;
+}
+
+.kb-type-option--graph .kb-type-option-icon {
+  background: linear-gradient(135deg, #b91c1c 0%, #ef4444 100%);
+  color: #fef2f2;
+}
+
+.kb-type-option-body {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding-right: 18px;
+}
+
+.kb-type-option-body strong {
+  color: var(--text-primary);
+  font-size: 0.92rem;
+}
+
+.kb-type-option-body span {
+  color: var(--text-tertiary);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.kb-type-option-check {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--brand-primary);
+  color: #fff;
+}
+
+.kb-type-option--graph.is-active .kb-type-option-check {
+  background: #ef4444;
+}
+
+.field-hint {
+  margin: 8px 0 0;
+  color: var(--text-tertiary);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+@media (max-width: 640px) {
+  .kb-type-picker {
+    grid-template-columns: 1fr;
+  }
 }
 
 .modal-error {

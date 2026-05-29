@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 
+import { getApiErrorMessage } from '../lib/apiError'
 import { http } from '../lib/http'
 import type { EnterpriseSpaceWithRole } from '../api/enterprise-space'
 
@@ -103,7 +104,7 @@ export const useAuthStore = defineStore('auth', {
         this.initialized = true
         return data
       } catch (error) {
-        this.error = error instanceof Error ? error.message : '登录失败'
+        this.error = getApiErrorMessage(error, '登录失败')
         throw error
       } finally {
         this.loading = false

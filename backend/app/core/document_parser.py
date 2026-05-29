@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from io import BytesIO, StringIO
 from typing import Any
 
+from app.core.heading_match import normalize_heading_match_text
+
 try:
     from docx import Document as DocxDocument
     from docx.table import Table as DocxTable, _Cell as DocxCell  # type: ignore[attr-defined]
@@ -228,82 +230,156 @@ def _extract_pdf_text_fallback(file_bytes: bytes) -> str:
     return merged
 
 
-def _parse_pdf(
+def _pdf_segment_substantive(segment: ParsedSegment) -> bool:
+    """判断分段是否含可索引正文（排除纯图片占位等）。"""
+    text = (segment.text or "").strip()
+    if len(text) < 12:
+        return False
+    meta = segment.metadata or {}
+    if meta.get("block") == "image":
+        compact = re.sub(r"\s+", "", text)
+        if compact in {"![Image]()", "![Image]", "[图片]"}:
+            return False
+        if "![Image]" in text and len(text) < 48:
+            return False
+    return True
+
+
+def _pdf_text_mostly_image_markdown(text: str) -> bool:
+    """ODL 扫描件常见：Markdown 仅图片占位，无可索引正文。"""
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return True
+    image_like = 0
+    for ln in lines:
+        if re.match(r"^!\[[^\]]*\]\([^)]*\)\s*$", ln):
+            image_like += 1
+        elif "![Image]" in ln or ln in {"[图片]", "[Image]"}:
+            image_like += 1
+    return image_like >= max(1, int(len(lines) * 0.75))
+
+
+def _pdf_parse_usable(doc: ParsedDocument) -> bool:
+    """解析结果是否值得入库（避免 ODL 仅图片占位却 char_count>0 的情况）。"""
+    text = (doc.text or "").strip()
+    if not text:
+        return False
+    meta = doc.metadata or {}
+    backend = str(meta.get("parser_backend") or "")
+    segments = doc.segments or []
+
+    if backend in {"opendataloader", "mineru"}:
+        if not segments:
+            return False
+        if backend == "opendataloader" and int(meta.get("content_list_length") or 0) == 0:
+            return False
+
+    if not segments:
+        if _pdf_text_mostly_image_markdown(text):
+            return False
+        return len(text) >= 32
+
+    substantive = sum(1 for seg in segments if _pdf_segment_substantive(seg))
+    if substantive > 0:
+        return True
+    if backend in {"pypdf", "pypdf_fallback"} and len(text) >= 64:
+        return True
+    if _pdf_text_mostly_image_markdown(text):
+        return False
+    return False
+
+
+def _try_parse_pdf_opendataloader(
     file_bytes: bytes,
+    fname: str,
     *,
-    file_name: str | None = None,
-    pdf_parser: str | None = None,
-    pdf_parser_hybrid: bool | None = None,
-    log: Callable[[str], None] | None = None,
-) -> ParsedDocument:
+    pdf_parser_hybrid: bool | None,
+    log: Callable[[str], None] | None,
+) -> ParsedDocument | None:
     from app.core.opendataloader_gateway import (
         OpenDataLoaderUnavailableError,
         get_opendataloader_gateway,
-        resolve_pdf_parser,
     )
 
-    resolved = (pdf_parser or resolve_pdf_parser(None)).strip().lower()
-    fname = file_name or "doc.pdf"
+    odl = get_opendataloader_gateway()
+    if not odl.is_enabled():
+        if log:
+            log("OpenDataLoader 未启用，跳过")
+        return None
+    try:
+        if log:
+            log("使用 OpenDataLoader 解析 PDF…")
+        result = odl.parse(
+            file_bytes,
+            fname,
+            use_hybrid=pdf_parser_hybrid,
+            log=log,
+        )
+        if log:
+            log("OpenDataLoader：正在映射为内部分段结构…")
+        doc = result.to_parsed_document()
+        m = dict(doc.metadata or {})
+        m["_parse_markdown"] = result.markdown if result.markdown is not None else ""
+        m["_parse_content_list"] = result.to_content_list()
+        doc.metadata = m
+        if log:
+            log(
+                f"OpenDataLoader：字符数 {doc.char_count}，分段 {len(doc.segments)}，"
+                f"标题 {doc.metadata.get('heading_count')}，表格 {doc.metadata.get('table_count')}"
+            )
+        return doc
+    except OpenDataLoaderUnavailableError as e:
+        if log:
+            log(f"OpenDataLoader 不可用：{e}")
+        return None
 
-    if resolved == "opendataloader":
-        odl = get_opendataloader_gateway()
-        if odl.is_enabled():
-            try:
-                if log:
-                    log("使用 OpenDataLoader 解析 PDF…")
-                result = odl.parse(
-                    file_bytes,
-                    fname,
-                    use_hybrid=pdf_parser_hybrid,
-                    log=log,
-                )
-                if log:
-                    log("OpenDataLoader：正在映射为内部分段结构…")
-                doc = result.to_parsed_document()
-                m = dict(doc.metadata or {})
-                m["_parse_markdown"] = result.markdown if result.markdown is not None else ""
-                m["_parse_content_list"] = result.to_content_list()
-                doc.metadata = m
-                if log:
-                    log(
-                        f"OpenDataLoader：字符数 {doc.char_count}，分段 {len(doc.segments)}，"
-                        f"标题 {doc.metadata.get('heading_count')}，表格 {doc.metadata.get('table_count')}"
-                    )
-                return doc
-            except OpenDataLoaderUnavailableError as e:
-                if log:
-                    log(f"OpenDataLoader 不可用，尝试其他解析器：{e}")
 
-    if resolved in {"opendataloader", "mineru"}:
-        try:
-            from app.core.mineru_gateway import MineruUnavailableError, get_mineru_gateway
-        except Exception:  # pragma: no cover
-            MineruUnavailableError = Exception  # type: ignore[assignment]
-            get_mineru_gateway = None  # type: ignore[assignment]
-        if get_mineru_gateway is not None and resolved == "mineru":
-            gw = get_mineru_gateway()
-            if gw.should_handle("pdf"):
-                try:
-                    if log:
-                        log(f"使用 MinerU 解析 PDF（backend={gw.backend}, lang={gw.lang}）…")
-                    result = gw.parse(file_bytes, fname, log=log)
-                    if log:
-                        log("MinerU：正在映射为内部分段结构（标题路径、表格等）…")
-                    doc = result.to_parsed_document()
-                    m = dict(doc.metadata or {})
-                    m["_parse_markdown"] = result.markdown if result.markdown is not None else ""
-                    m["_parse_content_list"] = list(result.content_list)
-                    doc.metadata = m
-                    if log:
-                        log(
-                            f"MinerU：字符数 {doc.char_count}，分段 {len(doc.segments)}，"
-                            f"标题 {doc.metadata.get('heading_count')}，表格 {doc.metadata.get('table_count')}"
-                        )
-                    return doc
-                except MineruUnavailableError as e:
-                    if log:
-                        log(f"MinerU 不可用，降级到 pypdf：{e}")
+def _try_parse_pdf_mineru(
+    file_bytes: bytes,
+    fname: str,
+    *,
+    log: Callable[[str], None] | None,
+) -> ParsedDocument | None:
+    try:
+        from app.core.mineru_gateway import MineruUnavailableError, get_mineru_gateway
+    except Exception:  # pragma: no cover
+        if log:
+            log("MinerU 依赖不可用，跳过")
+        return None
 
+    gw = get_mineru_gateway()
+    if not gw.is_enabled():
+        if log:
+            log("MinerU 未启用，跳过")
+        return None
+    if not gw.should_handle("pdf"):
+        if log:
+            log("MinerU 未配置接管 PDF，跳过")
+        return None
+    try:
+        if log:
+            log(f"使用 MinerU 解析 PDF（backend={gw.backend}, lang={gw.lang}）…")
+        result = gw.parse(file_bytes, fname, log=log)
+        if log:
+            log("MinerU：正在映射为内部分段结构（标题路径、表格等）…")
+        doc = result.to_parsed_document()
+        m = dict(doc.metadata or {})
+        m["_parse_markdown"] = result.markdown if result.markdown is not None else ""
+        m["_parse_content_list"] = list(result.content_list)
+        doc.metadata = m
+        if log:
+            log(
+                f"MinerU：字符数 {doc.char_count}，分段 {len(doc.segments)}，"
+                f"标题 {doc.metadata.get('heading_count')}，表格 {doc.metadata.get('table_count')}"
+            )
+        return doc
+    except MineruUnavailableError as e:
+        if log:
+            log(f"MinerU 不可用：{e}")
+        return None
+
+
+def _try_parse_pdf_pypdf(file_bytes: bytes, *, log: Callable[[str], None] | None) -> ParsedDocument | None:
     if log:
         log("使用 pypdf 解析 PDF…")
     if PdfReader is not None:
@@ -372,8 +448,132 @@ def _parse_pdf(
     )
 
 
+def _parse_pdf(
+    file_bytes: bytes,
+    *,
+    file_name: str | None = None,
+    pdf_parser: str | None = None,
+    pdf_parser_hybrid: bool | None = None,
+    log: Callable[[str], None] | None = None,
+) -> ParsedDocument:
+    from app.core.parser_config import resolve_pdf_fallback_chain
+
+    fname = file_name or "doc.pdf"
+    chain = resolve_pdf_fallback_chain(pdf_parser)
+    primary = chain[0] if chain else "opendataloader"
+    last_doc: ParsedDocument | None = None
+
+    for index, engine in enumerate(chain):
+        if index > 0 and log:
+            log(f"PDF 解析降级：尝试 {engine}（首选 {primary}）…")
+
+        doc: ParsedDocument | None = None
+        if engine == "opendataloader":
+            doc = _try_parse_pdf_opendataloader(
+                file_bytes,
+                fname,
+                pdf_parser_hybrid=pdf_parser_hybrid,
+                log=log,
+            )
+        elif engine == "mineru":
+            doc = _try_parse_pdf_mineru(file_bytes, fname, log=log)
+        elif engine == "pypdf":
+            doc = _try_parse_pdf_pypdf(file_bytes, log=log)
+        else:
+            if log:
+                log(f"PDF 引擎 {engine} 尚未实现，跳过")
+            continue
+
+        if doc is None:
+            continue
+        last_doc = doc
+
+        if _pdf_parse_usable(doc):
+            if index > 0:
+                meta = dict(doc.metadata or {})
+                meta["parser_fallback"] = True
+                meta["parser_primary"] = primary
+                meta["parser_backend_used"] = engine
+                doc.metadata = meta
+                if log:
+                    log(f"PDF 已降级为 {engine} 解析成功")
+            return doc
+
+        if log:
+            log(
+                f"{engine} 解析结果不可用（字符 {doc.char_count}，分段 {len(doc.segments)}），"
+                "尝试下一解析器…"
+            )
+
+    if last_doc is not None:
+        return last_doc
+    return ParsedDocument(
+        parser_type="pdf",
+        text="",
+        char_count=0,
+        segments=[],
+        metadata={"parser_backend": "pypdf_fallback", "fallback": True},
+    )
+
+
 # MinerU 接管的图片后缀；没有本地降级路径（没有轻量级 OCR 备份），未启用 MinerU 时拒收
 _IMAGE_SUFFIXES = {"png", "jpg", "jpeg", "bmp", "tif", "tiff", "webp"}
+
+
+def _parse_with_mineru(
+    file_bytes: bytes,
+    *,
+    suffix: str,
+    file_name: str | None = None,
+    parser_type: str,
+    log: Callable[[str], None] | None = None,
+    extra_metadata: dict[str, Any] | None = None,
+    require_format_whitelist: bool = True,
+) -> ParsedDocument:
+    """
+    通过 MinerU /file_parse 解析并在 metadata 中附带 Markdown / content_list 侧车字段。
+    未启用、后缀不在白名单（仅 require_format_whitelist 时）或服务不可达时抛 UnsupportedDocumentError。
+    """
+    try:
+        from app.core.mineru_gateway import MineruUnavailableError, get_mineru_gateway
+    except Exception as e:  # pragma: no cover
+        raise UnsupportedDocumentError(f"MinerU 依赖不可用：{e}") from e
+
+    gw = get_mineru_gateway()
+    if not gw.is_enabled():
+        raise UnsupportedDocumentError(
+            "未启用 MinerU。请在部署中打开 MINERU_ENABLED 并拉起 mineru 服务。"
+        )
+    if require_format_whitelist and not gw.should_handle(suffix):
+        raise UnsupportedDocumentError(
+            f"MinerU 未配置接管 .{suffix} 后缀。请在 MINERU_FORMATS 中加入。"
+        )
+
+    fname = file_name or f"document.{suffix}"
+    if log:
+        log(f"使用 MinerU 解析（.{suffix}, backend={gw.backend}, lang={gw.lang}）…")
+    try:
+        result = gw.parse(file_bytes, fname, log=log)
+    except MineruUnavailableError as e:
+        raise UnsupportedDocumentError(f"MinerU 不可达，解析失败：{e}") from e
+
+    if log:
+        log("MinerU：正在映射为内部分段结构（标题路径、表格等）…")
+    doc = result.to_parsed_document()
+    doc.parser_type = parser_type
+    meta = dict(doc.metadata or {})
+    meta["parser_backend"] = "mineru"
+    if extra_metadata:
+        meta.update(extra_metadata)
+    meta["_parse_markdown"] = result.markdown if result.markdown is not None else ""
+    meta["_parse_content_list"] = list(result.content_list)
+    doc.metadata = meta
+    if log:
+        log(
+            f"MinerU（{parser_type}）：字符数 {doc.char_count}，分段 {len(doc.segments)}，"
+            f"标题 {meta.get('heading_count')}，表格 {meta.get('table_count')}"
+        )
+    return doc
 
 
 def _parse_image(
@@ -383,47 +583,15 @@ def _parse_image(
     file_name: str | None = None,
     log: Callable[[str], None] | None = None,
 ) -> ParsedDocument:
-    """
-    图片解析完全依赖 MinerU OCR + 版面分析。未启用或不可达时直接抛 UnsupportedDocumentError，
-    由上层返回用户友好的错误而不是产出一个空 ParsedDocument。
-    """
-    try:
-        from app.core.mineru_gateway import MineruUnavailableError, get_mineru_gateway
-    except Exception as e:  # pragma: no cover
-        raise UnsupportedDocumentError(f"MinerU 依赖不可用，无法解析图片：{e}") from e
-
-    gw = get_mineru_gateway()
-    if not gw.is_enabled():
-        raise UnsupportedDocumentError(
-            "未启用 MinerU，无法解析图片文件。请在部署中打开 MINERU_ENABLED 并拉起 mineru 服务。"
-        )
-    if not gw.should_handle(suffix):
-        raise UnsupportedDocumentError(
-            f"MinerU 未配置接管 .{suffix} 后缀。请在 MINERU_FORMATS 中加入。"
-        )
-
-    if log:
-        log(f"使用 MinerU 解析图片（.{suffix}, backend={gw.backend}, lang={gw.lang}）…")
-    try:
-        result = gw.parse(file_bytes, file_name or f"image.{suffix}", log=log)
-    except MineruUnavailableError as e:
-        raise UnsupportedDocumentError(f"MinerU 不可达，图片解析失败：{e}") from e
-
-    if log:
-        log("MinerU：正在映射为内部分段结构（标题路径、表格等）…")
-    doc = result.to_parsed_document()
-    doc.parser_type = f"image.{suffix}"
-    meta = dict(doc.metadata or {})
-    meta["image_suffix"] = suffix
-    meta["_parse_markdown"] = result.markdown if result.markdown is not None else ""
-    meta["_parse_content_list"] = list(result.content_list)
-    doc.metadata = meta
-    if log:
-        log(
-            f"图片 MinerU：字符数 {doc.char_count}，分段 {len(doc.segments)}，"
-            f"标题 {doc.metadata.get('heading_count')}，表格 {doc.metadata.get('table_count')}"
-        )
-    return doc
+    """图片解析完全依赖 MinerU OCR + 版面分析，无本地降级路径。"""
+    return _parse_with_mineru(
+        file_bytes,
+        suffix=suffix,
+        file_name=file_name,
+        parser_type=f"image.{suffix}",
+        log=log,
+        extra_metadata={"image_suffix": suffix},
+    )
 
 
 # 章节标题识别（启发式）：优先依赖 Word Heading 样式；无样式回退到中文/数字特征。
@@ -469,7 +637,7 @@ def _detect_heading_class(text: str, style_name: str | None) -> str | None:
     t = text.strip()
     if not t or len(t) > 60:
         return None
-    t_norm = t.replace("\u3000", " ")
+    t_norm = normalize_heading_match_text(text)
     if _ENUM_LIST_LINE.match(t_norm):
         return None
     for class_tag, regex in _HEADING_CLASSES:
@@ -636,6 +804,132 @@ def _is_plausible_header_row(cells: list[str]) -> bool:
     return True
 
 
+MAX_WHOLE_TABLE_TEXT_CHARS = 12_000
+MAX_WHOLE_TABLE_DATA_ROWS = 100
+# 宽表按行检索：单块字符预算 + 每块最多行数；段数硬顶避免索引爆炸
+MAX_TABLE_ROW_SEGMENT_CHARS = 4_000
+MAX_TABLE_ROWS_PER_SEGMENT = 10
+MAX_TABLE_ROW_SEGMENTS = 2_400
+
+
+def _rows_to_markdown_table(rows: list[list[str]]) -> str:
+    cleaned = [[c.strip() for c in row] for row in rows if any(c.strip() for c in row)]
+    if not cleaned:
+        return ""
+    width = max(len(r) for r in cleaned)
+    norm = [r + [""] * (width - len(r)) for r in cleaned]
+    lines = ["| " + " | ".join(r) + " |" for r in norm]
+    if len(norm) >= 2:
+        sep = "| " + " | ".join("---" for _ in range(width)) + " |"
+        lines.insert(1, sep)
+    return "\n".join(lines)
+
+
+def _table_body_retrieval_text(body: str, rows: list[list[str]]) -> str:
+    """MinerU / ODL 表格侧车正文 → 索引用纯文本（优先保留 Markdown 表格）。"""
+    stripped = body.strip()
+    if stripped.startswith("|") or (stripped.startswith("<") is False and "| ---" in stripped):
+        return stripped
+    if stripped.startswith("<"):
+        md = _rows_to_markdown_table(rows)
+        return md or stripped
+    md = _rows_to_markdown_table(rows)
+    return md or stripped
+
+
+def prepend_table_context(retrieval_text: str, context_prefix: str | None) -> str:
+    """将同页标题/附件等上下文前缀并入表格检索文本，避免表格块缺少语义。"""
+    body = (retrieval_text or "").strip()
+    prefix = (context_prefix or "").strip()
+    if not prefix:
+        return body
+    if not body:
+        return prefix
+    if body.startswith(prefix) or prefix in body.split("\n\n", 1)[0]:
+        return body
+    probe = prefix[: min(24, len(prefix))]
+    if probe and probe in body:
+        return body
+    return f"{prefix}\n\n{body}"
+
+
+def build_table_segments_smart(
+    rows: list[list[str]],
+    ti: int,
+    offset_ref: list[int],
+    parts: list[str],
+    heading_path: str | None,
+    *,
+    table_body: str | None = None,
+    table_body_html: str | None = None,
+    page_no: int | None = None,
+    context_prefix: str | None = None,
+) -> list[ParsedSegment]:
+    """
+    表格分段：中等规模整表一块（与 Markdown 预览一致）；超大表按批合并行，避免单行一块。
+    """
+    normalized = [r for r in rows if any(c.strip() for c in r)]
+    if not normalized:
+        return []
+
+    body = (table_body or "").strip()
+    html = (table_body_html or "").strip()
+    if not html and body.startswith("<"):
+        html = body
+    if not html and normalized:
+        html = _rows_to_html_table(normalized)
+
+    data_row_count = _table_data_row_count(normalized)
+    retrieval_text = prepend_table_context(_table_body_retrieval_text(body, normalized), context_prefix)
+
+    if (
+        retrieval_text
+        and len(retrieval_text) <= MAX_WHOLE_TABLE_TEXT_CHARS
+        and data_row_count <= MAX_WHOLE_TABLE_DATA_ROWS
+    ):
+        start = offset_ref[0]
+        end = start + len(retrieval_text)
+        meta: dict[str, Any] = {
+            "block": "table",
+            "table_index": ti,
+            "table_role": "body",
+            "table_header": normalized[0] if len(normalized) >= 2 and _is_plausible_header_row(normalized[0]) else None,
+            "table_row_count": data_row_count,
+            "heading_path": heading_path,
+        }
+        if html:
+            meta["table_body_html"] = html
+        if page_no is not None:
+            meta["page_no"] = page_no
+            meta["page_idx"] = page_no - 1
+        if context_prefix and context_prefix.strip():
+            meta["table_context_prefix"] = context_prefix.strip()
+        seg = ParsedSegment(
+            text=retrieval_text,
+            start_offset=start,
+            end_offset=end,
+            page_no=page_no,
+            heading_path=heading_path,
+            metadata=meta,
+        )
+        parts.append(retrieval_text)
+        offset_ref[0] = end + 1
+        return [seg]
+
+    row_batch = _table_row_batch_size(normalized)
+    return build_table_segments_from_rows(
+        normalized,
+        ti,
+        offset_ref,
+        parts,
+        heading_path,
+        table_body_html=html or None,
+        row_batch_size=row_batch,
+        page_no=page_no,
+        context_prefix=context_prefix,
+    )
+
+
 def build_table_segments_from_rows(
     rows: list[list[str]],
     ti: int,
@@ -646,6 +940,7 @@ def build_table_segments_from_rows(
     table_body_html: str | None = None,
     row_batch_size: int = 1,
     page_no: int | None = None,
+    context_prefix: str | None = None,
 ) -> list[ParsedSegment]:
     """
     通用"行 → 表格 ParsedSegment 列表"转换器：
@@ -697,16 +992,13 @@ def build_table_segments_from_rows(
     offset_ref[0] = end + 1
 
     batch_size = max(1, int(row_batch_size))
-
-    def _row_line(cells: list[str]) -> str:
-        if header and len(cells) == len(header):
-            return "；".join(f"{h}：{v}" for h, v in zip(header, cells) if v).strip()
-        return " | ".join(c for c in cells if c).strip()
+    prefix = (context_prefix or "").strip()
+    prefix_applied = False
 
     ri = 0
     while ri < len(data_rows):
         batch = data_rows[ri : ri + batch_size]
-        lines = [_row_line(cells) for cells in batch]
+        lines = [_format_table_row_line(cells, header) for cells in batch]
         lines = [ln for ln in lines if ln]
         if not lines:
             ri += batch_size
@@ -732,6 +1024,11 @@ def build_table_segments_from_rows(
         if page_no is not None:
             row_meta["page_no"] = page_no
             row_meta["page_idx"] = page_no - 1
+        if prefix and not prefix_applied:
+            line = prepend_table_context(line, prefix)
+            row_meta["table_context_prefix"] = prefix
+            prefix_applied = True
+            end = start + len(line)
         segments.append(
             ParsedSegment(
                 text=line,
@@ -819,7 +1116,16 @@ def _docx_table_to_segments(
         cells = [_docx_table_cell_text(c) for c in row.cells]
         if any(cells):
             rows.append(cells)
-    return build_table_segments_from_rows(rows, ti, offset_ref, parts, heading_path, page_no=page_no)
+    row_batch = _table_row_batch_size(rows) if len(rows) > 2 else 1
+    return build_table_segments_from_rows(
+        rows,
+        ti,
+        offset_ref,
+        parts,
+        heading_path,
+        row_batch_size=row_batch,
+        page_no=page_no,
+    )
 
 
 def _iter_docx_body_blocks(doc: Any):
@@ -1006,11 +1312,60 @@ def _read_xls_sheet_rows(book, sheet_index: int, log: Callable[[str], None] | No
     return sheet.name, rows
 
 
-def _excel_row_batch_size(num_data_rows: int, *, max_row_segments: int = 400) -> int:
-    """大表按批合并行 segment，避免单行一块导致分块数爆炸。"""
-    if num_data_rows <= max_row_segments:
+def _format_table_row_line(cells: list[str], header: list[str] | None) -> str:
+    if header and len(cells) == len(header):
+        return "；".join(f"{h}：{v}" for h, v in zip(header, cells) if v).strip()
+    return " | ".join(c for c in cells if c).strip()
+
+
+def _split_table_header_and_data(rows: list[list[str]]) -> tuple[list[str] | None, list[list[str]]]:
+    normalized = [r for r in rows if any(c.strip() for c in r)]
+    if len(normalized) >= 2 and _is_plausible_header_row(normalized[0]):
+        return normalized[0], normalized[1:]
+    return None, normalized
+
+
+def _estimate_table_row_chars(rows: list[list[str]], header: list[str] | None, *, sample_size: int = 48) -> int:
+    """估算单行检索文本长度，用于按字符预算合并行 batch。"""
+    _, data_rows = _split_table_header_and_data(rows)
+    if not data_rows:
+        return 200
+    sample = data_rows[:sample_size]
+    lengths = [
+        len(_format_table_row_line(r, header))
+        for r in sample
+        if any(c.strip() for c in r) and _format_table_row_line(r, header)
+    ]
+    if not lengths:
+        return 200
+    return max(80, int(sum(lengths) / len(lengths)))
+
+
+def _table_row_batch_size(
+    rows: list[list[str]],
+    *,
+    max_segment_chars: int = MAX_TABLE_ROW_SEGMENT_CHARS,
+    max_rows_per_batch: int = MAX_TABLE_ROWS_PER_SEGMENT,
+    max_row_segments: int = MAX_TABLE_ROW_SEGMENTS,
+) -> int:
+    """
+    宽表按字符预算切 batch，便于按行/目录名精确召回；
+    段数超硬顶时再放大 batch，避免索引块数爆炸。
+    """
+    header, data_rows = _split_table_header_and_data(rows)
+    num_data_rows = len(data_rows)
+    if num_data_rows <= 1:
         return 1
-    return max(1, (num_data_rows + max_row_segments - 1) // max_row_segments)
+
+    avg_chars = _estimate_table_row_chars(rows, header)
+    by_chars = max(1, max_segment_chars // avg_chars)
+    batch = min(by_chars, max_rows_per_batch)
+
+    if num_data_rows > max_row_segments:
+        min_batch_for_cap = (num_data_rows + max_row_segments - 1) // max_row_segments
+        batch = max(batch, min_batch_for_cap)
+
+    return max(1, batch)
 
 
 def _table_data_row_count(row_matrix: list[list[str]]) -> int:
@@ -1136,9 +1491,13 @@ def _parse_excel_html_table(file_bytes: bytes, suffix: str, log: Callable[[str],
                     _log(f"工作表「{sheet.title}」无有效内容，跳过")
                     continue
                 table_html = _rows_to_html_table(row_matrix, caption=sheet.title)
-                row_batch = _excel_row_batch_size(_table_data_row_count(row_matrix))
+                row_batch = _table_row_batch_size(row_matrix)
                 if row_batch > 1 and log:
-                    _log(f"工作表「{sheet.title}」行数较多，按每 {row_batch} 行合并为 1 个检索块")
+                    avg_chars = _estimate_table_row_chars(row_matrix, _split_table_header_and_data(row_matrix)[0])
+                    _log(
+                        f"工作表「{sheet.title}」约 {_table_data_row_count(row_matrix)} 行，"
+                        f"均行 {avg_chars} 字，按每 {row_batch} 行合并为 1 个检索块（≤{MAX_TABLE_ROW_SEGMENT_CHARS} 字/块）"
+                    )
                 sheet_segments = build_table_segments_from_rows(
                     row_matrix,
                     table_index,
@@ -1167,9 +1526,13 @@ def _parse_excel_html_table(file_bytes: bytes, suffix: str, log: Callable[[str],
             if not row_matrix:
                 continue
             table_html = _rows_to_html_table(row_matrix, caption=title)
-            row_batch = _excel_row_batch_size(_table_data_row_count(row_matrix))
+            row_batch = _table_row_batch_size(row_matrix)
             if row_batch > 1 and log:
-                _log(f"工作表「{title}」行数较多，按每 {row_batch} 行合并为 1 个检索块")
+                avg_chars = _estimate_table_row_chars(row_matrix, _split_table_header_and_data(row_matrix)[0])
+                _log(
+                    f"工作表「{title}」约 {_table_data_row_count(row_matrix)} 行，"
+                    f"均行 {avg_chars} 字，按每 {row_batch} 行合并为 1 个检索块（≤{MAX_TABLE_ROW_SEGMENT_CHARS} 字/块）"
+                )
             sheet_segments = build_table_segments_from_rows(
                 row_matrix,
                 table_index,
@@ -1283,6 +1646,15 @@ def parse_document(
         )
 
     if suffix == "docx":
+        if opts.docx_engine == "mineru":
+            return _parse_with_mineru(
+                file_bytes,
+                suffix=suffix,
+                file_name=file_name,
+                parser_type="docx",
+                log=log,
+                require_format_whitelist=False,
+            )
         _log(f"使用 {opts.docx_engine} 解析 docx…")
         doc = _parse_docx(file_bytes)
         _log(f"docx：字符数 {doc.char_count}，分段 {len(doc.segments)}")
@@ -1290,12 +1662,30 @@ def parse_document(
 
     if suffix in {"xlsx", "xlsm", "xls"}:
         excel_suffix = suffix
+        if opts.excel_engine == "mineru":
+            return _parse_with_mineru(
+                file_bytes,
+                suffix=excel_suffix,
+                file_name=file_name,
+                parser_type=excel_suffix,
+                log=log,
+                require_format_whitelist=False,
+            )
         _log(f"Excel 解析引擎：{opts.excel_engine}")
         doc = _parse_excel(file_bytes, excel_suffix, engine=opts.excel_engine, log=log)
         _log(f"Excel：字符数 {doc.char_count}，分段 {len(doc.segments)}")
         return doc
 
     if suffix == "csv":
+        if opts.csv_engine == "mineru":
+            return _parse_with_mineru(
+                file_bytes,
+                suffix=suffix,
+                file_name=file_name,
+                parser_type="csv",
+                log=log,
+                require_format_whitelist=False,
+            )
         _log("按 CSV 规则解析…")
         doc = _parse_csv(file_bytes)
         _log(f"CSV：有效数据行 {doc.metadata.get('row_count', 0)}，文本长度 {doc.char_count}")
@@ -1327,6 +1717,15 @@ def parse_document(
         return ParsedDocument(parser_type=suffix or "txt", text="", char_count=0, segments=[], metadata={})
 
     if suffix == "md":
+        if opts.text_engine == "mineru":
+            return _parse_with_mineru(
+                file_bytes,
+                suffix="md",
+                file_name=file_name,
+                parser_type="md",
+                log=log,
+                require_format_whitelist=False,
+            )
         segments = _build_segments_from_sections(_split_markdown_sections(text))
         _log(f"Markdown：分段数 {len(segments)}")
         return ParsedDocument(
@@ -1335,6 +1734,16 @@ def parse_document(
             char_count=len(text),
             segments=segments,
             metadata={"section_count": len(segments)},
+        )
+
+    if suffix == "txt" and opts.text_engine == "mineru":
+        return _parse_with_mineru(
+            file_bytes,
+            suffix="txt",
+            file_name=file_name,
+            parser_type="txt",
+            log=log,
+            require_format_whitelist=False,
         )
 
     segments = [

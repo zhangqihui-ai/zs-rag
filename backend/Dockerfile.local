@@ -1,19 +1,17 @@
 # Backend Dockerfile — offline / air-gapped build
-# 预先将 wheel/sdist 放入 offline_deps/，JRE 放入 offline_deps/jre/*.tar.gz，构建时不再访问 PyPI / Debian 源。
-# 准备依赖：见 offline_deps/PIP_DOWNLOAD.txt
+# 预先将 wheel/sdist 放入 offline_deps/，JRE 放入 offline_deps/jre/*.tar.gz。
 #
-# 构建示例（注意：构建 context 必须是 backend 目录）：
-#   在 backend 目录下：
-#     docker build -f Dockerfile.local --target development -t zs-rag-backend:dev .
-#   在仓库根目录下：
-#     docker build -f backend/Dockerfile.local --target development -t zs-rag-backend:dev backend
+# 分层说明（便于 push 复用仓库已有层）：
+#   deps    — JRE + pip 依赖（requirements.txt / offline_deps 不变则层可复用）
+#   production — 仅 COPY app/、alembic/（改业务代码只重建最后几层，推送体积小）
 #
-# 若构建机可访问 Debian 镜像但无法访问 deb.debian.org，可传：
-#   --build-arg APT_MIRROR=http://mirrors.aliyun.com/debian
+# 构建（context 必须是 backend 目录）：
+#   docker build -f Dockerfile.local --target production -t backend:prod .
+# 推送时建议：./scripts/push-images-to-registry.sh --offline --backend-only
+#   （脚本会加 --cache-from 私有仓库 backend:prod）
 
-# 内网构建时由 push 脚本传入：192.168.252.252:5566/zs-rag/python:3.12-slim
 ARG BASE_IMAGE=python:3.12-slim
-FROM ${BASE_IMAGE} AS base
+FROM ${BASE_IMAGE} AS deps
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -26,11 +24,8 @@ WORKDIR /app
 
 ARG APT_MIRROR=
 
-# 先复制 offline_deps，以便检测是否含离线 JRE
 COPY offline_deps ./offline_deps
 
-# 离线 JRE：offline_deps/jre/*.tar.gz（由 scripts/download_offline_jre.sh 下载）
-# 在线回退：apt 安装（可设 APT_MIRROR 使用国内镜像）
 RUN set -eu; \
     JRE_TAR=""; \
     for f in offline_deps/jre/*.tar.gz; do \
@@ -43,8 +38,6 @@ RUN set -eu; \
       java -version; \
     else \
       echo "No offline JRE found under offline_deps/jre/; falling back to apt …"; \
-      echo "Hint: run backend/scripts/download_offline_jre.sh on a networked machine,"; \
-      echo "      then build with context=backend (e.g. docker build -f backend/Dockerfile.local backend)"; \
       if [ -n "${APT_MIRROR}" ] && [ -f /etc/apt/sources.list.d/debian.sources ]; then \
         sed -i "s|http://deb.debian.org/debian|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources; \
         sed -i "s|http://deb.debian.org/debian-security|${APT_MIRROR}-security|g" /etc/apt/sources.list.d/debian.sources || true; \
@@ -62,29 +55,50 @@ RUN set -eu; \
       java -version; \
     fi
 
-# 离线安装：仅使用 offline_deps 目录，不访问外网索引
 COPY requirements.txt .
 RUN pip install --no-index --find-links=offline_deps --no-cache-dir -r requirements.txt
 
-COPY . .
 
+# ============== Development（挂载源码时仍可用；含 offline_deps 供 extras 安装）==============
+FROM deps AS development
 
-FROM base AS development
+COPY alembic.ini .
+COPY alembic ./alembic
+COPY app ./app
 
-RUN pip install --no-index --find-links=/app/offline_deps --no-cache-dir -r /app/requirements-docker-local-extras.txt
+RUN pip install --no-index --find-links=./offline_deps --no-cache-dir -r requirements-docker-local-extras.txt
 
 ENV APP_ENV=development
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--timeout-graceful-shutdown", "5"]
 
 
-FROM base AS production
+# ============== Production（运行时镜像不含 offline_deps，应用代码为最后一层）==============
+FROM ${BASE_IMAGE} AS production
 
-RUN useradd --create-home --shell /bin/bash appuser && \
-    chown -R appuser:appuser /app
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    JAVA_HOME=/opt/java \
+    PATH=/opt/java/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    APP_ENV=production
+
+WORKDIR /app
+
+# 稳定层：从 deps 阶段复制 JRE 与已安装的 Python 包（约 1.x GB，requirements 不变则可复用 push）
+COPY --from=deps /opt/java /opt/java
+COPY --from=deps /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=deps /usr/local/bin /usr/local/bin
+
+RUN useradd --create-home --shell /bin/bash appuser
+
+# 易变层：仅业务代码（改代码只重建本层 + 元数据层，推送通常几 MB～几十 MB）
+COPY --chown=appuser:appuser alembic.ini .
+COPY --chown=appuser:appuser alembic ./alembic
+COPY --chown=appuser:appuser app ./app
+
 USER appuser
-
-ENV APP_ENV=production
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import httpx; httpx.get('http://localhost:8000/health', timeout=5)" || exit 1

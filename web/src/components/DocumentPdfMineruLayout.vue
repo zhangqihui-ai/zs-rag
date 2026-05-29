@@ -45,7 +45,11 @@
                   :key="'box-' + p + '-' + box.index"
                   type="button"
                   class="pdf-mineru-box"
-                  :class="{ active: modelValue === box.index, 'citation-focus': citationFocusIndex === box.index }"
+                  :class="{
+                    active: modelValue === box.index,
+                    'citation-focus': citationFocusIndex === box.index,
+                    'chunk-range': chunkIndexSet.has(box.index),
+                  }"
                   :style="box.style"
                   :data-mineru-block-index="box.index"
                   :title="'块 #' + (box.index + 1)"
@@ -62,14 +66,18 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
-import * as pdfjs from 'pdfjs-dist'
-import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 
 import { getKnowledgeBaseErrorMessage, knowledgeBaseApi } from '../api/knowledge-base'
+import { pdfjs, setupPdfjsWorker } from '../lib/setupPdfjsWorker'
 import ScrollRowWithVSlider from './ScrollRowWithVSlider.vue'
-import { pageScaleFromItems, shouldShowMineruBlock, type MineruContentItem } from '../lib/mineruContentDisplay'
+import {
+  mineruContentExtent,
+  mineruPageBox,
+  shouldShowMineruBlock,
+  type MineruContentItem,
+} from '../lib/mineruContentDisplay'
 
-pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc
+setupPdfjsWorker()
 
 /** 单次连续渲染的页数（从当前「起始页」向下） */
 const PAGE_STACK = 5
@@ -81,7 +89,11 @@ const props = defineProps<{
   modelValue: number | null
   /** 引文跳转时的强调高亮（可与 modelValue 同时存在） */
   citationFocusIndex?: number | null
+  /** 切片对应的全部版面块索引：整段框选 */
+  chunkIndices?: number[] | null
 }>()
+
+const chunkIndexSet = computed(() => new Set(props.chunkIndices ?? []))
 
 const emit = defineEmits<{
   'update:modelValue': [value: number | null]
@@ -101,6 +113,90 @@ const scrollRowSliderRef = ref<{
 } | null>(null)
 
 const pageViewport = ref<Record<number, { w: number; h: number }>>({})
+/** PDF 真实页高/页宽（baseHeight / baseWidth），文本层不可用时的兜底映射 */
+const pdfAspectHW = ref<number | null>(null)
+/**
+ * 各页 PDF 文本层在 canvas 像素坐标下的实际文本区域包络。
+ * 用于把 MinerU bbox 按轴线性对齐到真实版面（无需假设纵横比/页边距）。
+ */
+type TextExtent = { minX: number; maxX: number; minY: number; maxY: number }
+const pageTextExtent = ref<Record<number, TextExtent>>({})
+
+/** 全文 bbox 内容包络（文本层兜底时使用） */
+const contentExtent = computed(() => mineruContentExtent(props.items))
+
+/** 某页 MinerU shown 块在 MinerU 坐标系下的包络 */
+function mineruExtentForPage(p0: number): TextExtent | null {
+  let minX = Number.POSITIVE_INFINITY
+  let minY = Number.POSITIVE_INFINITY
+  let maxX = Number.NEGATIVE_INFINITY
+  let maxY = Number.NEGATIVE_INFINITY
+  for (const it of props.items) {
+    if (Number(it.page_idx) !== p0 || !shouldShowMineruBlock(it as MineruContentItem)) {
+      continue
+    }
+    const b = it.bbox
+    if (!Array.isArray(b) || b.length < 4) {
+      continue
+    }
+    const x0 = Number(b[0])
+    const y0 = Number(b[1])
+    const x1 = Number(b[2])
+    const y1 = Number(b[3])
+    if (![x0, y0, x1, y1].every(Number.isFinite)) {
+      continue
+    }
+    minX = Math.min(minX, x0)
+    minY = Math.min(minY, y0)
+    maxX = Math.max(maxX, x1)
+    maxY = Math.max(maxY, y1)
+  }
+  if (maxX > minX && maxY > minY) {
+    return { minX, maxX, minY, maxY }
+  }
+  return null
+}
+
+async function captureTextExtent(
+  page: pdfjs.PDFPageProxy,
+  viewport: pdfjs.PageViewport,
+  p: number,
+): Promise<void> {
+  try {
+    const tc = await page.getTextContent()
+    let minX = Number.POSITIVE_INFINITY
+    let minY = Number.POSITIVE_INFINITY
+    let maxX = Number.NEGATIVE_INFINITY
+    let maxY = Number.NEGATIVE_INFINITY
+    for (const raw of tc.items) {
+      const item = raw as { str?: string; width?: number; transform?: number[] }
+      if (!item.str || !item.str.trim() || !Array.isArray(item.transform)) {
+        continue
+      }
+      const m = pdfjs.Util.transform(viewport.transform, item.transform)
+      const baselineX = m[4]
+      const baselineY = m[5]
+      const fontH = Math.hypot(m[2], m[3])
+      const w = (Number(item.width) || 0) * viewport.scale
+      const left = baselineX
+      const right = baselineX + w
+      const top = baselineY - fontH
+      const bottom = baselineY
+      if (![left, right, top, bottom].every(Number.isFinite)) {
+        continue
+      }
+      minX = Math.min(minX, left)
+      maxX = Math.max(maxX, right)
+      minY = Math.min(minY, top)
+      maxY = Math.max(maxY, bottom)
+    }
+    if (maxX - minX > 1 && maxY - minY > 1) {
+      pageTextExtent.value = { ...pageTextExtent.value, [p]: { minX, maxX, minY, maxY } }
+    }
+  } catch {
+    // 扫描件等无文本层：保持空，boxesForPage 走兜底映射
+  }
+}
 
 let resizeObserver: ResizeObserver | null = null
 let resizeDebounceTimer: ReturnType<typeof setTimeout> | null = null
@@ -148,9 +244,20 @@ function boxesForPage(p: number): { index: number; style: Record<string, string>
   if (!dim || dim.w <= 0 || dim.h <= 0) {
     return []
   }
-  const { mx, my } = pageScaleFromItems(props.items, p0)
   const vw = dim.w
   const vh = dim.h
+
+  // 主路：用 PDF 文本层真实区域，把 MinerU 文本区域按轴线性对齐（最精确）
+  const textExt = pageTextExtent.value[p]
+  const mExt = mineruExtentForPage(p0)
+  const useTextMap = !!textExt && !!mExt && textExt.maxX - textExt.minX > 1 && textExt.maxY - textExt.minY > 1
+  const sx = useTextMap ? (textExt!.maxX - textExt!.minX) / (mExt!.maxX - mExt!.minX) : 0
+  const sy = useTextMap ? (textExt!.maxY - textExt!.minY) / (mExt!.maxY - mExt!.minY) : 0
+
+  // 兜底：无文本层（扫描件）时按 PDF 纵横比 + 内容包络推算页面尺寸
+  const aspectHW = pdfAspectHW.value ?? dim.h / dim.w
+  const { pageW, pageH } = mineruPageBox(contentExtent.value, aspectHW)
+
   const out: { index: number; style: Record<string, string> }[] = []
   props.items.forEach((it, index) => {
     if (!shouldShowMineruBlock(it as MineruContentItem)) {
@@ -170,10 +277,21 @@ function boxesForPage(p: number): { index: number; style: Record<string, string>
     if (![x0, y0, x1, y1].every(Number.isFinite)) {
       return
     }
-    const left = (x0 / mx) * vw
-    const top = (y0 / my) * vh
-    const w = ((x1 - x0) / mx) * vw
-    const h = ((y1 - y0) / my) * vh
+    let left: number
+    let top: number
+    let w: number
+    let h: number
+    if (useTextMap) {
+      left = textExt!.minX + (x0 - mExt!.minX) * sx
+      top = textExt!.minY + (y0 - mExt!.minY) * sy
+      w = (x1 - x0) * sx
+      h = (y1 - y0) * sy
+    } else {
+      left = (x0 / pageW) * vw
+      top = (y0 / pageH) * vh
+      w = ((x1 - x0) / pageW) * vw
+      h = ((y1 - y0) / pageH) * vh
+    }
     if (w < 2 || h < 2) {
       return
     }
@@ -406,6 +524,10 @@ async function renderVisiblePages() {
       continue
     }
     const page = await doc.getPage(p)
+    const base = page.getViewport({ scale: 1 })
+    if (base.width > 0 && base.height > 0) {
+      pdfAspectHW.value = base.height / base.width
+    }
     const scale = computePageScale(page, canvas)
     const viewport = page.getViewport({ scale })
     const ctx = canvas.getContext('2d')
@@ -419,6 +541,9 @@ async function renderVisiblePages() {
       [p]: { w: viewport.width, h: viewport.height },
     }
     await page.render({ canvasContext: ctx, viewport }).promise
+    if (!pageTextExtent.value[p]) {
+      await captureTextExtent(page, viewport, p)
+    }
   }
   await nextTick()
   scrollRowSliderRef.value?.syncThumb()
@@ -432,6 +557,8 @@ async function loadPdf() {
   pdfDoc.value = null
   numPages.value = 0
   pageViewport.value = {}
+  pdfAspectHW.value = null
+  pageTextExtent.value = {}
   try {
     const blob = await knowledgeBaseApi.fetchDocumentFileBlob(props.kbId, props.documentId)
     if (gen !== loadGeneration) {
@@ -657,22 +784,27 @@ onUnmounted(() => {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px 14px;
-  padding: 10px 14px;
+  gap: 4px 12px;
+  padding: 2px 12px;
   border-bottom: 1px solid var(--border-color);
   background: var(--bg-tertiary);
 }
 
+.pdf-mineru-toolbar .btn {
+  font-size: 0.76rem;
+  padding: 3px 9px;
+}
+
 .pdf-mineru-page-label {
-  font-size: 0.85rem;
+  font-size: 0.76rem;
   color: var(--text-secondary);
-  min-width: 120px;
+  min-width: 96px;
   text-align: center;
 }
 
 .pdf-mineru-hint {
   margin-left: auto;
-  font-size: 0.78rem;
+  font-size: 0.72rem;
   color: var(--text-tertiary);
 }
 
@@ -735,6 +867,12 @@ onUnmounted(() => {
 .pdf-mineru-box:hover {
   background: rgba(59, 130, 246, 0.22);
   border-color: rgba(37, 99, 235, 0.85);
+}
+
+.pdf-mineru-box.chunk-range {
+  background: rgba(250, 204, 21, 0.2);
+  border-color: #d97706;
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.22);
 }
 
 .pdf-mineru-box.active {

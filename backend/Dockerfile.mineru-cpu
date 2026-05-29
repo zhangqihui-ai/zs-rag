@@ -5,8 +5,9 @@
 # - 通过 `mineru-api --host 0.0.0.0 --port 8000` 暴露 HTTP API，
 #   主要调用 POST /file_parse。
 # - 首次启动会下载模型（~数 GB）到 /models，建议挂载 `mineru_models` 卷复用。
-# - 如需 GPU VLM 模式，请使用官方镜像 `mineru:latest` 并将 compose 的
-#   MINERU_BACKEND 改为 `vlm-vllm-engine`，此 Dockerfile 仅针对 CPU pipeline。
+# - GPU VLM 模式请使用 Dockerfile.mineru-gpu + compose profile mineru-gpu，
+#   backend 设 MINERU_BACKEND=vlm-vllm-engine、MINERU_BASE_URL=http://mineru-gpu:8000。
+# - 离线「模型打进镜像」请用 Dockerfile.mineru-cpu-offline（tag: mineru:cpu-offline），勿改本文件。
 # ==========================================================================
 FROM python:3.11-slim
 

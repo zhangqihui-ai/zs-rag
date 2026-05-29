@@ -1,0 +1,894 @@
+[
+  {
+    "type": "text",
+    "text": "新生儿出生“一件事”办理指南",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**一、适用对象**",
+    "text_level": 1,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "1、申报人应为新生儿父母任意一方。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "2、新生儿落户必须随父母中河南户籍一方，集体户口、父母所属民族不一致、非婚内出生的新生儿暂不支持一件事联办。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "3、新生儿父母任意一方为军人的暂不支持一件事联办。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "4、新生儿已线下办理过入户的暂不支持一件事联办。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "5、新生儿父母必须为河南省内办理的婚姻登记，且当前为婚姻存续状态。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "6、新生儿在河南省内助产机构出生，年龄不大于12个月，新生儿母亲在入院时已进行人证核验。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**二、可联办事项（已办理公安落户的暂不再支持线上办理）**",
+    "text_level": 1,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "1、《出生医学证明》签发办理",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "2、预防接种证办理",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "3、对新出生婴儿办理出生登记（国内出生）",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "4、城乡居民参保登记（新生儿）",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "5、社会保障卡申领",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**三、可享受的延伸服务**",
+    "text_level": 1,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "1、生育医疗费支付（含产前检查费）",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "2、生育津贴支付",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "3、科学育儿指导服务",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**四、需提供材料**",
+    "text_level": 1,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "1、中华人民共和国结婚证",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "2、中华人民共和国居民身份证",
+    "page_idx": 0
+  },
+  {
+    "type": "list",
+    "list_items": [],
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**五、移动端办理流程**",
+    "text_level": 1,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "1.新生儿父母任意一方通过豫事办App或支付宝小程序登录账号，点击新生儿出生“一件事”，选择办理地区，阅读申报须知，表单填写过程中系统将会调用申报人及其配偶的身份、婚姻、户籍信息和新生儿的相关信息。同意授权后勾选夫妻双方已知晓并同意授权。点击“开始申报”，进行下一步。",
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/87daa9aac7acf32d1dac43a34d3ed7fea2b7cb9e09908e30b1a70f0763760141.png",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "河南省 Q、社保缴费 您好，\\*\\*梅 个中心> 河南省社保地费官方主要深道 好系事办 不跑腿、免排队指尖一点、安全便捷 推荐服务 新生儿出生 社保缴费 医保电子凭证 公积金服务 惠民惠农补贴一卡通 社保个人参保信息查询 遇事豫办服务随行"
+  },
+  {
+    "type": "image",
+    "img_path": "images/9279d46afb5ec6c3bb1b8beb6e8abb8ad9d2aa56785bf97fb64907d2e66d4639.jpg",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "以下地区支持办理该事项，请选择："
+  },
+  {
+    "type": "image",
+    "img_path": "images/142d26e98d8593994b4434fcd9b64be42093b96d696b73833a65debda0c581a3.jpg",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "## 申报须知 ## 申报须知 1.申报人应为新生儿父母任意一方。母亲申报流程更加简洁，建议您选择母亲申报。 2.新落户必须随中河南户籍，集体户、父所属民族不一致、非婚内出的新生暂不持件事联办。 3.新父任意为军的暂不持件事联办。 4.新已线下办理过户的暂不持件事联办。 5.新生儿父母必须为河南省内办理的婚姻登记，且当前为婚姻存续状态。 6.新在河南省内助产机构出，年龄不于 12个，新亲在院时已进证核验。 7.表单填写过程中系统将会调用申报人及配偶的身份、婚姻、户籍信息和新相关信息。 8.请勿重复申报。 ## 夫妻双方已知晓并同意授权 ## 退出申报 ## 开始申报"
+  },
+  {
+    "type": "text",
+    "text": "2.新生儿出生“一件事”提供引导式申报，请根据实际情况依次回答问题，引导完成后，点击“立即办理”，进行下一步。",
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/ef9f93b630628a821fe3d6f2b632bc999700858564464abbd93f514a84631e8e.png",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "\\*1、新生儿父母是否为同一民族，且其中一方为河南省 户籍？是 否 2、新生儿是否随父母中河南籍一方办理出生登记？●是 否 +3、新生儿是否已线下办理户口登记？是 否 \\*4、新生儿父母是否在河南省内进行的婚姻登记？●是 否 \\*5、新是否在省内医疗机构内出？●是 否 \\*6、新生儿年龄是否大于12个月？是 否 \\*7、新生儿是否办理过出生医学证明？已办理 未办理"
+  },
+  {
+    "type": "text",
+    "text": "3、选择对应情形后，点击“立即办理”进入基本信息页面，基本信息为系统自动带出，确认无误后点击“继续申报”。",
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/554ba9c2257eac46836af8b53de71f9713cd0d364f6a03d98c3f342f70257c76.png",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "## <基本信息 2 基本信息 填写表单 材料上传"
+  },
+  {
+    "type": "text",
+    "text": "4、表单填写过程中，带星号的为必填项，红色字体为提示信息。具体填报步骤如下：",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "（1）点击父亲身份证号右侧的蓝色按钮，系统自动获取夫妻双方身份证号及婚姻状态。",
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/3516615e4fe49e5ab7eb8c2c0b3e0e7ddd5b0a652bb530bee806ad20a5838b29.jpg",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "请点击“亲身份证号”右侧蓝按钮，获取夫妻双方婚姻信息 请点击父亲姓名右侧蓝色按钮，获取夫妻双方户籍、身份证信息（非河南省户籍，请手动补充必填信息）"
+  },
+  {
+    "type": "text",
+    "text": "（2）点击父亲姓名右侧蓝色按钮，系统自动获取夫妻双方的户籍信息，若有一方非河南省户籍需要规范填写必要信息。",
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/ceec2df0e41e1e786e37fbbe02038cd62ce27b5f200e746f17634083a9ebadca.jpg",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "请点击父亲姓名右侧蓝色按钮，获取夫妻双户籍、身份证信息(河南省户籍，请动补充必填信息）"
+  },
+  {
+    "type": "list",
+    "list_items": [
+      "1. 选择新生儿落户投靠方式，系统自动获取新生儿拟落户派出所信息。选择新生儿出生日期，系统自动获取新生儿的出生体重、孕周等相关信息，您只需要填写新生儿姓名即可。"
+    ],
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/7a42d41347eed8a62589273cf4868d4a46eeb0e200bd944c6af854c740982e26.jpg",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "基本信息 填写表单 材料上传 申报完成 随父落户 赵堡派出所 请点击“出期”下拉框，选择需要办理的新 请点击下拉框选择 1、请手动输入新生儿正式姓名； 2、请按照“规范通汉字表”填写新姓名，不要填写生僻字。 例：“渺”、“篪”、“葬”等； 3、新儿姓原则上随父姓或母姓，若使第三方姓氏，请线下办理。"
+  },
+  {
+    "type": "image",
+    "img_path": "images/983ff87e63103259988d91b0bbbf21a16c91dd87f48325de349f92b8e122aee0.jpg",
+    "image_caption": [],
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/cc7bdc3b78f16a33743af7c72565b12749f18f0fdafac4d3c147e064fa868569.jpg",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "## <填写表单 填写表单 材料上传 \\*出生日期 2024-03-1810:00:00 1、请手动输入新生儿正式姓名； 2、请按照“规范通汉字表”填写新姓名，不要填写生僻字。 例：“渺”、“篪”、“”等； 3、新生儿姓氏原则上随父姓或母姓，若使第三方姓氏，请线下办理。 \\*民族 汉族"
+  },
+  {
+    "type": "image",
+    "img_path": "images/6fbfc2873f8c1af1530dd0b88df4834dc0802349fc9416814c9da0cfdbb1e966.jpg",
+    "image_caption": [],
+    "page_idx": 0
+  },
+  {
+    "type": "list",
+    "list_items": [
+      "1. 填写出生医学证明领取信息，选择到现场领证人与新生儿的关系。"
+    ],
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/a0e4d26555528a0d839402384618f64dc85fc49798e1f968e8c5af80cf4e76b1.png",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "$$ B C \\approx B E $$ $$ n \\in \\mathbb { = } , $$"
+  },
+  {
+    "type": "text",
+    "text": "（5）填写您的现住址信息",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "选择您所在的省、市、县，并输入详细地址。",
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/4a24c9cdc1a819d98b530998e5bdd78aff1e9249451672a4fd476fd0ebaf211f.jpg",
+    "image_caption": [],
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/f9f69771bd62e42b2b6472540de8ba04fc1b266ae0bf7a5661d32b1b4e2903ed.jpg",
+    "image_caption": [],
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "（6）填写新生儿医保参保信息",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "选择新生儿参保市、县，在搜索框输入参保单位简称，获取参保单位列表，选择参保单位，点击“确定”。",
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/e845e42ddf5744a7a537eac8cfdeb88f4724cf2bbeeddfab49dea3a059023a46.png",
+    "image_caption": [],
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/d2b9f3c0cf9bebaf618ab7f867b5afb51a3750cc28387fd1fbb4bc77cab9d16f.jpg",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "新医保参保地请选择新生儿父母的户籍地或参保地 \\*参保所属市 郑州市 参保所属县 \\$区\\$ 中原区 1、请点击“新参保社区（村）”下拉框，输新需参保的社区（村）简称，选择参保社区，并动获取“参保单位编号”等信息。保 须水办事处小李庄 ×保单位编4101020100413"
+  },
+  {
+    "type": "text",
+    "text": "（7）填写社会保障卡申领信息",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "选择社保卡办理市、县和服务银行。新生儿照片可选择上传也可以选择不上传，若不上传照片或上传的照片不合格，新生儿社保卡照片处将会是空白。",
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/d86c4241c0edd09ab1c1d248919f3d39ed8d8c4472c05becf335b9154e181b78.jpg",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "照要求：新像清晰、背景为纯，照不大于1M，如不符合要求或未上传，社保卡卡照片将为空白。 社保卡邮寄信息"
+  },
+  {
+    "type": "text",
+    "text": "（8）填写社保卡邮寄信息",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "选择社保卡邮寄的省、市、县，系统将预填收卡地址，收卡人姓名和电话，如有误可点击进行修改。",
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/be46fd0fa78e5d9b28183d6b7dda0ddbe97db156b8e826a528991daf8a7d8269.jpg",
+    "image_caption": [],
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "（9）表单填写完成后，点击“下一步”，系统将自动生成联办申请表和《医学出生证明》首次签发登记表，请您认真核对信息，确认无误后进行电子签名，签署成功后完成申报。",
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/e24287ab8c8885cbeece7ba8e69a7cccae9ed3db9bcdc6cda9f14d2f8fa9f4f1.png",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "## <文件详情 ## 河南省新出“件事”联办申请表-未办 理出生证明.ofd <table><tr><td rowspan=1 colspan=1>中司人现详用件址</td><td rowspan=1 colspan=3>xx街xx社区xx小xxx号横xxx</td></tr><tr><td rowspan=1 colspan=1></td><td rowspan=1 colspan=3>婚姻信息 21</td></tr><tr><td rowspan=1 colspan=1>父母婚状志</td><td rowspan=1 colspan=3>结婚强比类</td></tr><tr><td rowspan=1 colspan=1></td><td rowspan=1 colspan=3>新生儿信息</td></tr><tr><td rowspan=1 colspan=1>提箱万式</td><td rowspan=1 colspan=1>随父落户</td><td rowspan=1 colspan=1>温落户派所</td><td rowspan=1 colspan=1>赵保识出所</td></tr><tr><td rowspan=1 colspan=1>名</td><td rowspan=1 colspan=1>郑家家</td><td rowspan=1 colspan=1>4.别</td><td rowspan=1 colspan=1>男</td></tr><tr><td rowspan=1 colspan=1>民出</td><td rowspan=1 colspan=1>汉族</td><td rowspan=1 colspan=1>出生时刻</td><td rowspan=1 colspan=1>2021-03–18 10:00:00</td></tr><tr><td rowspan=1 colspan=1>出生孕月</td><td rowspan=1 colspan=1>42+3</td><td rowspan=1 colspan=1>空体4()</td><td rowspan=1 colspan=1>3500.0</td></tr><tr><td rowspan=1 colspan=1>出生身长（on)</td><td rowspan=1 colspan=3>50.0</td></tr><tr><td rowspan=1 colspan=1>牛儿账保参保社区（材）全称</td><td rowspan=1 colspan=3>须水办事处小李庄</td></tr><tr><td rowspan=1 colspan=4>出生医学证明领取信息</td></tr></table> <table><tr><td rowspan=1 colspan=1>额证人第名</td><td rowspan=1 colspan=1>证人有效身份证号的 1</td></tr><tr><td rowspan=1 colspan=1>额让人与所生儿关系</td><td rowspan=1 colspan=1>每京</td></tr><tr><td rowspan=1 colspan=1></td><td rowspan=1 colspan=1>社保卡申领信息</td></tr><tr><td rowspan=1 colspan=1>社保卡办组市</td><td rowspan=1 colspan=1>郑州市 卡办具区 中原区</td></tr><tr><td rowspan=1 colspan=1>服务制行</td><td rowspan=1 colspan=1>邮储服行</td></tr><tr><td rowspan=1 colspan=1></td><td rowspan=1 colspan=1>社保卡邮寄信息</td></tr><tr><td rowspan=1 colspan=1>详地</td><td rowspan=1 colspan=1>xx街道xx社区xx小区xx号楼xxx</td></tr><tr><td rowspan=1 colspan=1>收卡联系人</td><td rowspan=1 colspan=1> 收卡联品电话</td></tr><tr><td rowspan=1 colspan=2>申请人电子签名</td></tr><tr><td rowspan=1 colspan=2>请认真核对以上信息，确认无误后签字提交。请人签名：021年0509</td></tr><tr><td rowspan=1 colspan=2></td></tr></table>"
+  },
+  {
+    "type": "image",
+    "img_path": "images/84b7502892f0c9b6cae24a0141e62896537d654751e02b5a469e7d6f57ad9412.png",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "## <文件详情 河南省新生儿出“件事”联办申请表-未办 理出生证明.ofd 1.如有历史签名，点击历史签名即可签署；2.提交后人脸核身通过即可完成签署 电子签名1 电子印章0"
+  },
+  {
+    "type": "image",
+    "img_path": "images/035bc23154f75d87d6cf5e206275b95e3972ecdcd1f97122fa1a8294be8f94da.jpg",
+    "image_caption": [],
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/17a7a99e26fce2ceb2ca3cd8bd6b83aa2916d276eca704d2948608c65e401f04.jpg",
+    "image_caption": [],
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/2f8d94ccb7d934b5af4b0c04f177237ad0054df0222b9946160d3c5243eea012.jpg",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "## く 件详情"
+  },
+  {
+    "type": "text",
+    "text": "10、表单填写完成后，进入材料上传页面，分别上传新生儿父母双方结婚证登记页和身份证正反页，可以通过手机直接拍照上传或上传已经保存好的图片。",
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/3034e339782a01a554c731b8d54b49726b8a4781d0fcabd14ee167c06bf86292.jpg",
+    "image_caption": [],
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "11、材料上传成功后，点击保存按钮，系统生成“申报告知单”，申请人的配偶需于一个自然日内登录“豫事办”App或支付宝小程序，在“我的－我的签名”中对《医学出生证明》首次签发登记表进行签名。签名完成后系统将自动发送至相关部门集成办理，您可以通过【个人中心－我的办件】实时查看办理进度。",
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/8e280df8bb6117ab6f4ffc699ef5c3a875a38b2ed18299dab94300e94d7954f0.png",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "## 申报告知单 ## 尊敬的用户： 您好，您本次申报的【新生儿出生一件事】，申报号为【01】，系统已经暂存，还需新生儿父亲(姓名.）登录“豫事办”App或支付宝小程序，在“我的-我的签名”中对《出生医学证明》首次签发登记表进行签名。请提醒新生儿父亲在1个自然日内完成签名，完成签名后，您的申报系统将自动发送至相关部门集成办理。办理进度您可以通过【个人中心-我的办件】实时查看。 ## 您的办理结果领取方式为： 1.《出生医学证明》，如果您选择邮寄，根据您填报的出生医学证明邮寄信息，通过邮政寄递，并通过关注中国邮政公众号查询寄递信息。如果您选择现场领取，请到新生儿出生的助产机构现场领取。 2．《预防接种证》，新生儿出生后，助产机构将新生儿基本信息和接种信息录入免疫规划信息管理系统，办理《预防接种证》。 3.《居民户口簿》，请到新生儿拟落户的派出所现场领取。 4.《中华人民共和国社会保障卡》，根据您填报的社保卡邮寄信息，通过邮政寄递，请注意签收。 5.新生儿医保参保登记成功后，请通过电子税务局、“河南税务”微信或支付宝小程序进行缴费，并通过国家医保服务平台APP或支付宝河南医保小程序绑定医保亲情账户。 请您关注办理进度，及时领取办理结果并关注下方河南省科学育儿指导公众号，获取更多科学育儿指导服务。 我已知晓并联系配偶于1个自然日内完成电子签名"
+  },
+  {
+    "type": "text",
+    "text": "12、申请人申请完成后，申请人的配偶于一个自然日内登录“豫事办”App或支付宝小程序，在“我的－我的签名”待签署页面点击“电子签名”，对《医学出生证明》首次签发登记表进行电子签名（签名方式与申请人签名方式相同）。",
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/a40805fd525727e51361696ef83fd798a43201495b357d5d54d90c673b28a343.png",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "我的证照 我的办件 我要评价 生活缴费 >我的公积金 > 保 我的社保 >我的评价 >我的房产我的信用 >我的订阅 >实名认证 四级 自 我的诉求 >我的签名 >关于我们 >"
+  },
+  {
+    "type": "image",
+    "img_path": "images/9aa316b2a238447b40e9aa58481e618896da3421c4b3d74b0bcdb04c36a54a19.png",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "<table><tr><td>&lt; 我的签名</td><td>☆ 0</td></tr><tr><td>待签署</td><td>已签署</td></tr><tr><td>业务名称</td><td>新生儿一件事2</td></tr><tr><td>业务申报号</td><td>2</td></tr><tr><td>操作</td><td>电子签名</td></tr></table>"
+  },
+  {
+    "type": "text",
+    "text": "13、配偶签名完成后，您可以通过豫事办－我的办件，查询联办事项的办理进度。",
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/7a73a24b16fe86879e103560413c3f1d36b651480ced0f92d3f2e53f82a40a93.png",
+    "image_caption": [],
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/f4121aad0c1f7d80f6d160abed44a3d1c182802fc81fe7634e58f581c0ff5cd8.png",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "<table><tr><td>&lt;我的一件事 ☆… ? 基本信息 材料信息 联办进度</td></tr><tr><td>|对新出生婴儿办理出生登记(国内出生)</td></tr><tr><td>申报号</td></tr><tr><td>部门名称 郑州市上街区公安局</td></tr><tr><td>办件状态 受理</td></tr><tr><td>收件时间 2023-08-14 17:16</td></tr><tr><td>办结时间</td></tr><tr><td>预防接种证办理</td></tr><tr><td>申报号</td></tr><tr><td>部门名称 郑州市上街区卫生健康委员会</td></tr><tr><td>办件状态 收件</td></tr><tr><td>收件时间 2023-08-14 17:16</td></tr><tr><td>办结时间</td></tr></table>"
+  },
+  {
+    "type": "text",
+    "text": "**六、网页端办理**",
+    "text_level": 1,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "1、登录河南政务服务网 (https://www.hnzwfw.gov.cn/)，点击右上角登录、注册按钮，即可实现个人账户登录和注册的功能。",
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/9a28e7854a61c97c1daac71dd04d37c6a7733bee6bcb46a78320b6b2b07f6d9f.jpg",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "河南省 切换地区/部门 法人办事 公共服务 阳光政务 换批 学位认证 •个税计算 我要建议 办件进度查询 好差评 全豫通办 政务服务地图 ## 聚力中原真诚为民 省本级 请输入内容关键字 热门搜索： 搜索 二级建造师 毕业证书查询"
+  },
+  {
+    "type": "text",
+    "text": "2、在首页点击“主题集成”服务专区，选择“新生儿出生”进入“一件事主题集成服务专区”，点击“立即办理”，选择办理地区后，阅读申报须知，表单填写过程中系统将会调用申报人及其配偶的身份、婚姻、户籍信息和新生儿的相关信息。同意授权后勾选夫妻双方已知晓并同意授权。点击“开始申报”，进行下一步。",
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/d9e23367501ca49bdbb0887a19e836cb0aaa03ce6d1d62aa8272e6363e3c7d9a.jpg",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "## 特色服务 智能秒批 为老服务 人才服务 基层服务 民生保障 助企纾困 电子证照专区 全豫通办 ## 主题集成服务/按主题集成服务事项 灵活就业 公民婚育 企业开办 企业准营（以餐饮店为例） 员工录用 ## 个人办事法人办事"
+  },
+  {
+    "type": "image",
+    "img_path": "images/1f061051746b126a9662c068e5971e0c3d6bf9d809c1682738f7dd41c9040a62.jpg",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "个人办事 法人办事 O 全部 出生 就业 O 婚育 O 置业 救助 退休 身后事 国家 共1件一件事 •新生儿出生 立即办理 更多服务正接入中"
+  },
+  {
+    "type": "image",
+    "img_path": "images/335007853326084829592877196cfd407c05ec6aec2d6a4297eed330ac898f9c.jpg",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "## 申报须知 1、申报人应为新生儿父母任意一方。母亲申报流程更加简洁，建议您选择母亲申报。 2、新生儿落户必须随父母中河南户籍一方，集体户口、父母所属民族不一致、非婚内出生的新生儿暂不支持一件事联办。 3、新父母任意为军的暂不持一件事联办。 4、新生儿已线下办理过入户的暂不支持一件事联办。 5、新生儿父母必须为河南省内办理的婚姻登记，且当前为婚姻存续状态。 6、新在河南省内助产机构出，年龄不于12个，新亲在院时已进证核验。 7、表单填写过程中系统将会调用申报人及配偶的身份、婚姻、户籍信息和新生儿相关信息。 8、请勿重复申报。 ## 夫妻双方已知晓并同意授权 退出申报 开始申报"
+  },
+  {
+    "type": "text",
+    "text": "3、新生儿出生“一件事”提供引导式网上申报，回答引导问题，形成需要办理的事项及申报材料，点击“立即办理”，进入办理页面。",
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/0a6ad381392eeeee5e66b7af99eb6cff1b747180f04005fced6db44590d6c4f5.jpg",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "## 请选择办理情形 1、新生儿父母是否为同民族，且其中方为河南省户籍？是否 2、新生儿是否随父母中河南籍一方办理出生登记？ ●是否 3、新生儿是否已线下办理户口登记？ 是●否 4、新生儿父母是否在河南省内进行的婚姻登记？ ●是否 5、新生儿是否在省内医疗机构内出生？是否 6、新生年龄是否于12个？是否 7、新生儿是否办理过出生医学证明？ 已办理 未理 ## 根据您的情况 |您需要办理的事项 1.《出生医学证明》签发办理 2.预防接种证办理 3.对新出生婴儿办理出生登记（国内 出生） 4.城乡居民参保登记-父母一方参加 居民医保的新生儿参保 5.社会保障卡申领 一您可享受的延伸服务 1、生育医疗费支付（含产前检查费） 2、生育津贴支付 3、科学育儿指导服务 |您需要提交的材料 1、中华人民共和国结婚证 2、中华人民共和国居民身份证"
+  },
+  {
+    "type": "text",
+    "text": "4、选择对应情形后，点击“立即办理”进入基本信息页面，基本信息为系统自动带出，确认无误后点击“继续申报”。",
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/f5b0f67a5fec0ee0ca3963ff1eb418554e2f538268e793cec8e0648cf2becd3e.png",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "## 1基本信息"
+  },
+  {
+    "type": "text",
+    "text": "5、按照流程指引，填写表单内容，带星号的为必填信息，每一事项若有提示信息，会在当前事项上方红色字体提示。",
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/95c32cad62d71cab5600e82800607e4a5a8016e74f537101e4ef9ac80f9b987e.jpg",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "## 婚姻信息 请点击父亲身份证号右侧蓝色按钮，获取夫妻双方身份信息 <table><tr><td>*父亲身份证号</td><td>自动获取</td><td>包 *母亲身份证号</td><td>自动获取</td></tr><tr><td>*父母婚姻状态</td><td>婚姻信息自动获取</td><td></td><td></td></tr></table> ## 新生儿父亲信息 请点击亲姓名右侧蓝按钮，获取夫妻双户籍信息(河南省户籍，请动补充必填信息) <table><tr><td rowspan=1 colspan=1>*父亲姓名</td><td rowspan=1 colspan=1>自动获取 日</td><td rowspan=1 colspan=1>*父亲民族</td><td rowspan=2 colspan=1>自动获取自动获取</td></tr><tr><td rowspan=1 colspan=1>*父亲是否为河南省内户籍</td><td rowspan=1 colspan=1>自动获取</td><td rowspan=1 colspan=1>*父亲是否为河南省家庭户</td></tr></table>"
+  },
+  {
+    "type": "list",
+    "list_items": [
+      "1. 表单填写完成后，点击“下一步”，系统将自动生成联办申请表和《医学出生证明》首次签发登记表，申请人认真核对信息，确认无误后进行电子签名，签署成功后完成申报。"
+    ],
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/0f361cba222339a7e878f615adcd43b6164e032c3aadda18f5b463e13c864ed9.png",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "## 文件（2份） 南省新生儿出生“一件事\"联办申请表-未办理出生证明.otfd 《出生医学证明》首次签发表·父亲.ofd ## 河南省新生儿出生“一件事”联办申请表 ## 提交签署 ## 1印章列表 ## 签署说明 1.点击下方扫码添加手绘签名按钮： 2.使用豫事办安卓APP或豫事办支付宝小程序进扫码,井完成手写签名； 2.如有历史签名，可拖动签名至签署区域： 4.点击提交井完成人脸核身完成签署： \\*当的操作用户需要与豫事办登录用户信息一效 ## 个人签名"
+  },
+  {
+    "type": "image",
+    "img_path": "images/3702a3c59c054c40ab4b2d8883bafdf0e35ec84931044dfe06396deadbced9a4.png",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "## 印章列表"
+  },
+  {
+    "type": "text",
+    "text": "7.表单填写完成后，进入材料上传页面，分别上传新生儿父母双方结婚证登记页和身份证正反页。",
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/00877fd5d64dbf48c0e5a519144d90f3d0daf65cd975439842b3ba8f21ef6c04.png",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "## 填写表单 1.带\\*号为必填项，请根据实际情况进行填写。 ## 1需上传材料 1.★中华人民共和国结婚证 支持上传格式：png、jpg、jpeg、pdf 材料说明：新生儿父母双方结婚证（登记页） ## 2.中华人民共和国居民身份证 支持上传格式：png、jipg、jpeg、pdf 材料说明：新生儿父母双方身份证（正反页） ## 步 ## 保存 ## 网上提交 测试图片jpg 测试图片jpg ## 网上提交 测试图片jpg 测试图片Jjpg 测试图片jpg 测试图片jpg"
+  },
+  {
+    "type": "text",
+    "text": "8.材料上传成功后，点击保存按钮，系统生成“申报告知单”，申请人的配偶需于一个自然日内登录“豫事办”App或支付宝小程序，在“我的－我的签名”中对《医学出生证明》首次签发登记表进行签名。签名完成后系统将自动发送至相关部门集成办理，您可以通过【个人中心－我的办件】实时查看办理进度。",
+    "page_idx": 0
+  },
+  {
+    "type": "image",
+    "img_path": "images/b4b8edf032b82d4744efe61cdc63897ba3256e0de225b50f41340bda874ba73f.png",
+    "image_caption": [],
+    "page_idx": 0,
+    "image_ocr_text": "## 申报告知单 ## 尊敬的用户： 您好，您本次申报的【新生儿出生一件事】，申报号为 ww】，系统已经暂存，还需新生儿父亲（姓名· 登录豫事办App或支付宝小程序， 在“我的我的签名\"中对《出生医学证明》首次签发登记表进行签名，请提醒新生儿父亲在1个自然日内完成签名，完成签名后，您的申报系统将自动发送至相关部门集成办理。办理进度您可以通过【个人中心-我的办件】实时查看。 您的办理结果领取方式为： 1、《出生医学证明》，如果您选择邮寄，根据您填报的出生医学证明邮寄信息，通过邮政寄递，并通过关注中国邮政公众号查询寄递信息。如果您选择现场领取，请到新生儿出生的助产机构现场领取。 2、《预防接种证》，出院后在就近疫苗接种机构接种时现场领取。 3、《居民户口簿》，请到新生儿拟落户的派出所现场领取。 4、《中华人民共和国社会保障卡》，根据您填报的社保卡邮寄信息，通过邮政寄递，请注意签收。 5、新生儿医保参保登记成功后，请通过电子税务局、“河南税务\"微信或支付宝小程序进行缴费，并通过国家医保服务平台APP或支付宝河南医保小程序绑定医保亲情账户。 请您关注办理进度，及时领取办理结果并关注下方“河南省科学育儿指导”公众号，获取更多科学育儿指导服务。 我已知晓并联系配偶于1个自然日内完成电子签名 完成申报"
+  },
+  {
+    "type": "text",
+    "text": "9.申请人申请完成后，申请人的配偶于一个自然日内登录“豫事办”App或支付宝小程序，在“我的－我的签名”待签署页面点击“电子签名”，对《医学出生证明》首次签发登记表进行电子签名。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**七、咨询方式**",
+    "text_level": 1,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "办理过程中，如有问题，请咨询12345；《社会保障卡》申领请咨询12333；城乡居民基本医疗保险参保登记请咨询12393。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**八、新生儿出生“一件事”常见问题解答**",
+    "text_level": 1,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**1、申报过程中需要提交什么材料？**",
+    "text_level": 2,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "答：需要上传新生儿父母双方的结婚证和身份证。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**2、户口簿去哪里打印？需携带什么资料？**",
+    "text_level": 2,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "答：户口簿到拟落户地派出所打印，打印户口簿时需携带落户方居民户口簿和《出生医学证明》。（《出生医学证明》正副联不能私自裁切，是由户口登记机关裁切）",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**3、新生儿照片有什么要求？**",
+    "text_level": 2,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "答：社保卡照片可以上传也可以不上传，如果上传，照片要求为：人像清晰、背景为纯白色，照片不大于1M，如不符合要求或未上传，社保卡卡面照片将为空白。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**4、新生儿闭眼照片可以用吗？**",
+    "text_level": 2,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "答：上传的新生儿照片将作为新生儿社保卡的卡面照片，闭眼照片可以使用。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**5、新生儿父母信息无法自动获取怎么办？**",
+    "text_level": 2,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "答：先点击父亲身份证号右侧蓝色按钮，获取夫妻双方信息，再点击父亲姓名右侧蓝色按钮获取夫妻双方户籍信息，如果有一方非河南省户籍，需要手动规范填写必填信息。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**6、新生儿随非河南省户籍一方落户是否可以申请线上联办。**",
+    "text_level": 2,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "答：不可以",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**7、在线办理社保卡，邮寄费如何收取？**",
+    "text_level": 2,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "答：邮寄地址为省内的，收取社保卡快递费10元；邮寄地址为省外的，收取社保卡快递费20元（偏远地区除外，如：新疆、西藏等）。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**8、长时间未领到社会保障卡怎么办？**",
+    "text_level": 2,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "答：申请人可通过豫事办－我的办件查询办件状态，看办件进度是否已办理社保卡业务，如果已办结需咨询社保人社部门，如果未流转至社保人社部门，点开正在办理的办件，核实是否已在上个环节（入户登记）被退件。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**9、社会保障卡密码是多少？**",
+    "text_level": 2,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "答：社会保障卡初始密码是123456，持卡人可通过社保卡服务网点、两定机构办理密码修改业务。新密码不得设置为社会保障卡初始密码。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**10、完成新生儿参保后怎么缴费？**",
+    "text_level": 2,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "答：可通过线下和线上两种渠道进行缴费。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "①“线上”缴费。下载“河南税务”APP、“豫事办”APP或通过支付宝、微信搜索“河南税务”“豫事办”小程序，代缴新生儿医保费。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "②“线下”缴费。持有效身份证件到参保地办税服务大厅、政务服务中心税务窗口、有代收资质的商业银行网点或乡镇（街道办事处）、村（社区）集中代办点等进行缴费。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "建议：优先选择线上渠道为新生儿缴纳医保费。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**11、签完字后不显示材料上传页面，直接显示申报完成。**",
+    "text_level": 2,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "答：更新支付宝版本。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**12、医保参保社区不显示内容。**",
+    "text_level": 2,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "答：（1）输入社区、村的简称进行检索。如xx社区就只输入xx。（2）如果输入简称也检索不到，则该参保地没有维护，需要联系当地医保经办部门的医保经办人员进行咨询。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**13、申请信息没有及时展示在妇幼平台上。（正常申请成功后10-15分钟省妇幼系统会推送至各级妇幼平台上）**",
+    "text_level": 2,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "答：（1）确定配偶双方都签名成功。配偶需在12小时内登陆豫事办小程序或者APP，点击右下角“我的”、再点击“我的签名”，在“待签署”中点击“电子签名”进行“出生医学证明”首次签发登记签名。（2）如已确认父母双方签字成功，15分钟还未展示在妇幼系统上，可提供办件号（申报成功后会发送办件号给申请人），由平台进行查询。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**14、部分新生儿父母婚姻信息查询失败。**",
+    "text_level": 2,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "答：（非大面积统一失败的情况下）部分手写版结婚证或领取时间较长的结婚证存在婚姻登记信息查询失败的情况，建议申请人到结婚登记处进行核实。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**15、社保卡可选银行变少。**",
+    "text_level": 2,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "答：经社保人员回复，目前预制卡比较紧张，暂时取消了没有卡的银行，到卡了再进行恢复。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**16、出生医学证明签发正确流程**",
+    "text_level": 2,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "答：线上申请办理出生医学证明，签发打印出生证后，要点击“办结”，线上申请流程正式完成。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**17、出生医学证明签发是否可以修改信息**",
+    "text_level": 2,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "答：线上申请办理出生医学证明，如有任何一项错误信息，必须进行“不予受理”或者“退件”操作，不允许修改任何申请信息。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**18、出生医学证明签发终止流程**",
+    "text_level": 2,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "答：线上申请办理出生医学证明，进行“不予受理”或者“退件”操作，原因要填写详细。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**19、出生医学证明签发材料下载须知**",
+    "text_level": 2,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "答：线上申请办理出生医学证明，附件资料全部下载打印后，才可以进行签发打印（系统已做逻辑限制）。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**20、出生医学证明材料查看工具**",
+    "text_level": 2,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "答：线上申请办理出生医学证明，附件资料中“首次签发表”、“新生儿出生一件事联办表”下载后，可使用最新WPS或者福昕PDF阅读器插件进行查看。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**21、出生医学证明包含哪些材料**",
+    "text_level": 2,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "答：线上申请办理出生医学证明，附件资料包含“首次签发表”、“新生儿出生一件事联办表”、双方结婚证、双方身份证等材料。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**22、出生医学证明字样说明**",
+    "text_level": 2,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "答：线上申请办理出生医学证明，打印的纸质证副页和存根右上角会显示“出生一件事联办”字样，区分线上和线下签发事宜。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**23、出生医学证明签发节点“不予受理”、“退件”、“办结”说明**",
+    "text_level": 2,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "答：线上申请办理出生医学证明，点击“不予受理”、“退件”任一项，标志该件流程已终止（可重新申请）；点击“办结”操作，标志该件流程全部结束，进入户籍落户环节。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**24、出生医学证明签发提示居住地址为空**",
+    "text_level": 2,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "答：线上申请办理出生医学证明，签发出生证提示：母亲（父亲）居住地行政编码为空,请重新选择【母亲（父亲）居住地】--行政区划已调整，请修改孕妇健卡界面双亲居住地址信息。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**24、出生医学证明签发提示居住地址编码错误**",
+    "text_level": 2,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "答：线上申请办理出生医学证明，签发出生证提示：母亲（父亲）家庭地址行政区划代码不在编码范围之内，请参照标准GBT2260:-- 行政区划已调整，请修改孕妇健卡界面双亲居住地址信息，如省妇幼系统提示无该行政区划地址，联系系统工程师进行维护。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**25、线上申请出生医学证明签发是否允许交叉换号**",
+    "text_level": 2,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "答：线上申请办理出生医学证明，签发打印出生证后，任何信息不允许修改，更不允许交叉换号操作。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**26、线上申请出生医学证明获取不到新生儿信息**",
+    "text_level": 2,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "答：线上申请办理出生医学证明，“豫事办”申请获取不了相关新生儿信息，请核验孕妇建卡、孕妇分娩信息是否正确；如修改建卡/分娩信息后，建议第二天后再进行线上申请。",
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "**27、线上申请出生医学证明外省户籍说明**",
+    "text_level": 2,
+    "page_idx": 0
+  },
+  {
+    "type": "text",
+    "text": "答： 线上申请办理出生医学证明，户籍为外省的，如户籍地址无法获取，群众手动录入户籍地址请注意录入正确，重点名称：‘新疆维吾尔自治区’、‘广西壮族自治区’、‘内蒙古自治区’、‘西藏自治区’、‘宁夏回族自治区’。",
+    "page_idx": 0
+  }
+]

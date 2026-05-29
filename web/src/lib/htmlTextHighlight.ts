@@ -1,10 +1,43 @@
 const HIGHLIGHT_CLASS = 'doc-original-highlight'
+const HIGHLIGHT_BLOCK_CLASS = 'doc-original-highlight-block'
+
+function createHighlightElement(): HTMLSpanElement {
+  const el = document.createElement('span')
+  el.className = HIGHLIGHT_CLASS
+  el.setAttribute('data-doc-highlight', '1')
+  return el
+}
+
+function wrapRangeWithHighlight(range: Range): boolean {
+  try {
+    const mark = createHighlightElement()
+    range.surroundContents(mark)
+    mark.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+function highlightContainingBlock(node: Text): boolean {
+  const el = node.parentElement
+  if (!el) {
+    return false
+  }
+  const block = (el.closest('p, h1, h2, h3, h4, h5, h6, li, td, th, div') as HTMLElement | null) ?? el
+  block.classList.add(HIGHLIGHT_BLOCK_CLASS)
+  block.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  return true
+}
 
 export function clearHtmlHighlights(root: HTMLElement | null | undefined): void {
   if (!root) {
     return
   }
-  root.querySelectorAll(`mark.${HIGHLIGHT_CLASS}`).forEach((el) => {
+  root.querySelectorAll(`.${HIGHLIGHT_BLOCK_CLASS}`).forEach((el) => {
+    el.classList.remove(HIGHLIGHT_BLOCK_CLASS)
+  })
+  root.querySelectorAll(`span.${HIGHLIGHT_CLASS}, mark.${HIGHLIGHT_CLASS}`).forEach((el) => {
     const parent = el.parentNode
     if (!parent) {
       return
@@ -22,19 +55,59 @@ function normalizeForMatch(text: string): string {
     .replace(/[…]/g, '...')
 }
 
+const BLOCK_SELECTOR = 'p, h1, h2, h3, h4, h5, h6, li, td, th, blockquote, pre'
+
+/**
+ * 跨节匹配兜底：按块级元素拼接归一化文本查找 probe。
+ * mammoth 常把同一段落拆成多个行内 run（加粗/span），单文本节点匹配会失败；
+ * MinerU 探针与 Word 原文也存在空白/标点差异，故用块级归一化文本兜底。
+ * 命中后返回 textContent 最短（最贴近目标）的块元素。
+ */
+function findBlockByText(root: HTMLElement, probes: string[]): HTMLElement | null {
+  const candidates = Array.from(root.querySelectorAll<HTMLElement>(BLOCK_SELECTOR))
+  if (!candidates.length) {
+    return null
+  }
+  for (const probe of probes) {
+    const np = normalizeForMatch(probe)
+    if (np.length < 4) {
+      continue
+    }
+    let best: HTMLElement | null = null
+    let bestLen = Number.POSITIVE_INFINITY
+    for (const el of candidates) {
+      const tn = normalizeForMatch(el.textContent || '')
+      if (tn.length && tn.length < bestLen && tn.includes(np)) {
+        best = el
+        bestLen = tn.length
+      }
+    }
+    if (best) {
+      return best
+    }
+  }
+  return null
+}
+
+function buildProbes(query: string): string[] {
+  const raw = query.trim()
+  if (!raw) {
+    return []
+  }
+  return [raw, raw.slice(0, Math.min(48, raw.length)), raw.slice(0, Math.min(24, raw.length))].filter(
+    (p, i, arr) => p.length >= 4 && arr.indexOf(p) === i,
+  )
+}
+
 export function highlightAndScrollHtmlText(root: HTMLElement | null | undefined, query: string): boolean {
   if (!root) {
     return false
   }
   clearHtmlHighlights(root)
-  const raw = query.trim()
-  if (!raw) {
+  const probes = buildProbes(query)
+  if (!probes.length) {
     return false
   }
-
-  const probes = [raw, raw.slice(0, Math.min(48, raw.length)), raw.slice(0, Math.min(24, raw.length))].filter(
-    (p, i, arr) => p.length >= 4 && arr.indexOf(p) === i,
-  )
 
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
   let node = walker.nextNode() as Text | null
@@ -68,13 +141,12 @@ export function highlightAndScrollHtmlText(root: HTMLElement | null | undefined,
             const range = document.createRange()
             range.setStart(node, rawStart)
             range.setEnd(node, rawEnd)
-            const mark = document.createElement('mark')
-            mark.className = HIGHLIGHT_CLASS
-            range.surroundContents(mark)
-            mark.scrollIntoView({ behavior: 'smooth', block: 'center' })
-            return true
+            if (wrapRangeWithHighlight(range)) {
+              return true
+            }
+            return highlightContainingBlock(node)
           } catch {
-            /* 跨节点时 fallback 到整段 scroll */
+            return highlightContainingBlock(node)
           }
         }
       }
@@ -83,17 +155,23 @@ export function highlightAndScrollHtmlText(root: HTMLElement | null | undefined,
           const range = document.createRange()
           range.setStart(node, idx)
           range.setEnd(node, idx + probe.length)
-          const mark = document.createElement('mark')
-          mark.className = HIGHLIGHT_CLASS
-          range.surroundContents(mark)
-          mark.scrollIntoView({ behavior: 'smooth', block: 'center' })
-          return true
+          if (wrapRangeWithHighlight(range)) {
+            return true
+          }
+          return highlightContainingBlock(node)
         } catch {
-          /* ignore */
+          return highlightContainingBlock(node)
         }
       }
     }
     node = walker.nextNode() as Text | null
+  }
+
+  const block = findBlockByText(root, probes)
+  if (block) {
+    block.classList.add(HIGHLIGHT_BLOCK_CLASS)
+    block.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    return true
   }
   return false
 }
@@ -121,13 +199,10 @@ export function scrollHtmlToText(
 const PAGE_SENTINEL_CLASS = 'docx-page-sentinel'
 
 function findTextRangeRoot(root: HTMLElement, query: string): HTMLElement | null {
-  const raw = query.trim()
-  if (!raw) {
+  const probes = buildProbes(query)
+  if (!probes.length) {
     return null
   }
-  const probes = [raw, raw.slice(0, Math.min(48, raw.length)), raw.slice(0, Math.min(24, raw.length))].filter(
-    (p, i, arr) => p.length >= 4 && arr.indexOf(p) === i,
-  )
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
   let node = walker.nextNode() as Text | null
   while (node) {
@@ -144,7 +219,7 @@ function findTextRangeRoot(root: HTMLElement, query: string): HTMLElement | null
     }
     node = walker.nextNode() as Text | null
   }
-  return null
+  return findBlockByText(root, probes)
 }
 
 export function clearDocxPageSentinels(root: HTMLElement | null | undefined): void {

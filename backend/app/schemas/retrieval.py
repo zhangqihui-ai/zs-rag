@@ -7,6 +7,9 @@ class SearchCitationResponse(BaseModel):
     document_name: str
     page_no: int | None = None
     chunk_index: int
+    heading_path: str | None = None
+    location_label: str | None = None
+    block: str | None = None
 
 
 class SearchResultItem(BaseModel):
@@ -16,6 +19,13 @@ class SearchResultItem(BaseModel):
     document_name: str
     chunk_index: int
     content: str
+    content_preview: str | None = None
+    char_count: int | None = None
+    start_offset: int | None = None
+    end_offset: int | None = None
+    heading_path: str | None = None
+    enrichment_keywords: list[str] = Field(default_factory=list)
+    enrichment_questions: list[str] = Field(default_factory=list)
     score: float
     vector_score: float | None = None
     keyword_score: float | None = None
@@ -44,6 +54,23 @@ class KnowledgeSearchRequest(BaseModel):
         ge=0,
         le=1,
         description="混合检索时向量分支权重 w，全文关键词权重为 1-w；缺省为 0.3",
+    )
+    fusion_method: str | None = Field(
+        default=None,
+        pattern="^(weighted|rrf)$",
+        description=(
+            "混合检索通道融合方式：weighted=归一化加权求和（默认）；"
+            "rrf=加权倒数排名融合（按名次融合，跨量纲更稳）。"
+            "缺省读取知识库 config.retrieval.fusion_method。"
+        ),
+    )
+    include_image_ocr: bool | None = Field(
+        default=None,
+        description=(
+            "是否召回独立 block=image 的截图 OCR 切片。"
+            "缺省时读取知识库 config.retrieval.include_image_ocr（默认 false）；"
+            "UI/截图类问句可在 auto_image_ocr_on_ui_query 开启时自动放宽。"
+        ),
     )
     document_ids: list[int] | None = None
 

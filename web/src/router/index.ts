@@ -2,7 +2,6 @@ import { createRouter, createWebHistory } from 'vue-router'
 
 import ChatEmbedBootstrap from '../views/ChatEmbedBootstrap.vue'
 import ChatView from '../views/ChatView.vue'
-import EnterpriseSpacesView from '../views/EnterpriseSpacesView.vue'
 import HealthView from '../views/HealthView.vue'
 import HomeView from '../views/HomeView.vue'
 import KnowledgeBaseDetailView from '../views/KnowledgeBaseDetailView.vue'
@@ -126,19 +125,15 @@ const router = createRouter({
       name: 'settings',
       component: SettingsView,
       meta: {
+        requiresSystemAdmin: true,
         title: '系统设置',
-        description: '管理主题偏好、工作台策略与系统默认项。',
+        description: '查看平台依赖的服务组件运行状态与访问入口。',
       },
     },
     {
       path: '/admin/spaces',
       name: 'admin-spaces',
-      component: EnterpriseSpacesView,
-      meta: {
-        requiresSystemAdmin: true,
-        title: '企业空间管理',
-        description: '创建、编辑企业空间并管理成员。',
-      },
+      redirect: { name: 'admin-users' },
     },
     {
       path: '/admin/users',

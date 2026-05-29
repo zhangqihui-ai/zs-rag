@@ -51,6 +51,7 @@ RUN npm run build
 FROM ${NGINX_IMAGE} as production
 
 # Copy custom nginx config
+COPY nginx-map.conf /etc/nginx/conf.d/00-map.conf
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 # Copy built assets from builder stage
