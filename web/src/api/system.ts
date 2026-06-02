@@ -5,6 +5,10 @@ export interface ParserCapabilities {
     enabled: boolean
     formats: string[]
   }
+  opendataloader?: {
+    hybrid_available: boolean
+    hybrid_message?: string | null
+  }
 }
 
 export type ComponentStatus = 'alive' | 'dead' | 'disabled' | 'unknown'

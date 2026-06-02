@@ -11,6 +11,12 @@ class GraphSearchRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=4000)
     mode: LightRagQueryMode = Field(default="mix")
     top_k: int = Field(default=5, ge=1, le=50)
+    chunk_top_k: int | None = Field(
+        default=None,
+        ge=1,
+        le=100,
+        description="向量侧召回的文档片段数；为空时沿用 LightRAG 默认（20）。",
+    )
     include_references: bool = Field(default=True)
 
 

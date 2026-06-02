@@ -1,5 +1,6 @@
 import axios from 'axios'
 
+import { resolveApiBaseUrl } from '../lib/apiBaseUrl'
 import { http, longRequestTimeoutMs, documentRequestTimeoutMs } from '../lib/http'
 
 export type RetrievalMode = 'vector' | 'keyword' | 'hybrid'
@@ -76,6 +77,39 @@ export interface KnowledgeBaseStats {
   failed_document_total: number
 }
 
+export interface KbProcessLogSummary {
+  total_documents: number
+  indexed_documents: number
+  processing_documents: number
+  recent_24h_success: number
+  recent_24h_failed: number
+}
+
+export interface KbProcessLogEvent {
+  id: number
+  batch_uid: string
+  username: string
+  action: string
+  action_label: string
+  status: string
+  total_count: number
+  success_count: number
+  failed_count: number
+  started_at: string
+  finished_at: string | null
+  summary: string
+}
+
+export interface KbProcessLogBatchItem {
+  id: number
+  document_id: number | null
+  file_name: string
+  status: string
+  error_message: string | null
+  started_at: string
+  finished_at: string | null
+}
+
 export interface Neo4jConnection {
   id: number
   knowledge_base_id: number
@@ -127,6 +161,11 @@ export interface KnowledgeDocument {
   metadata: Record<string, unknown> | null
   /** 文档级分段策略覆盖；为空表示继承知识库默认 */
   chunking_config: Record<string, unknown> | null
+  /** 为 true 表示本次上传因内容重复被跳过，返回的是已有文档 */
+  upload_skipped?: boolean
+  skip_reason?: string | null
+  /** 最近一次解析/重建索引完成时间 */
+  last_parsed_at?: string | null
   created_at: string
   updated_at: string
 }
@@ -188,6 +227,16 @@ export interface PaginatedResponse<T> {
   total: number
   page: number
   page_size: number
+}
+
+export interface DocumentFileExtOption {
+  value: string
+  label: string
+  count: number
+}
+
+export interface KnowledgeDocumentListResponse extends PaginatedResponse<KnowledgeDocument> {
+  file_ext_options?: DocumentFileExtOption[]
 }
 
 export interface KnowledgeSearchRequest {
@@ -326,24 +375,28 @@ export const knowledgeBaseApi = {
     params?: {
       status?: string
       keyword?: string
+      /** 扩展名筛选，不含点；多个用逗号分隔，如 doc,docx */
+      file_ext?: string
       page?: number
       page_size?: number
       /** created_desc | created_asc | name_asc | updated_desc */
       sort?: string
     },
   ) {
-    return unwrap<PaginatedResponse<KnowledgeDocument>>(
+    return unwrap<KnowledgeDocumentListResponse>(
       http.get(`/knowledge-bases/${kbId}/documents`, { params, timeout: documentRequestTimeoutMs }),
     )
   },
-  uploadDocument(
+  async uploadDocument(
     kbId: number,
     payload: {
       file: File
       chunk_size?: number | null
       chunk_overlap?: number | null
+      /** 同一知识库内已有相同内容（SHA256）时跳过上传，返回已有文档 */
+      skip_if_duplicate?: boolean
     },
-  ) {
+  ): Promise<KnowledgeDocument> {
     const formData = new FormData()
     formData.append('file', payload.file)
     if (typeof payload.chunk_size === 'number') {
@@ -352,9 +405,70 @@ export const knowledgeBaseApi = {
     if (typeof payload.chunk_overlap === 'number') {
       formData.append('chunk_overlap', String(payload.chunk_overlap))
     }
-    return unwrap<KnowledgeDocument>(
-      http.post(`/knowledge-bases/${kbId}/documents/upload`, formData, { timeout: longRequestTimeoutMs }),
-    )
+    if (payload.skip_if_duplicate) {
+      formData.append('skip_if_duplicate', 'true')
+    }
+
+    const token = localStorage.getItem('auth_token')
+    const enterpriseSpace = localStorage.getItem('current_enterprise_space')
+    const base = resolveApiBaseUrl().replace(/\/$/, '')
+    const url = `${base}/knowledge-bases/${kbId}/documents/upload`
+
+    const controller = new AbortController()
+    const timeoutId = window.setTimeout(() => controller.abort(), longRequestTimeoutMs)
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...(enterpriseSpace ? { 'X-Enterprise-Space': enterpriseSpace } : {}),
+        },
+        body: formData,
+      })
+      if (!res.ok) {
+        let message = res.statusText || '上传失败'
+        try {
+          const j = (await res.json()) as { message?: string; detail?: string }
+          if (typeof j.message === 'string' && j.message.trim()) {
+            message = j.message
+          } else if (typeof j.detail === 'string' && j.detail.trim()) {
+            message = j.detail
+          }
+        } catch {
+          /* ignore */
+        }
+        throw new Error(message)
+      }
+      const raw = (await res.json()) as KnowledgeDocument | ApiEnvelope<KnowledgeDocument>
+      return isEnvelope<KnowledgeDocument>(raw) ? raw.data : raw
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        throw new Error('上传超时，请稍后重试')
+      }
+      throw error
+    } finally {
+      window.clearTimeout(timeoutId)
+    }
+  },
+  recordUploadBatch(
+    kbId: number,
+    payload: {
+      batch_uid: string
+      items: Array<{ document_id: number; file_name: string }>
+    },
+  ) {
+    return unwrap<void>(http.post(`/knowledge-bases/${kbId}/process-log/upload-batch`, payload))
+  },
+  startProcessBatch(
+    kbId: number,
+    payload: {
+      batch_uid: string
+      action: 'parse' | 'reindex' | 'delete'
+      force?: boolean
+    },
+  ) {
+    return unwrap<void>(http.post(`/knowledge-bases/${kbId}/process-log/start-batch`, payload))
   },
   /** 开始解析、分块与索引（仅待解析/失败状态） */
   parseDocument(kbId: number, documentId: number, embedding_model_id?: number | null) {
@@ -429,8 +543,34 @@ export const knowledgeBaseApi = {
     })
     return typeof data === 'string' ? data : String(data)
   },
-  deleteDocument(kbId: number, documentId: number) {
-    return unwrap<void>(http.delete(`/knowledge-bases/${kbId}/documents/${documentId}`))
+  deleteDocument(kbId: number, documentId: number, batchId?: string | null) {
+    return unwrap<void>(
+      http.delete(`/knowledge-bases/${kbId}/documents/${documentId}`, {
+        params: batchId ? { batch_id: batchId } : undefined,
+      }),
+    )
+  },
+  getProcessLogSummary(kbId: number) {
+    return unwrap<KbProcessLogSummary>(http.get(`/knowledge-bases/${kbId}/process-log/summary`))
+  },
+  listProcessLogEvents(
+    kbId: number,
+    params?: {
+      page?: number
+      page_size?: number
+      action?: string
+      status?: string
+      keyword?: string
+    },
+  ) {
+    return unwrap<PaginatedResponse<KbProcessLogEvent>>(
+      http.get(`/knowledge-bases/${kbId}/process-log/events`, { params }),
+    )
+  },
+  listProcessLogBatchItems(kbId: number, batchId: number) {
+    return unwrap<{ batch: KbProcessLogEvent; items: KbProcessLogBatchItem[] }>(
+      http.get(`/knowledge-bases/${kbId}/process-log/events/${batchId}/items`),
+    )
   },
   reindexDocument(kbId: number, documentId: number, embedding_model_id?: number | null) {
     return unwrap<KnowledgeDocument>(
@@ -443,7 +583,7 @@ export const knowledgeBaseApi = {
   listChunks(
     kbId: number,
     documentId: number,
-    params?: { page?: number; page_size?: number; keyword?: string },
+    params?: { page?: number; page_size?: number; keyword?: string; chunk_view?: 'lightrag' | 'parse' },
   ) {
     return unwrap<PaginatedResponse<KnowledgeChunk>>(
       http.get(`/knowledge-bases/${kbId}/documents/${documentId}/chunks`, { params }),
@@ -479,8 +619,6 @@ export const knowledgeBaseApi = {
   },
 }
 
-import { resolveApiBaseUrl } from '../lib/apiBaseUrl'
-
 export type DocumentProcessStreamMode = 'parse' | 'reindex'
 
 export interface DocumentProgressPayload {
@@ -502,6 +640,7 @@ export async function streamDocumentProcess(
   options: {
     embedding_model_id?: number | null
     force?: boolean
+    batchId?: string | null
     signal?: AbortSignal
     onLog: (line: string) => void
     onProgress?: (payload: DocumentProgressPayload) => void
@@ -523,6 +662,9 @@ export async function streamDocumentProcess(
   }
   if (options.force) {
     params.set('force', 'true')
+  }
+  if (options.batchId) {
+    params.set('batch_id', options.batchId)
   }
   const qs = params.toString()
   const url = `${base}${path}${qs ? `?${qs}` : ''}`

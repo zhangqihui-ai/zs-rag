@@ -20,6 +20,25 @@ export function parserEngineLabel(engine: string | null | undefined, fallback = 
   return fallback ? `${base}（降级）` : base
 }
 
+export function uploadExtension(document: KnowledgeDocument): string {
+  const fromField = (document.file_ext || '').replace(/^\./, '').trim().toLowerCase()
+  if (fromField) {
+    return fromField
+  }
+  const name = (document.file_name || document.document_name || '').trim()
+  const dot = name.lastIndexOf('.')
+  if (dot >= 0 && dot < name.length - 1) {
+    return name.slice(dot + 1).toLowerCase()
+  }
+  return ''
+}
+
+/** 文档列表「类型」列：仅展示上传源文件的扩展名，不受内部转换影响。 */
+export function documentUploadTypeDisplay(document: KnowledgeDocument): string {
+  const ext = uploadExtension(document)
+  return ext ? ext.toUpperCase() : '—'
+}
+
 function configuredPdfEngine(kb: KnowledgeBase | null | undefined): string | null {
   const cfg = kb?.config
   if (!cfg || typeof cfg !== 'object') return null
@@ -49,7 +68,7 @@ function configuredEngineForExt(kb: KnowledgeBase | null | undefined, ext: strin
   return null
 }
 
-/** 文档列表「解析器」列：优先展示实际 backend，未解析时展示知识库配置。 */
+/** 文档列表「解析器」列：展示解析引擎，不展示文件扩展名。 */
 export function documentParserDisplay(
   document: KnowledgeDocument,
   kb?: KnowledgeBase | null,
@@ -62,7 +81,7 @@ export function documentParserDisplay(
   if (backend) {
     return parserEngineLabel(backend, meta?.parser_fallback === true)
   }
-  const configured = configuredEngineForExt(kb, document.file_ext || document.parser_type)
+  const configured = configuredEngineForExt(kb, uploadExtension(document) || null)
   if (configured) {
     const pending =
       document.status === 'uploaded' ||
@@ -70,5 +89,5 @@ export function documentParserDisplay(
       document.chunk_count === 0
     return pending ? `${parserEngineLabel(configured)}（待解析）` : parserEngineLabel(configured)
   }
-  return (document.parser_type || '—').toUpperCase()
+  return '—'
 }

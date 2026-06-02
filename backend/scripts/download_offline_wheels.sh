@@ -32,3 +32,8 @@ if [ "${SKIP_JRE_DOWNLOAD:-0}" != "1" ]; then
   echo "Downloading offline JRE (Temurin 21) …"
   FORCE_JRE_DOWNLOAD="${FORCE_JRE_DOWNLOAD:-0}" "$(dirname "$0")/download_offline_jre.sh"
 fi
+
+if [ "${SKIP_APT_DOWNLOAD:-0}" != "1" ]; then
+  echo "Downloading offline apt debs (LibreOffice) …"
+  "$(dirname "$0")/download_offline_apt.sh"
+fi

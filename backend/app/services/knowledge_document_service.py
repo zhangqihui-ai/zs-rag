@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import queue
 import threading
 from collections.abc import Callable, Iterator
@@ -17,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.document_parser import (
+    ParsedDocument,
     ParsedSegment,
     UnsupportedDocumentError,
     parse_document,
@@ -52,13 +54,15 @@ from app.services.knowledge_base_service import (
     get_embedding_model_for_knowledge_base,
     get_knowledge_base_or_error,
 )
-from app.services import opensearch_chunk_service
+from app.services import kb_process_audit_service, opensearch_chunk_service
 from app.services.document_process_tasks import (
     DocumentProcessCancelled,
+    acquire_parse_slot,
     cancel_force_and_wait,
     check_cancelled,
     make_task_key,
     register_task,
+    release_parse_slot,
     request_cancel,
     unregister_task,
     wait_task_finished,
@@ -67,8 +71,9 @@ from app.services.document_process_tasks import (
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 STORAGE_ROOT = BACKEND_DIR / "storage" / "knowledge_files"
-SUPPORTED_EXTENSIONS = {"txt", "md", "pdf", "docx", "xlsx", "xlsm", "xls", "csv"}
+SUPPORTED_EXTENSIONS = {"txt", "md", "pdf", "doc", "docx", "xlsx", "xlsm", "xls", "csv"}
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 MAX_PARSE_LOG_LINES = 2000
 PARSE_LOG_FLUSH_EVERY_LINES = 8
@@ -226,6 +231,33 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    except ValueError:
+        return None
+
+
+def _document_last_parsed_at(document: KnowledgeDocument) -> datetime | None:
+    """最近一次解析/重建索引完成时间（以 parse_log success 为准）。"""
+    raw = document.parse_log_json
+    if isinstance(raw, dict) and raw.get("phase") == "success":
+        parsed = _parse_iso_datetime(raw.get("updated_at"))
+        if parsed is not None:
+            return parsed
+    if document.status in (
+        KnowledgeDocumentStatus.INDEXED.value,
+        KnowledgeDocumentStatus.GRAPH_INDEXED.value,
+    ):
+        return document.updated_at
+    return None
+
+
 def _compute_phase_percent(
     phase: str,
     *,
@@ -324,17 +356,11 @@ def resolve_original_file_path(document: KnowledgeDocument) -> Path | None:
 
 def _document_file_ext(file_name: str) -> str:
     extension = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
-    if extension == "doc":
-        raise AppError(
-            status_code=400,
-            code="UNSUPPORTED_FILE_TYPE",
-            message="暂不支持旧版 Word（.doc），请在 Word 中另存为 .docx 后再上传。",
-        )
     if extension not in SUPPORTED_EXTENSIONS:
         raise AppError(
             status_code=400,
             code="UNSUPPORTED_FILE_TYPE",
-            message="仅支持 txt、md、pdf、docx、csv 与 Excel（xls / xlsx / xlsm）等常见文本类格式",
+            message="仅支持 txt、md、pdf、doc、docx、csv 与 Excel（xls / xlsx / xlsm）等常见文本类格式",
         )
     return extension
 
@@ -373,11 +399,25 @@ def _document_chunk_uid(document_id: int, chunk_index: int) -> str:
     return f"doc{document_id}-{chunk_index:04d}-{uuid4().hex[:12]}"
 
 
-def serialize_document(document: KnowledgeDocument) -> dict[str, Any]:
+def serialize_document(
+    document: KnowledgeDocument,
+    *,
+    upload_skipped: bool = False,
+    skip_reason: str | None = None,
+) -> dict[str, Any]:
     from app.core.parser_config import parser_engine_display_name
 
     meta = document.metadata_json if isinstance(document.metadata_json, dict) else {}
     backend = str(meta.get("parser_backend") or "").strip() or None
+    if not backend:
+        file_ext = (document.file_ext or "").strip().lower().lstrip(".")
+        if file_ext == "doc":
+            if meta.get("converted_via") == "html_text_extract":
+                backend = "native"
+            else:
+                backend = "python-docx"
+        elif document.parser_type == "docx":
+            backend = "python-docx"
     fallback = meta.get("parser_fallback") is True
     parser_engine = backend
     parser_engine_label = (
@@ -406,6 +446,9 @@ def serialize_document(document: KnowledgeDocument) -> dict[str, Any]:
         "error_message": document.error_message,
         "metadata": document.metadata_json,
         "chunking_config": document.chunking_config_json,
+        "upload_skipped": upload_skipped,
+        "skip_reason": skip_reason,
+        "last_parsed_at": _document_last_parsed_at(document),
         "created_at": document.created_at,
         "updated_at": document.updated_at,
     }
@@ -576,6 +619,71 @@ def get_chunk_source_context_serialized(
 _DOCUMENT_LIST_SORTS = frozenset({"created_desc", "created_asc", "name_asc", "updated_desc"})
 
 
+def _normalize_file_ext_filter(file_ext: str | None) -> list[str] | None:
+    if not file_ext or not str(file_ext).strip():
+        return None
+    exts: list[str] = []
+    for part in str(file_ext).split(","):
+        normalized = part.strip().lower().lstrip(".")
+        if normalized and normalized not in exts:
+            exts.append(normalized)
+    return exts or None
+
+
+_FILE_EXT_LABELS: dict[str, str] = {
+    "pdf": "PDF",
+    "doc": "DOC",
+    "docx": "DOCX",
+    "xls": "XLS",
+    "xlsx": "XLSX",
+    "xlsm": "XLSM",
+    "csv": "CSV",
+    "txt": "TXT",
+    "md": "MD",
+}
+
+
+def _file_ext_display_label(ext: str) -> str:
+    key = ext.strip().lower().lstrip(".")
+    return _FILE_EXT_LABELS.get(key, key.upper())
+
+
+def _document_list_base_filters(*, space_id: int, kb_id: int) -> list:
+    return [
+        KnowledgeDocument.enterprise_space_id == space_id,
+        KnowledgeDocument.knowledge_base_id == kb_id,
+        KnowledgeDocument.status != KnowledgeDocumentStatus.DELETED.value,
+    ]
+
+
+def list_document_file_ext_options(db: Session, *, space_id: int, kb_id: int) -> list[dict[str, Any]]:
+    """Return distinct file extensions in the knowledge base for filter dropdowns."""
+    get_knowledge_base_or_error(db, space_id=space_id, kb_id=kb_id, include_deleted=True)
+    rows = db.execute(
+        select(KnowledgeDocument.file_ext, func.count(KnowledgeDocument.id))
+        .where(*_document_list_base_filters(space_id=space_id, kb_id=kb_id))
+        .where(KnowledgeDocument.file_ext.isnot(None))
+        .where(KnowledgeDocument.file_ext != "")
+        .group_by(KnowledgeDocument.file_ext)
+        .order_by(func.count(KnowledgeDocument.id).desc(), KnowledgeDocument.file_ext.asc())
+    ).all()
+    options: list[dict[str, Any]] = []
+    for ext, count in rows:
+        if not ext:
+            continue
+        normalized = str(ext).strip().lower().lstrip(".")
+        if not normalized:
+            continue
+        options.append(
+            {
+                "value": normalized,
+                "label": _file_ext_display_label(normalized),
+                "count": int(count),
+            }
+        )
+    return options
+
+
 def list_documents(
     db: Session,
     *,
@@ -583,6 +691,7 @@ def list_documents(
     kb_id: int,
     status: str | None,
     keyword: str | None,
+    file_ext: str | None = None,
     page: int,
     page_size: int,
     sort: str | None = None,
@@ -590,11 +699,7 @@ def list_documents(
     knowledge_base = get_knowledge_base_or_error(db, space_id=space_id, kb_id=kb_id, include_deleted=True)
     safe_page, safe_page_size = _normalize_pagination(page, page_size)
 
-    filters = [
-        KnowledgeDocument.enterprise_space_id == space_id,
-        KnowledgeDocument.knowledge_base_id == kb_id,
-        KnowledgeDocument.status != KnowledgeDocumentStatus.DELETED.value,
-    ]
+    filters = _document_list_base_filters(space_id=space_id, kb_id=kb_id)
     if status:
         filters.append(KnowledgeDocument.status == status)
     if keyword:
@@ -604,6 +709,9 @@ def list_documents(
                 KnowledgeDocument.file_name.ilike(f"%{keyword}%"),
             )
         )
+    file_exts = _normalize_file_ext_filter(file_ext)
+    if file_exts:
+        filters.append(KnowledgeDocument.file_ext.in_(file_exts))
 
     sort_key = (sort or "created_desc").strip().lower()
     if sort_key not in _DOCUMENT_LIST_SORTS:
@@ -637,6 +745,7 @@ def list_documents(
         "total": int(total),
         "page": safe_page,
         "page_size": safe_page_size,
+        "file_ext_options": list_document_file_ext_options(db, space_id=space_id, kb_id=kb_id),
     }
 
 
@@ -904,6 +1013,7 @@ def list_document_chunks(
     page: int,
     page_size: int,
     keyword: str | None = None,
+    chunk_view: Literal["lightrag", "parse"] = "lightrag",
 ) -> dict[str, Any]:
     document = get_document_or_error(db, space_id=space_id, kb_id=kb_id, document_id=document_id)
     if document.status == KnowledgeDocumentStatus.DELETED.value:
@@ -912,7 +1022,8 @@ def list_document_chunks(
     safe_page, safe_page_size = _normalize_pagination(page, page_size)
     knowledge_base = get_knowledge_base_or_error(db, space_id=space_id, kb_id=kb_id, include_deleted=True)
     if (
-        knowledge_base.kb_type == KnowledgeBaseType.LIGHTRAG.value
+        chunk_view == "lightrag"
+        and knowledge_base.kb_type == KnowledgeBaseType.LIGHTRAG.value
         and document.status == KnowledgeDocumentStatus.GRAPH_INDEXED.value
     ):
         from app.services.lightrag_engine import list_lightrag_document_chunks
@@ -968,6 +1079,37 @@ def _mark_document_failed(
     db.commit()
 
 
+def _milvus_delete_vectors_best_effort(
+    db: Session,
+    *,
+    knowledge_base: KnowledgeBase,
+    chunk_uids: list[str],
+) -> None:
+    """清理文档向量；集合不存在或已无向量时视为成功，避免取消/删除被 Milvus 状态卡住。"""
+    if not chunk_uids or not knowledge_base.vector_db_enabled:
+        return
+    ensure_knowledge_base_milvus_fields(db, knowledge_base)
+    result = delete_vectors(
+        host=settings.milvus_host,
+        port=settings.milvus_port,
+        collection_name=knowledge_base.milvus_collection_name,
+        chunk_uids=chunk_uids,
+        username=settings.milvus_username,
+        password=settings.milvus_password,
+    )
+    if result.success:
+        return
+    msg = (result.message or "").lower()
+    if "collection not found" in msg or "can't find collection" in msg:
+        logger.warning(
+            "Milvus 集合不存在，跳过向量删除（collection=%s）: %s",
+            knowledge_base.milvus_collection_name,
+            result.message,
+        )
+        return
+    raise AppError(status_code=502, code="MILVUS_DELETE_FAILED", message=result.message)
+
+
 def _clear_document_chunks_and_vectors(db: Session, *, knowledge_base: KnowledgeBase, document: KnowledgeDocument) -> None:
     opensearch_chunk_service.delete_by_document_id(document.id)
     chunks = db.execute(
@@ -976,22 +1118,368 @@ def _clear_document_chunks_and_vectors(db: Session, *, knowledge_base: Knowledge
         .order_by(KnowledgeChunk.chunk_index.asc())
     ).scalars().all()
     chunk_uids = [chunk.chunk_uid for chunk in chunks if chunk.chunk_uid]
-
-    if chunk_uids and knowledge_base.vector_db_enabled:
-        ensure_knowledge_base_milvus_fields(db, knowledge_base)
-        result = delete_vectors(
-            host=settings.milvus_host,
-            port=settings.milvus_port,
-            collection_name=knowledge_base.milvus_collection_name,
-            chunk_uids=chunk_uids,
-            username=settings.milvus_username,
-            password=settings.milvus_password,
-        )
-        if not result.success:
-            raise AppError(status_code=502, code="MILVUS_DELETE_FAILED", message=result.message)
+    _milvus_delete_vectors_best_effort(db, knowledge_base=knowledge_base, chunk_uids=chunk_uids)
 
     db.execute(delete(KnowledgeChunk).where(KnowledgeChunk.document_id == document.id))
     document.chunk_count = 0
+
+
+GRAPH_PARSE_PREVIEW_SOURCE = "graph_parse_preview"
+
+
+def _build_chunk_candidates_from_parsed(
+    db: Session,
+    *,
+    knowledge_base: KnowledgeBase,
+    document: KnowledgeDocument,
+    parsed: ParsedDocument,
+    emit: Callable[[str], None],
+    cancel_event: threading.Event | None = None,
+    run_enrichment: bool = True,
+    _progress: Callable[..., None] | None = None,
+) -> list[ChunkCandidate]:
+    """与经典向量库相同的分块规则，从 ParsedDocument 生成候选块。"""
+    effective_config = knowledge_base.config
+    if document.chunking_config_json and isinstance(document.chunking_config_json, dict):
+        effective_config = {"chunking": document.chunking_config_json}
+    chunking_cfg = parse_chunking_config(
+        effective_config,
+        fallback_chunk_size=document.chunk_size,
+        fallback_overlap=document.chunk_overlap,
+    )
+    if _parsed_uses_prebuilt_table_chunks(parsed):
+        from app.core.chunking_engine import prepare_mineru_prebuilt_segments
+        from app.core.document_parser import compact_table_segments_for_index
+
+        compacted = compact_table_segments_for_index(parsed.segments)
+        if len(compacted) < len(parsed.segments):
+            emit(
+                f"Excel 表格分段 {len(parsed.segments)} → {len(compacted)}（合并过密行块，跳过通用二次切块）"
+            )
+        meta = parsed.metadata if isinstance(parsed.metadata, dict) else {}
+        parser_backend = str(meta.get("parser_backend") or "") or None
+        merge_budget = (
+            chunking_cfg.parent_child.child_max_length
+            if chunking_cfg.mode == "parent_child"
+            else chunking_cfg.general.max_length
+        )
+        compacted, merge_log = prepare_mineru_prebuilt_segments(
+            compacted,
+            merge_budget,
+            parser_type=str(parsed.parser_type or ""),
+            parser_backend=parser_backend,
+        )
+        if merge_log:
+            emit(merge_log)
+        else:
+            emit("结构化 PDF 分段：1:1 映射为索引块，跳过通用二次切块")
+        chunk_candidates = segments_to_chunk_candidates(compacted)
+    else:
+        if chunking_cfg.mode == "parent_child":
+            emit(
+                "分段模式：父子分段（子块用于索引），"
+                f"parent_mode={chunking_cfg.parent_child.parent_mode} "
+                f"child_delim={chunking_cfg.parent_child.child_delimiter!r} "
+                f"child_max={chunking_cfg.parent_child.child_max_length} "
+                f"child_overlap={chunking_cfg.parent_child.child_overlap}"
+            )
+            base_segments = apply_parent_child_chunking(segments=parsed.segments, cfg=chunking_cfg.parent_child)
+            chunk_size = chunking_cfg.parent_child.child_max_length
+            chunk_overlap = chunking_cfg.parent_child.child_overlap
+        else:
+            emit(
+                "分段模式：通用分段，"
+                f"delim={chunking_cfg.general.delimiter!r} "
+                f"max={chunking_cfg.general.max_length} "
+                f"overlap={chunking_cfg.general.overlap}"
+            )
+            base_segments = apply_general_chunking(
+                segments=parsed.segments,
+                delimiter=chunking_cfg.general.delimiter,
+                collapse_whitespace=chunking_cfg.general.collapse_whitespace,
+            )
+            chunk_size = chunking_cfg.general.max_length
+            chunk_overlap = chunking_cfg.general.overlap
+
+        n_seg_before = len(base_segments)
+        if chunking_cfg.mode != "parent_child":
+            from app.core.text_chunker import segment_has_atomic_blocks
+
+            if not segment_has_atomic_blocks(base_segments):
+                adapted_size, adapted_overlap = adapt_chunk_size_for_small_doc(
+                    base_segments, chunk_size, chunk_overlap
+                )
+                if adapted_size != chunk_size:
+                    emit(
+                        f"小文档自适应：chunk_size {chunk_size}→{adapted_size}, "
+                        f"overlap {chunk_overlap}→{adapted_overlap}"
+                    )
+                    chunk_size, chunk_overlap = adapted_size, adapted_overlap
+            base_segments = merge_adjacent_segments_by_budget(base_segments, chunk_size)
+            n_after_merge = len(base_segments)
+            base_segments = split_segments_at_cn_section_headings(base_segments)
+            if len(base_segments) != n_after_merge:
+                emit(f"节标题硬切：{n_after_merge} → {len(base_segments)}")
+            emit(f"相邻段合并（字符预算={chunk_size}）：分段 {n_seg_before} → {len(base_segments)}，再按长度切块")
+        else:
+            emit("父子模式：跳过相邻段预算合并，保留子段边界（与父块内 C-1、C-2… 预览一致）")
+        chunk_candidates = chunk_segments(base_segments, chunk_size, chunk_overlap)
+
+    if not chunk_candidates:
+        emit("分块结果为空")
+        raise AppError(status_code=400, code="DOCUMENT_CHUNK_EMPTY", message="文档分块结果为空")
+    max_indexable_chunks = 2500
+    if len(chunk_candidates) > max_indexable_chunks:
+        backend = str((parsed.metadata or {}).get("parser_backend") or "")
+        emit(
+            f"分块数量 {len(chunk_candidates)} 超过上限 {max_indexable_chunks}（parser_backend={backend}）"
+        )
+        raise AppError(
+            status_code=400,
+            code="DOCUMENT_TOO_MANY_CHUNKS",
+            message=_too_many_chunks_message(parsed, len(chunk_candidates), max_indexable_chunks),
+        )
+    emit(f"分块完成：候选块数量 {len(chunk_candidates)}")
+    if _progress:
+        _progress("chunking", current=1, total=1, message="分块完成")
+    emit("分块阶段结束，提交数据库检查点…")
+    db.commit()
+    ensure_db_connection(db)
+    db.refresh(document)
+
+    if run_enrichment:
+        enrichment_options = _enrichment_options_from_kb(knowledge_base)
+        if enrichment_options.enabled:
+            from app.services.chunk_enrichment_service import enrich_chunk_candidates
+
+            if _progress:
+                _progress("chunking", message="入库增强（LLM）…")
+            try:
+                enrich_chunk_candidates(
+                    db,
+                    knowledge_base=knowledge_base,
+                    candidates=chunk_candidates,
+                    options=enrichment_options,
+                    emit=emit,
+                )
+            except AppError as exc:
+                emit(f"入库增强失败：{exc.message}，将仅使用原文索引")
+            except Exception as exc:
+                emit(f"入库增强异常：{exc}，将仅使用原文索引")
+            db.commit()
+            ensure_db_connection(db)
+            db.refresh(document)
+
+    return chunk_candidates
+
+
+def _persist_parse_chunks_to_db(
+    db: Session,
+    *,
+    knowledge_base: KnowledgeBase,
+    document: KnowledgeDocument,
+    chunk_candidates: list[ChunkCandidate],
+    emit: Callable[[str], None],
+    index_vectors: bool,
+    metadata_source: str | None = None,
+    embedding_model_id: int | None = None,
+    cancel_event: threading.Event | None = None,
+    _progress: Callable[..., None] | None = None,
+) -> int:
+    """将解析候选块写入 knowledge_chunk；index_vectors=True 时继续 embedding/Milvus/OpenSearch。"""
+    emit("准备写入分块：检查是否有残留记录…")
+    existing_chunk_count = db.execute(
+        select(func.count(KnowledgeChunk.id)).where(KnowledgeChunk.document_id == document.id)
+    ).scalar_one()
+    if existing_chunk_count:
+        emit(f"写入前清理残留分块 {int(existing_chunk_count)} 条…")
+        _clear_document_chunks_and_vectors(db, knowledge_base=knowledge_base, document=document)
+        document.chunk_count = 0
+        db.flush()
+        db.commit()
+        ensure_db_connection(db)
+        db.refresh(document)
+
+    chunk_records: list[KnowledgeChunk] = []
+    if index_vectors and knowledge_base.vector_db_enabled:
+        vector_status = KnowledgeChunkVectorStatus.PENDING.value
+    else:
+        vector_status = KnowledgeChunkVectorStatus.INDEXED.value
+
+    emit(f"准备 flush {len(chunk_candidates)} 条分块到数据库…")
+    for batch_start in range(0, len(chunk_candidates), CHUNK_DB_FLUSH_BATCH):
+        batch = chunk_candidates[batch_start : batch_start + CHUNK_DB_FLUSH_BATCH]
+        for candidate in batch:
+            raw_content = candidate.content
+            content = _sanitize_pg_text(raw_content)
+            if not content.strip():
+                content = " "
+            preview = _sanitize_pg_text(candidate.content_preview, max_len=300)
+            if not preview:
+                preview = content[:300] if len(content) > 300 else content
+            elif len(preview) > 300:
+                preview = preview[:300]
+            heading_path = _sanitize_pg_text(candidate.heading_path, max_len=500) or None
+            if heading_path == "":
+                heading_path = None
+            keyword = candidate.enrichment_keyword_text or content
+            chunk_meta = _compact_chunk_metadata_for_storage(candidate.metadata, content=content)
+            if metadata_source:
+                chunk_meta["source"] = metadata_source
+            if chunk_meta.get("block") == "image" and not chunk_meta.get("image_ocr_attached"):
+                keyword = _slim_image_ocr_keyword_text(
+                    content,
+                    heading_path=heading_path,
+                    metadata=chunk_meta,
+                )
+            if candidate.page_no is not None:
+                chunk_meta["page_no"] = int(candidate.page_no)
+            chunk = KnowledgeChunk(
+                enterprise_space_id=document.enterprise_space_id,
+                knowledge_base_id=document.knowledge_base_id,
+                document_id=document.id,
+                chunk_uid=_document_chunk_uid(document.id, candidate.chunk_index),
+                chunk_index=candidate.chunk_index,
+                content=content,
+                content_preview=preview if preview else None,
+                char_count=len(content),
+                token_count=None,
+                start_offset=candidate.start_offset,
+                end_offset=candidate.end_offset,
+                page_no=candidate.page_no,
+                heading_path=heading_path,
+                keyword_text=keyword,
+                vector_status=vector_status,
+                vector_id=None,
+                metadata_json=chunk_meta,
+            )
+            db.add(chunk)
+            chunk_records.append(chunk)
+        db.flush()
+        flushed = min(batch_start + len(batch), len(chunk_candidates))
+        emit(f"分块 flush 进度 {flushed}/{len(chunk_candidates)}…")
+
+    if index_vectors:
+        document.status = KnowledgeDocumentStatus.INDEXING.value
+        document.chunk_count = len(chunk_records)
+    db.commit()
+    ensure_db_connection(db)
+    db.refresh(document)
+    emit(f"已写入数据库分块记录 {len(chunk_records)} 条（commit）")
+
+    if not index_vectors:
+        return len(chunk_records)
+
+    if knowledge_base.vector_db_enabled:
+        if _progress:
+            _progress("embedding", current=0, total=len(chunk_records), message="准备生成向量")
+        emit("知识库已启用向量库：准备 embedding 与 Milvus 写入…")
+        ensure_knowledge_base_milvus_fields(db, knowledge_base)
+        embedding_model = get_embedding_model_for_knowledge_base(
+            db,
+            knowledge_base=knowledge_base,
+            override_model_id=embedding_model_id,
+        )
+        emit(format_ai_model_for_log(embedding_model, role="Embedding 模型"))
+        total_embed = len(chunk_records)
+        emit(f"正在生成向量，文本段数 {total_embed}（可能较慢）…")
+
+        def _embedding_progress(done: int, total: int) -> None:
+            check_cancelled(cancel_event)
+            if _progress:
+                _progress("embedding", current=done, total=total, message=f"向量生成进度 {done}/{total}")
+            if done <= 8 or done == total or done % 500 == 0:
+                emit(f"向量生成进度 {done}/{total}…")
+
+        vectors = generate_embeddings(
+            embedding_model,
+            [(c.keyword_text or c.content) for c in chunk_records],
+            on_progress=_embedding_progress,
+        )
+        ensure_db_connection(db)
+        db.refresh(document)
+        vector_dimension = len(vectors[0]) if vectors else 0
+        if vector_dimension <= 0:
+            raise AppError(status_code=502, code="EMBEDDING_RESPONSE_INVALID", message="未返回有效向量")
+        emit(f"向量生成完成，维度={vector_dimension}")
+        settings = get_settings()
+        if knowledge_base.milvus_dimension != vector_dimension:
+            indexed_document_count = db.execute(
+                select(func.count(KnowledgeDocument.id)).where(
+                    KnowledgeDocument.knowledge_base_id == knowledge_base.id,
+                    KnowledgeDocument.id != document.id,
+                    KnowledgeDocument.status == KnowledgeDocumentStatus.INDEXED.value,
+                )
+            ).scalar_one()
+            if indexed_document_count:
+                raise AppError(
+                    status_code=400,
+                    code="MILVUS_DIMENSION_MISMATCH",
+                    message=f"Milvus 配置维度为 {knowledge_base.milvus_dimension}，但 embedding 结果维度为 {vector_dimension}",
+                )
+            emit("当前知识库首次写入向量，将按新维度调整 Milvus 集合…")
+            knowledge_base.milvus_dimension = vector_dimension
+            reset_result = drop_collection_if_exists(
+                host=settings.milvus_host,
+                port=settings.milvus_port,
+                collection_name=knowledge_base.milvus_collection_name,
+                username=settings.milvus_username,
+                password=settings.milvus_password,
+            )
+            if not reset_result.success:
+                raise AppError(status_code=502, code="MILVUS_COLLECTION_FAILED", message=reset_result.message)
+            db.flush()
+
+        create_result = create_collection_if_not_exists(
+            host=settings.milvus_host,
+            port=settings.milvus_port,
+            collection_name=knowledge_base.milvus_collection_name,
+            dimension=knowledge_base.milvus_dimension,
+            metric_type=knowledge_base.milvus_metric_type,
+            username=settings.milvus_username,
+            password=settings.milvus_password,
+        )
+        if not create_result.success:
+            raise AppError(status_code=502, code="MILVUS_COLLECTION_FAILED", message=create_result.message)
+        emit(f"Milvus 集合就绪：{knowledge_base.milvus_collection_name}")
+
+        metadata = [
+            {
+                "chunk_uid": chunk.chunk_uid,
+                "enterprise_space_id": chunk.enterprise_space_id,
+                "knowledge_base_id": chunk.knowledge_base_id,
+                "document_id": chunk.document_id,
+                "chunk_index": chunk.chunk_index,
+                "page_no": chunk.page_no,
+                "heading_path": chunk.heading_path,
+            }
+            for chunk in chunk_records
+        ]
+        emit(f"正在写入 Milvus：{len(vectors)} 条向量 @ {settings.milvus_host}:{settings.milvus_port}…")
+        if _progress:
+            _progress("indexing", current=0, total=len(vectors), message="正在写入 Milvus")
+        insert_result = insert_vectors(
+            host=settings.milvus_host,
+            port=settings.milvus_port,
+            collection_name=knowledge_base.milvus_collection_name,
+            vectors=vectors,
+            metadata=metadata,
+            username=settings.milvus_username,
+            password=settings.milvus_password,
+        )
+        if not insert_result.success:
+            raise AppError(status_code=502, code="MILVUS_INSERT_FAILED", message=insert_result.message)
+        emit("Milvus 插入成功")
+        if _progress:
+            _progress("indexing", current=len(vectors), total=len(vectors), message="Milvus 写入完成")
+
+        for chunk in chunk_records:
+            chunk.vector_status = KnowledgeChunkVectorStatus.INDEXED.value
+            chunk.vector_id = chunk.chunk_uid
+    else:
+        emit("知识库未启用向量库：跳过 embedding 与 Milvus，分块仅落库")
+
+    return len(chunk_records)
 
 
 def _index_document_lightrag(
@@ -999,10 +1487,7 @@ def _index_document_lightrag(
     *,
     knowledge_base: KnowledgeBase,
     document: KnowledgeDocument,
-    parsed_text: str,
-    parsed_metadata: dict | None,
-    parser_type: str,
-    char_count: int,
+    parsed: ParsedDocument,
     emit: Callable[[str], None],
     emit_progress: Callable[..., None] | None = None,
     cancel_event: threading.Event | None = None,
@@ -1016,6 +1501,11 @@ def _index_document_lightrag(
         insert_document as lightrag_insert_document,
         lightrag_document_chunk_count,
     )
+
+    parsed_text = parsed.text
+    parsed_metadata = parsed.metadata
+    parser_type = parsed.parser_type
+    char_count = parsed.char_count
 
     def _progress(phase: str, *, current: int | None = None, total: int | None = None, message: str = "") -> None:
         check_cancelled(cancel_event)
@@ -1035,7 +1525,33 @@ def _index_document_lightrag(
     document.error_message = None
     db.commit()
     db.refresh(document)
-    _progress("graph_indexing", message="图知识库：跳过经典分块，进入 LightRAG 图谱入库（graph_indexing）…")
+
+    _progress("chunking", message="图知识库：写入解析切片至 knowledge_chunk（仅展示）…")
+    emit("图知识库：按经典分块规则生成解析切片…")
+    chunk_candidates = _build_chunk_candidates_from_parsed(
+        db,
+        knowledge_base=knowledge_base,
+        document=document,
+        parsed=parsed,
+        emit=emit,
+        cancel_event=cancel_event,
+        run_enrichment=False,
+        _progress=_progress,
+    )
+    parse_chunk_count = _persist_parse_chunks_to_db(
+        db,
+        knowledge_base=knowledge_base,
+        document=document,
+        chunk_candidates=chunk_candidates,
+        emit=emit,
+        index_vectors=False,
+        metadata_source=GRAPH_PARSE_PREVIEW_SOURCE,
+        cancel_event=cancel_event,
+        _progress=_progress,
+    )
+    emit(f"图知识库：已写入解析切片 {parse_chunk_count} 条至 knowledge_chunk（仅展示，不向量化）")
+
+    _progress("graph_indexing", message="图知识库：进入 LightRAG 图谱入库（graph_indexing）…")
     embed_log, llm_log = describe_lightrag_models_for_log(db, knowledge_base)
     emit(embed_log)
     emit(llm_log)
@@ -1215,10 +1731,7 @@ def _index_document(
                 db,
                 knowledge_base=knowledge_base,
                 document=document,
-                parsed_text=parsed.text,
-                parsed_metadata=parsed.metadata,
-                parser_type=parsed.parser_type,
-                char_count=parsed.char_count,
+                parsed=parsed,
                 emit=_emit,
                 emit_progress=emit_progress,
                 cancel_event=cancel_event,
@@ -1227,7 +1740,10 @@ def _index_document(
             )
 
         document.status = KnowledgeDocumentStatus.CHUNKING.value
-        document.parser_type = parsed.parser_type
+        if (document.file_ext or "").lower() == "doc":
+            document.parser_type = "doc"
+        else:
+            document.parser_type = parsed.parser_type
         document.char_count = parsed.char_count
         document.metadata_json = parsed.metadata
         meta_preview = json.dumps(parsed.metadata, ensure_ascii=False)
@@ -1241,313 +1757,27 @@ def _index_document(
 
         _progress("chunking", message="状态：分块中（CHUNKING）")
         _emit("状态：分块中（CHUNKING）…")
-        effective_config = knowledge_base.config
-        if document.chunking_config_json and isinstance(document.chunking_config_json, dict):
-            effective_config = {"chunking": document.chunking_config_json}
-        chunking_cfg = parse_chunking_config(
-            effective_config,
-            fallback_chunk_size=document.chunk_size,
-            fallback_overlap=document.chunk_overlap,
+        chunk_candidates = _build_chunk_candidates_from_parsed(
+            db,
+            knowledge_base=knowledge_base,
+            document=document,
+            parsed=parsed,
+            emit=_emit,
+            cancel_event=cancel_event,
+            run_enrichment=True,
+            _progress=_progress,
         )
-        if _parsed_uses_prebuilt_table_chunks(parsed):
-            from app.core.chunking_engine import prepare_mineru_prebuilt_segments
-            from app.core.document_parser import compact_table_segments_for_index
-
-            compacted = compact_table_segments_for_index(parsed.segments)
-            if len(compacted) < len(parsed.segments):
-                _emit(
-                    f"Excel 表格分段 {len(parsed.segments)} → {len(compacted)}（合并过密行块，跳过通用二次切块）"
-                )
-            meta = parsed.metadata if isinstance(parsed.metadata, dict) else {}
-            parser_backend = str(meta.get("parser_backend") or "") or None
-            merge_budget = (
-                chunking_cfg.parent_child.child_max_length
-                if chunking_cfg.mode == "parent_child"
-                else chunking_cfg.general.max_length
-            )
-            compacted, merge_log = prepare_mineru_prebuilt_segments(
-                compacted,
-                merge_budget,
-                parser_type=str(parsed.parser_type or ""),
-                parser_backend=parser_backend,
-            )
-            if merge_log:
-                _emit(merge_log)
-            else:
-                _emit("结构化 PDF 分段：1:1 映射为索引块，跳过通用二次切块")
-            chunk_candidates = segments_to_chunk_candidates(compacted)
-        else:
-            if chunking_cfg.mode == "parent_child":
-                _emit(
-                    "分段模式：父子分段（子块用于索引），"
-                    f"parent_mode={chunking_cfg.parent_child.parent_mode} "
-                    f"child_delim={chunking_cfg.parent_child.child_delimiter!r} "
-                    f"child_max={chunking_cfg.parent_child.child_max_length} "
-                    f"child_overlap={chunking_cfg.parent_child.child_overlap}"
-                )
-                base_segments = apply_parent_child_chunking(segments=parsed.segments, cfg=chunking_cfg.parent_child)
-                chunk_size = chunking_cfg.parent_child.child_max_length
-                chunk_overlap = chunking_cfg.parent_child.child_overlap
-            else:
-                _emit(
-                    "分段模式：通用分段，"
-                    f"delim={chunking_cfg.general.delimiter!r} "
-                    f"max={chunking_cfg.general.max_length} "
-                    f"overlap={chunking_cfg.general.overlap}"
-                )
-                base_segments = apply_general_chunking(
-                    segments=parsed.segments,
-                    delimiter=chunking_cfg.general.delimiter,
-                    collapse_whitespace=chunking_cfg.general.collapse_whitespace,
-                )
-                chunk_size = chunking_cfg.general.max_length
-                chunk_overlap = chunking_cfg.general.overlap
-
-            n_seg_before = len(base_segments)
-            if chunking_cfg.mode != "parent_child":
-                from app.core.text_chunker import segment_has_atomic_blocks
-
-                if not segment_has_atomic_blocks(base_segments):
-                    adapted_size, adapted_overlap = adapt_chunk_size_for_small_doc(
-                        base_segments, chunk_size, chunk_overlap
-                    )
-                    if adapted_size != chunk_size:
-                        _emit(
-                            f"小文档自适应：chunk_size {chunk_size}→{adapted_size}, "
-                            f"overlap {chunk_overlap}→{adapted_overlap}"
-                        )
-                        chunk_size, chunk_overlap = adapted_size, adapted_overlap
-                base_segments = merge_adjacent_segments_by_budget(base_segments, chunk_size)
-                n_after_merge = len(base_segments)
-                base_segments = split_segments_at_cn_section_headings(base_segments)
-                if len(base_segments) != n_after_merge:
-                    _emit(f"节标题硬切：{n_after_merge} → {len(base_segments)}")
-                _emit(f"相邻段合并（字符预算={chunk_size}）：分段 {n_seg_before} → {len(base_segments)}，再按长度切块")
-            else:
-                _emit("父子模式：跳过相邻段预算合并，保留子段边界（与父块内 C-1、C-2… 预览一致）")
-            chunk_candidates = chunk_segments(base_segments, chunk_size, chunk_overlap)
-        if not chunk_candidates:
-            _emit("分块结果为空")
-            raise AppError(status_code=400, code="DOCUMENT_CHUNK_EMPTY", message="文档分块结果为空")
-        max_indexable_chunks = 2500
-        if len(chunk_candidates) > max_indexable_chunks:
-            backend = str((parsed.metadata or {}).get("parser_backend") or "")
-            _emit(
-                f"分块数量 {len(chunk_candidates)} 超过上限 {max_indexable_chunks}（parser_backend={backend}）"
-            )
-            raise AppError(
-                status_code=400,
-                code="DOCUMENT_TOO_MANY_CHUNKS",
-                message=_too_many_chunks_message(parsed, len(chunk_candidates), max_indexable_chunks),
-            )
-        _emit(f"分块完成：候选块数量 {len(chunk_candidates)}")
-        _progress("chunking", current=1, total=1, message="分块完成")
-        _emit("分块阶段结束，提交数据库检查点…")
-        db.commit()
-        ensure_db_connection(db)
-        db.refresh(document)
-
-        enrichment_options = _enrichment_options_from_kb(knowledge_base)
-        if enrichment_options.enabled:
-            from app.services.chunk_enrichment_service import enrich_chunk_candidates
-
-            _progress("chunking", message="入库增强（LLM）…")
-            try:
-                enrich_chunk_candidates(
-                    db,
-                    knowledge_base=knowledge_base,
-                    candidates=chunk_candidates,
-                    options=enrichment_options,
-                    emit=_emit,
-                )
-            except AppError as exc:
-                _emit(f"入库增强失败：{exc.message}，将仅使用原文索引")
-            except Exception as exc:
-                _emit(f"入库增强异常：{exc}，将仅使用原文索引")
-            db.commit()
-            ensure_db_connection(db)
-            db.refresh(document)
-
-        _emit("准备写入分块：检查是否有残留记录…")
-        existing_chunk_count = db.execute(
-            select(func.count(KnowledgeChunk.id)).where(KnowledgeChunk.document_id == document.id)
-        ).scalar_one()
-        if existing_chunk_count:
-            _emit(f"写入前清理残留分块 {int(existing_chunk_count)} 条…")
-            _clear_document_chunks_and_vectors(db, knowledge_base=knowledge_base, document=document)
-            document.chunk_count = 0
-            db.flush()
-            db.commit()
-            ensure_db_connection(db)
-            db.refresh(document)
-
-        chunk_records: list[KnowledgeChunk] = []
-        vector_status = (
-            KnowledgeChunkVectorStatus.PENDING.value
-            if knowledge_base.vector_db_enabled
-            else KnowledgeChunkVectorStatus.INDEXED.value
+        _persist_parse_chunks_to_db(
+            db,
+            knowledge_base=knowledge_base,
+            document=document,
+            chunk_candidates=chunk_candidates,
+            emit=_emit,
+            index_vectors=True,
+            embedding_model_id=embedding_model_id,
+            cancel_event=cancel_event,
+            _progress=_progress,
         )
-        _emit(f"准备 flush {len(chunk_candidates)} 条分块到数据库…")
-        for batch_start in range(0, len(chunk_candidates), CHUNK_DB_FLUSH_BATCH):
-            batch = chunk_candidates[batch_start : batch_start + CHUNK_DB_FLUSH_BATCH]
-            for candidate in batch:
-                raw_content = candidate.content
-                content = _sanitize_pg_text(raw_content)
-                if not content.strip():
-                    content = " "
-                preview = _sanitize_pg_text(candidate.content_preview, max_len=300)
-                if not preview:
-                    preview = content[:300] if len(content) > 300 else content
-                elif len(preview) > 300:
-                    preview = preview[:300]
-                heading_path = _sanitize_pg_text(candidate.heading_path, max_len=500) or None
-                if heading_path == "":
-                    heading_path = None
-                keyword = candidate.enrichment_keyword_text or content
-                chunk_meta = _compact_chunk_metadata_for_storage(candidate.metadata, content=content)
-                if chunk_meta.get("block") == "image" and not chunk_meta.get("image_ocr_attached"):
-                    keyword = _slim_image_ocr_keyword_text(
-                        content,
-                        heading_path=heading_path,
-                        metadata=chunk_meta,
-                    )
-                if candidate.page_no is not None:
-                    chunk_meta["page_no"] = int(candidate.page_no)
-                chunk = KnowledgeChunk(
-                    enterprise_space_id=document.enterprise_space_id,
-                    knowledge_base_id=document.knowledge_base_id,
-                    document_id=document.id,
-                    chunk_uid=_document_chunk_uid(document.id, candidate.chunk_index),
-                    chunk_index=candidate.chunk_index,
-                    content=content,
-                    content_preview=preview if preview else None,
-                    char_count=len(content),
-                    token_count=None,
-                    start_offset=candidate.start_offset,
-                    end_offset=candidate.end_offset,
-                    page_no=candidate.page_no,
-                    heading_path=heading_path,
-                    keyword_text=keyword,
-                    vector_status=vector_status,
-                    vector_id=None,
-                    metadata_json=chunk_meta,
-                )
-                db.add(chunk)
-                chunk_records.append(chunk)
-            db.flush()
-            flushed = min(batch_start + len(batch), len(chunk_candidates))
-            _emit(f"分块 flush 进度 {flushed}/{len(chunk_candidates)}…")
-
-        document.status = KnowledgeDocumentStatus.INDEXING.value
-        document.chunk_count = len(chunk_records)
-        db.commit()
-        ensure_db_connection(db)
-        db.refresh(document)
-        _emit(f"已写入数据库分块记录 {len(chunk_records)} 条（commit）")
-
-        if knowledge_base.vector_db_enabled:
-            _progress("embedding", current=0, total=len(chunk_records), message="准备生成向量")
-            _emit("知识库已启用向量库：准备 embedding 与 Milvus 写入…")
-            ensure_knowledge_base_milvus_fields(db, knowledge_base)
-            embedding_model = get_embedding_model_for_knowledge_base(
-                db,
-                knowledge_base=knowledge_base,
-                override_model_id=embedding_model_id,
-            )
-            _emit(format_ai_model_for_log(embedding_model, role="Embedding 模型"))
-            total_embed = len(chunk_records)
-            _emit(f"正在生成向量，文本段数 {total_embed}（可能较慢）…")
-
-            def _embedding_progress(done: int, total: int) -> None:
-                check_cancelled(cancel_event)
-                _progress("embedding", current=done, total=total, message=f"向量生成进度 {done}/{total}")
-                if done <= 8 or done == total or done % 500 == 0:
-                    _emit(f"向量生成进度 {done}/{total}…")
-
-            vectors = generate_embeddings(
-                embedding_model,
-                [(c.keyword_text or c.content) for c in chunk_records],
-                on_progress=_embedding_progress,
-            )
-            ensure_db_connection(db)
-            db.refresh(document)
-            vector_dimension = len(vectors[0]) if vectors else 0
-            if vector_dimension <= 0:
-                raise AppError(status_code=502, code="EMBEDDING_RESPONSE_INVALID", message="未返回有效向量")
-            _emit(f"向量生成完成，维度={vector_dimension}")
-            if knowledge_base.milvus_dimension != vector_dimension:
-                indexed_document_count = db.execute(
-                    select(func.count(KnowledgeDocument.id)).where(
-                        KnowledgeDocument.knowledge_base_id == knowledge_base.id,
-                        KnowledgeDocument.id != document.id,
-                        KnowledgeDocument.status == KnowledgeDocumentStatus.INDEXED.value,
-                    )
-                ).scalar_one()
-                if indexed_document_count:
-                    raise AppError(
-                        status_code=400,
-                        code="MILVUS_DIMENSION_MISMATCH",
-                        message=f"Milvus 配置维度为 {knowledge_base.milvus_dimension}，但 embedding 结果维度为 {vector_dimension}",
-                    )
-                _emit("当前知识库首次写入向量，将按新维度调整 Milvus 集合…")
-                knowledge_base.milvus_dimension = vector_dimension
-                reset_result = drop_collection_if_exists(
-                    host=settings.milvus_host,
-                    port=settings.milvus_port,
-                    collection_name=knowledge_base.milvus_collection_name,
-                    username=settings.milvus_username,
-                    password=settings.milvus_password,
-                )
-                if not reset_result.success:
-                    raise AppError(status_code=502, code="MILVUS_COLLECTION_FAILED", message=reset_result.message)
-                db.flush()
-
-            create_result = create_collection_if_not_exists(
-                host=settings.milvus_host,
-                port=settings.milvus_port,
-                collection_name=knowledge_base.milvus_collection_name,
-                dimension=knowledge_base.milvus_dimension,
-                metric_type=knowledge_base.milvus_metric_type,
-                username=settings.milvus_username,
-                password=settings.milvus_password,
-            )
-            if not create_result.success:
-                raise AppError(status_code=502, code="MILVUS_COLLECTION_FAILED", message=create_result.message)
-            _emit(f"Milvus 集合就绪：{knowledge_base.milvus_collection_name}")
-
-            metadata = [
-                {
-                    "chunk_uid": chunk.chunk_uid,
-                    "enterprise_space_id": chunk.enterprise_space_id,
-                    "knowledge_base_id": chunk.knowledge_base_id,
-                    "document_id": chunk.document_id,
-                    "chunk_index": chunk.chunk_index,
-                    "page_no": chunk.page_no,
-                    "heading_path": chunk.heading_path,
-                }
-                for chunk in chunk_records
-            ]
-            _emit(f"正在写入 Milvus：{len(vectors)} 条向量 @ {settings.milvus_host}:{settings.milvus_port}…")
-            _progress("indexing", current=0, total=len(vectors), message="正在写入 Milvus")
-            insert_result = insert_vectors(
-                host=settings.milvus_host,
-                port=settings.milvus_port,
-                collection_name=knowledge_base.milvus_collection_name,
-                vectors=vectors,
-                metadata=metadata,
-                username=settings.milvus_username,
-                password=settings.milvus_password,
-            )
-            if not insert_result.success:
-                raise AppError(status_code=502, code="MILVUS_INSERT_FAILED", message=insert_result.message)
-            _emit("Milvus 插入成功")
-            _progress("indexing", current=len(vectors), total=len(vectors), message="Milvus 写入完成")
-
-            for chunk in chunk_records:
-                chunk.vector_status = KnowledgeChunkVectorStatus.INDEXED.value
-                chunk.vector_id = chunk.chunk_uid
-        else:
-            _emit("知识库未启用向量库：跳过 embedding 与 Milvus，分块仅落库")
 
         document.status = KnowledgeDocumentStatus.INDEXED.value
         document.error_message = None
@@ -1594,6 +1824,10 @@ def upload_document(
     mime_type: str | None,
     chunk_size: int | None,
     chunk_overlap: int | None,
+    skip_if_duplicate: bool = False,
+    user_id: int | None = None,
+    batch_uid: str | None = None,
+    record_audit: bool = False,
 ) -> dict[str, Any]:
     knowledge_base = get_knowledge_base_or_error(db, space_id=space_id, kb_id=kb_id)
     extension = _document_file_ext(file_name)
@@ -1613,6 +1847,12 @@ def upload_document(
         )
     ).scalar_one_or_none()
     if duplicate is not None and duplicate.status != KnowledgeDocumentStatus.DELETED.value:
+        if skip_if_duplicate:
+            return serialize_document(
+                duplicate,
+                upload_skipped=True,
+                skip_reason="duplicate_content",
+            )
         raise AppError(status_code=409, code="DOCUMENT_ALREADY_EXISTS", message="同一知识库内已存在相同内容的文档")
 
     if duplicate is not None:
@@ -1674,6 +1914,25 @@ def upload_document(
     document.storage_path = str(file_path)
     db.commit()
     db.refresh(document)
+
+    try:
+        if record_audit:
+            kb_process_audit_service.record_upload(
+                db,
+                space_id=space_id,
+                kb_id=kb_id,
+                user_id=user_id,
+                document_id=document.id,
+                file_name=document.file_name,
+                batch_uid=batch_uid,
+            )
+    except Exception:
+        logger.exception(
+            "Failed to record upload audit (kb_id=%s document_id=%s batch_uid=%s)",
+            kb_id,
+            document.id,
+            batch_uid,
+        )
 
     return serialize_document(document)
 
@@ -1844,6 +2103,7 @@ def cancel_document_process(
     space_id: int,
     kb_id: int,
     document_id: int,
+    user_id: int | None = None,
 ) -> dict[str, Any]:
     """请求取消进行中的解析/重建任务；若无活跃 worker 但 DB 卡在进行中则直接重置。"""
     key = make_task_key(space_id, kb_id, document_id)
@@ -1860,7 +2120,16 @@ def cancel_document_process(
         raise AppError(status_code=404, code="DOCUMENT_NOT_FOUND", message="文档不存在")
     if document.status in _DOCUMENT_IN_PROGRESS_STATUSES:
         knowledge_base = get_knowledge_base_or_error(db, space_id=space_id, kb_id=kb_id)
-        return _reset_document_after_cancel(db, knowledge_base=knowledge_base, document=document)
+        result = _reset_document_after_cancel(db, knowledge_base=knowledge_base, document=document)
+        kb_process_audit_service.record_cancel(
+            db,
+            space_id=space_id,
+            kb_id=kb_id,
+            user_id=user_id,
+            document_id=document.id,
+            file_name=document.file_name,
+        )
+        return result
     raise AppError(status_code=404, code="NO_ACTIVE_TASK", message="没有进行中的解析任务")
 
 
@@ -1912,6 +2181,8 @@ def iter_document_process_sse_events(
     mode: Literal["parse", "reindex"],
     force: bool = False,
     stop_event: threading.Event | None = None,
+    user_id: int | None = None,
+    batch_uid: str | None = None,
 ) -> Iterator[str]:
     """在独立线程与独立 Session 中执行解析/重建，通过 SSE 文本块输出日志与结果。"""
     q: queue.Queue[tuple[str, Any]] = queue.Queue()
@@ -1929,8 +2200,28 @@ def iter_document_process_sse_events(
         q.put(("progress", payload))
 
     def worker() -> None:
+        slot_acquired = False
+        doc_file_name = "未知文档"
         with SessionLocal() as db:
             try:
+                document = get_document_or_error(db, space_id=space_id, kb_id=kb_id, document_id=document_id)
+                doc_file_name = document.file_name
+                kb_process_audit_service.begin_process_item(
+                    db,
+                    space_id=space_id,
+                    kb_id=kb_id,
+                    user_id=user_id,
+                    document_id=document_id,
+                    file_name=doc_file_name,
+                    mode=mode,
+                    batch_uid=batch_uid,
+                    force=force,
+                )
+                acquire_parse_slot(
+                    cancel_event,
+                    on_wait=lambda: emit("当前解析任务较多，正在排队等待空闲名额…"),
+                )
+                slot_acquired = True
                 if mode == "parse":
                     result = process_document(
                         db,
@@ -1955,22 +2246,75 @@ def iter_document_process_sse_events(
                         cancel_event=cancel_event,
                         force=force,
                     )
+                kb_process_audit_service.complete_process_item(
+                    db,
+                    space_id=space_id,
+                    kb_id=kb_id,
+                    batch_uid=batch_uid,
+                    document_id=document_id,
+                    file_name=doc_file_name,
+                    mode=mode,
+                    outcome="success",
+                    user_id=user_id,
+                    force=force,
+                )
                 q.put(("done", result))
             except DocumentProcessCancelled:
                 knowledge_base = get_knowledge_base_or_error(db, space_id=space_id, kb_id=kb_id)
                 document = get_document_or_error(db, space_id=space_id, kb_id=kb_id, document_id=document_id)
+                doc_file_name = document.file_name
                 result = _reset_document_after_cancel(
                     db,
                     knowledge_base=knowledge_base,
                     document=document,
                     log_kind=mode,
                 )
+                kb_process_audit_service.complete_process_item(
+                    db,
+                    space_id=space_id,
+                    kb_id=kb_id,
+                    batch_uid=batch_uid,
+                    document_id=document_id,
+                    file_name=doc_file_name,
+                    mode=mode,
+                    outcome="cancelled",
+                    user_id=user_id,
+                    force=force,
+                )
                 q.put(("cancelled", result))
             except AppError as exc:
+                kb_process_audit_service.complete_process_item(
+                    db,
+                    space_id=space_id,
+                    kb_id=kb_id,
+                    batch_uid=batch_uid,
+                    document_id=document_id,
+                    file_name=doc_file_name,
+                    mode=mode,
+                    outcome="failed",
+                    error_message=exc.message,
+                    user_id=user_id,
+                    force=force,
+                )
                 q.put(("app_error", exc))
             except Exception as exc:
+                kb_process_audit_service.complete_process_item(
+                    db,
+                    space_id=space_id,
+                    kb_id=kb_id,
+                    batch_uid=batch_uid,
+                    document_id=document_id,
+                    file_name=doc_file_name,
+                    mode=mode,
+                    outcome="failed",
+                    error_message=str(exc),
+                    user_id=user_id,
+                    force=force,
+                )
                 q.put(("fatal", exc))
             finally:
+                if slot_acquired:
+                    release_parse_slot()
                 unregister_task(key)
 
     thread = threading.Thread(target=worker, daemon=True)
@@ -2010,12 +2354,21 @@ def iter_document_process_sse_events(
         pass
 
 
-def delete_document_asset(db: Session, *, space_id: int, kb_id: int, document_id: int) -> None:
+def delete_document_asset(
+    db: Session,
+    *,
+    space_id: int,
+    kb_id: int,
+    document_id: int,
+    user_id: int | None = None,
+    batch_uid: str | None = None,
+) -> None:
     knowledge_base = get_knowledge_base_or_error(db, space_id=space_id, kb_id=kb_id, include_deleted=True)
     document = get_document_or_error(db, space_id=space_id, kb_id=kb_id, document_id=document_id)
     if document.status == KnowledgeDocumentStatus.DELETED.value:
         return
 
+    file_name = document.file_name
     _clear_document_chunks_and_vectors(db, knowledge_base=knowledge_base, document=document)
 
     if knowledge_base.kb_type == KnowledgeBaseType.LIGHTRAG.value:
@@ -2033,3 +2386,13 @@ def delete_document_asset(db: Session, *, space_id: int, kb_id: int, document_id
     document.error_message = None
     document.chunk_count = 0
     db.commit()
+
+    kb_process_audit_service.record_delete(
+        db,
+        space_id=space_id,
+        kb_id=kb_id,
+        user_id=user_id,
+        document_id=document_id,
+        file_name=file_name,
+        batch_uid=batch_uid,
+    )

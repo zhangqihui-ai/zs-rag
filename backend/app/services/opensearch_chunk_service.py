@@ -288,9 +288,9 @@ def bulk_upsert_chunks(
         ensure_chunk_index(client=c)
         lines: list[str] = []
         for ch in chunks:
-            meta = {"index": {"_index": idx, "_id": ch.chunk_uid}}
+            action = {"index": {"_index": idx, "_id": ch.chunk_uid}}
             kw = (ch.keyword_text or ch.content or "").strip()
-            meta = ch.metadata_json if isinstance(ch.metadata_json, dict) else {}
+            chunk_meta = ch.metadata_json if isinstance(ch.metadata_json, dict) else {}
             doc = {
                 "chunk_uid": ch.chunk_uid,
                 "chunk_id": int(ch.id),
@@ -303,15 +303,15 @@ def bulk_upsert_chunks(
                 "keyword_text": kw,
                 "content": (ch.content or "")[:200_000],
             }
-            block = meta.get("block")
+            block = chunk_meta.get("block")
             if block:
                 doc["block"] = str(block)
-            chunk_role = meta.get("chunk_role")
+            chunk_role = chunk_meta.get("chunk_role")
             if chunk_role:
                 doc["chunk_role"] = str(chunk_role)
             if doc["page_no"] is None:
                 del doc["page_no"]
-            lines.append(json.dumps(meta, ensure_ascii=False))
+            lines.append(json.dumps(action, ensure_ascii=False))
             lines.append(json.dumps(doc, ensure_ascii=False))
         payload = ("\n".join(lines) + "\n").encode("utf-8")
         r = c.post(

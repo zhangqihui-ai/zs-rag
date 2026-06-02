@@ -15,6 +15,7 @@ export interface ChatConversation {
   show_citations?: boolean
   retrieval_top_k?: number
   lightrag_query_mode?: 'naive' | 'local' | 'global' | 'hybrid' | 'mix'
+  lightrag_chunk_top_k?: number | null
   temperature?: number
   max_tokens?: number
   top_p?: number
@@ -54,6 +55,7 @@ export interface ChatConfiguration {
   /** 与知识检索多库一致：合并后 Top K；各库内先放大候选再全局排序 */
   retrieval_top_k?: number
   lightrag_query_mode?: 'naive' | 'local' | 'global' | 'hybrid' | 'mix'
+  lightrag_chunk_top_k?: number | null
   temperature: number
   max_tokens: number
   top_p: number
@@ -78,10 +80,14 @@ export interface ChatCitation {
   document_name: string
   page_no: number | null
   knowledge_base_id?: number
-  chunk_id?: number
+  chunk_id?: number | string
   document_id?: number
   chunk_index?: number
   score?: number
+  /** 检索来源：graph=图谱检索(LightRAG)，vector=向量/经典检索 */
+  source?: 'graph' | 'vector' | string
+  /** 图谱库引用随附的切片正文（其 chunk_id 为 LightRAG 内部 ID，无法 getChunk） */
+  content?: string | null
 }
 
 export interface ChatMessage {

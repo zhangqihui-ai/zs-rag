@@ -15,11 +15,11 @@
 #
 #   # ② 只改了 web 前端（Vue/TS/样式等）
 #   #    须先重新生成 dist，再只构建/推送 frontend（不会 rebuild backend）
-#   cd web && npm ci && npm run build:deploy
+#   cd web && npm ci && npm run build:deploy && cd ..
 #   ./scripts/push-images-to-registry.sh --offline --frontend-only
 #
 #   # ③ 前后端都改了（默认 = 推送 backend + frontend，不碰 MinerU）：
-#   cd web && npm ci && npm run build:deploy
+#   cd web && npm ci && npm run build:deploy && cd ..
 #   ./scripts/push-images-to-registry.sh --offline
 #
 #   # ④ 全量含 MinerU CPU sidecar：
@@ -46,8 +46,9 @@
 #   docker compose -f docker-compose.prod.yml -f docker-compose.prod.registry.yml up -d --no-build --force-recreate frontend
 
 #   # 若只更新了 backend 镜像，可只重建 backend：
+#   docker compose -f docker-compose.prod.yml -f docker-compose.prod.registry.yml pull backend
 #   docker compose -f docker-compose.prod.yml -f docker-compose.prod.registry.yml up -d --no-build --force-recreate backend
-#   docker compose -f docker-compose.prod.yml -f docker-compose.prod.registry.yml up -d --no-build --force-recreate frontend
+
 #    启动miner u
 #   docker compose -f docker-compose.prod.yml -f docker-compose.prod.registry.yml pull mineru
 
@@ -247,6 +248,13 @@ check_offline_backend_deps() {
   if [[ "$has_jre" != true ]]; then
     echo "警告: 未找到 backend/offline_deps/jre/*.tar.gz，构建可能回退 apt 并失败。" >&2
     echo "  建议: cd backend && ./scripts/download_offline_jre.sh" >&2
+  fi
+  shopt -s nullglob
+  local debs=(backend/offline_deps/apt/*.deb)
+  shopt -u nullglob
+  if ((${#debs[@]} == 0)); then
+    echo "警告: 未找到 backend/offline_deps/apt/*.deb，离线镜像将不含 LibreOffice，.doc 解析会失败。" >&2
+    echo "  建议: cd backend && ./scripts/download_offline_apt.sh" >&2
   fi
 }
 

@@ -7,6 +7,7 @@ import shutil
 import threading
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse, StreamingResponse
@@ -14,11 +15,11 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.core.enterprise_space_context import CurrentSpace, RequireMembership
+from app.core.enterprise_space_context import CurrentSpace, CurrentUser, RequireMembership
 from app.core.errors import AppError
 from app.core.knowledge_retrieval_defaults import apply_retrieval_defaults_to_payload
 from app.core.neo4j_client import test_neo4j_connection
-from app.db.session import get_db
+from app.db.session import SessionLocal, get_db
 from app.core.milvus_client import drop_collection_if_exists
 from app.models.knowledge_base import KnowledgeBase, KnowledgeChunk, KnowledgeDocument, KnowledgeDocumentStatus, Neo4jConnection
 from app.schemas.knowledge_base import (
@@ -45,6 +46,13 @@ from app.schemas.knowledge_document import (
     KnowledgeDocumentChunkingPreviewResponse,
     KnowledgeDocumentResponse,
 )
+from app.schemas.kb_process_log import (
+    KbProcessLogBatchItemsResponse,
+    KbProcessLogEventListResponse,
+    KbProcessLogSummaryResponse,
+    StartProcessBatchRequest,
+    UploadBatchAuditRequest,
+)
 from app.schemas.graph_search import GraphSearchRequest, GraphSearchResponse
 from app.schemas.retrieval import (
     KnowledgeSearchRequest,
@@ -54,6 +62,7 @@ from app.schemas.retrieval import (
 )
 from app.core.kb_type import ensure_lightrag_kb
 from app.services.lightrag_engine import query_graph_kb
+from app.services import kb_process_audit_service
 from app.services.knowledge_base_service import (
     build_deleted_knowledge_base_name,
     build_collection_name,
@@ -111,6 +120,8 @@ async def _stream_document_process_sse(
     embedding_model_id: int | None,
     mode: str,
     force: bool,
+    user_id: int | None = None,
+    batch_uid: str | None = None,
 ) -> AsyncIterator[str]:
     """异步包装 SSE：客户端断开或热重载时尽快结束长连接。"""
     stop_event = threading.Event()
@@ -122,6 +133,8 @@ async def _stream_document_process_sse(
         mode=mode,  # type: ignore[arg-type]
         force=force,
         stop_event=stop_event,
+        user_id=user_id,
+        batch_uid=batch_uid,
     )
     loop = asyncio.get_running_loop()
     try:
@@ -455,6 +468,10 @@ def query_documents(
     db: Session = Depends(get_db),
     document_status: str | None = Query(default=None, alias="status"),
     keyword: str | None = Query(default=None),
+    file_ext: str | None = Query(
+        default=None,
+        description="按扩展名筛选，不含点；多个用逗号分隔，如 doc,docx",
+    ),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=10, ge=1, le=100),
     sort: str | None = Query(
@@ -468,32 +485,134 @@ def query_documents(
         kb_id=kb_id,
         status=document_status,
         keyword=keyword,
+        file_ext=file_ext,
         page=page,
         page_size=page_size,
         sort=sort,
     )
 
 
+@router.get("/{kb_id}/process-log/summary", response_model=KbProcessLogSummaryResponse)
+def get_kb_process_log_summary(
+    kb_id: int,
+    current_space: CurrentSpace,
+    membership: RequireMembership,
+    db: Session = Depends(get_db),
+) -> dict:
+    return kb_process_audit_service.get_process_log_summary(
+        db,
+        space_id=current_space.id,
+        kb_id=kb_id,
+    )
+
+
+@router.get("/{kb_id}/process-log/events", response_model=KbProcessLogEventListResponse)
+def list_kb_process_log_events(
+    kb_id: int,
+    current_space: CurrentSpace,
+    membership: RequireMembership,
+    db: Session = Depends(get_db),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    action: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    keyword: str | None = Query(default=None),
+) -> dict:
+    return kb_process_audit_service.list_process_log_events(
+        db,
+        space_id=current_space.id,
+        kb_id=kb_id,
+        page=page,
+        page_size=page_size,
+        action=action,
+        status=status,
+        keyword=keyword,
+    )
+
+
+@router.get("/{kb_id}/process-log/events/{batch_id}/items", response_model=KbProcessLogBatchItemsResponse)
+def list_kb_process_log_batch_items(
+    kb_id: int,
+    batch_id: int,
+    current_space: CurrentSpace,
+    membership: RequireMembership,
+    db: Session = Depends(get_db),
+) -> dict:
+    return kb_process_audit_service.list_process_log_batch_items(
+        db,
+        space_id=current_space.id,
+        kb_id=kb_id,
+        batch_id=batch_id,
+    )
+
+
+@router.post("/{kb_id}/process-log/upload-batch", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
+def record_kb_upload_batch(
+    kb_id: int,
+    payload: UploadBatchAuditRequest,
+    current_space: CurrentSpace,
+    current_user: CurrentUser,
+    membership: RequireMembership,
+    db: Session = Depends(get_db),
+) -> Response:
+    kb_process_audit_service.record_upload_batch(
+        db,
+        space_id=current_space.id,
+        kb_id=kb_id,
+        user_id=current_user.id,
+        batch_uid=payload.batch_uid,
+        items=[item.model_dump() for item in payload.items],
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/{kb_id}/process-log/start-batch", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
+def start_kb_process_batch(
+    kb_id: int,
+    payload: StartProcessBatchRequest,
+    current_space: CurrentSpace,
+    current_user: CurrentUser,
+    membership: RequireMembership,
+    db: Session = Depends(get_db),
+) -> Response:
+    kb_process_audit_service.start_process_batch(
+        db,
+        space_id=current_space.id,
+        kb_id=kb_id,
+        user_id=current_user.id,
+        batch_uid=payload.batch_uid,
+        action=payload.action,
+        force=payload.force,
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.post("/{kb_id}/documents/upload", response_model=KnowledgeDocumentResponse, status_code=status.HTTP_201_CREATED)
 async def upload_document_endpoint(
     kb_id: int,
     current_space: CurrentSpace,
+    current_user: CurrentUser,
     membership: RequireMembership,
     db: Session = Depends(get_db),
     file: UploadFile = File(...),
     chunk_size: int | None = Form(default=None),
     chunk_overlap: int | None = Form(default=None),
+    skip_if_duplicate: bool = Form(default=False),
 ) -> dict:
     file_bytes = await file.read()
+    filename = file.filename or "document.txt"
     return upload_document(
         db,
         space_id=current_space.id,
         kb_id=kb_id,
-        file_name=file.filename or "document.txt",
+        file_name=filename,
         file_bytes=file_bytes,
         mime_type=file.content_type,
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
+        skip_if_duplicate=skip_if_duplicate,
+        user_id=current_user.id,
+        record_audit=False,
     )
 
 
@@ -521,9 +640,11 @@ async def parse_document_stream(
     kb_id: int,
     document_id: int,
     current_space: CurrentSpace,
+    current_user: CurrentUser,
     membership: RequireMembership,
     embedding_model_id: int | None = Query(default=None),
     force: bool = Query(default=False),
+    batch_id: str | None = Query(default=None),
 ) -> StreamingResponse:
     """Server-Sent Events：解析过程中实时输出日志，完成后在 data 中附带 document。"""
     return StreamingResponse(
@@ -535,6 +656,8 @@ async def parse_document_stream(
             embedding_model_id=embedding_model_id,
             mode="parse",
             force=force,
+            user_id=current_user.id,
+            batch_uid=batch_id,
         ),
         media_type="text/event-stream",
         headers={
@@ -741,10 +864,19 @@ def delete_document(
     kb_id: int,
     document_id: int,
     current_space: CurrentSpace,
+    current_user: CurrentUser,
     membership: RequireMembership,
     db: Session = Depends(get_db),
+    batch_id: str | None = Query(default=None),
 ) -> Response:
-    delete_document_asset(db, space_id=current_space.id, kb_id=kb_id, document_id=document_id)
+    delete_document_asset(
+        db,
+        space_id=current_space.id,
+        kb_id=kb_id,
+        document_id=document_id,
+        user_id=current_user.id,
+        batch_uid=batch_id,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -772,9 +904,11 @@ async def reindex_document_stream(
     kb_id: int,
     document_id: int,
     current_space: CurrentSpace,
+    current_user: CurrentUser,
     membership: RequireMembership,
     embedding_model_id: int | None = Query(default=None),
     force: bool = Query(default=False),
+    batch_id: str | None = Query(default=None),
 ) -> StreamingResponse:
     """Server-Sent Events：重建索引时实时输出日志。"""
     return StreamingResponse(
@@ -786,6 +920,8 @@ async def reindex_document_stream(
             embedding_model_id=embedding_model_id,
             mode="reindex",
             force=force,
+            user_id=current_user.id,
+            batch_uid=batch_id,
         ),
         media_type="text/event-stream",
         headers={
@@ -801,6 +937,7 @@ def cancel_document_process_endpoint(
     kb_id: int,
     document_id: int,
     current_space: CurrentSpace,
+    current_user: CurrentUser,
     membership: RequireMembership,
     db: Session = Depends(get_db),
 ) -> dict:
@@ -810,6 +947,7 @@ def cancel_document_process_endpoint(
         space_id=current_space.id,
         kb_id=kb_id,
         document_id=document_id,
+        user_id=current_user.id,
     )
 
 
@@ -823,6 +961,10 @@ def get_document_chunks(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     keyword: str | None = Query(default=None, description="按切片正文模糊匹配"),
+    chunk_view: Literal["lightrag", "parse"] = Query(
+        default="lightrag",
+        description="图知识库：lightrag=LightRAG 索引大段；parse=解析切片（knowledge_chunk 表）。经典库忽略此参数。",
+    ),
 ) -> dict:
     return list_document_chunks(
         db,
@@ -832,6 +974,7 @@ def get_document_chunks(
         page=page,
         page_size=page_size,
         keyword=keyword,
+        chunk_view=chunk_view,
     )
 
 
@@ -933,6 +1076,7 @@ def graph_search(
         query=payload.query,
         mode=payload.mode,
         top_k=payload.top_k,
+        chunk_top_k=payload.chunk_top_k,
         include_references=payload.include_references,
     )
     return GraphSearchResponse(**data)

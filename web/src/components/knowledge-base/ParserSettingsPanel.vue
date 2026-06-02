@@ -41,6 +41,10 @@ const showMineruPdfOption = computed(
   () => mineruEnabled.value || pdfEngine.value === 'mineru',
 )
 
+const HYBRID_UNAVAILABLE_MESSAGE = 'Hybrid 服务不可用，请联系管理员开启服务'
+/** odl-hybrid sidecar 实时探活结果；不可用时禁止勾选 Hybrid 模式 */
+const hybridAvailable = computed(() => capabilities.value?.opendataloader?.hybrid_available === true)
+
 async function loadCapabilities() {
   capabilitiesLoading.value = true
   capabilitiesError.value = ''
@@ -176,8 +180,21 @@ async function onPdfEngineChange(evt: Event) {
   await saveParsers({ pdf: sec })
 }
 
+function onPdfHybridLabelClick(evt: MouseEvent) {
+  // 不可用且当前未开启时：拦截点击并提示，禁止勾选（已开启时允许关闭）
+  if (!hybridAvailable.value && !pdfHybrid.value) {
+    evt.preventDefault()
+    alert(HYBRID_UNAVAILABLE_MESSAGE)
+  }
+}
+
 async function onPdfHybridChange(evt: Event) {
   const checked = (evt.target as HTMLInputElement).checked
+  if (checked && !hybridAvailable.value) {
+    ;(evt.target as HTMLInputElement).checked = false
+    alert(HYBRID_UNAVAILABLE_MESSAGE)
+    return
+  }
   await saveParsers({ pdf: { ...pdfSection(), hybrid: checked } })
 }
 
@@ -249,10 +266,26 @@ async function restoreDefaults() {
             </div>
             <p v-if="pdfEngine === 'mineru'" class="parser-hint">适合复杂研报、扫描 PDF、表格较多的文档。</p>
             <p v-else-if="pdfEngine === 'opendataloader'" class="parser-hint">适合普通 PDF；复杂表格可改选 MinerU。</p>
-            <label v-if="pdfEngine === 'opendataloader'" class="parser-check">
-              <input type="checkbox" :checked="pdfHybrid" :disabled="saving" @change="onPdfHybridChange" />
+            <label
+              v-if="pdfEngine === 'opendataloader'"
+              class="parser-check"
+              :class="{ 'parser-check--disabled': !hybridAvailable && !pdfHybrid }"
+              @click="onPdfHybridLabelClick"
+            >
+              <input
+                type="checkbox"
+                :checked="pdfHybrid"
+                :disabled="saving || (!hybridAvailable && !pdfHybrid)"
+                @change="onPdfHybridChange"
+              />
               Hybrid 模式（扫描件 / 复杂页，需 odl-hybrid sidecar）
             </label>
+            <p
+              v-if="pdfEngine === 'opendataloader' && !hybridAvailable"
+              class="parser-hint parser-hint--warn"
+            >
+              {{ HYBRID_UNAVAILABLE_MESSAGE }}
+            </p>
           </div>
         </div>
 
@@ -463,6 +496,19 @@ async function restoreDefaults() {
   gap: 8px;
   font-size: 0.88rem;
   color: var(--text-secondary);
+}
+
+.parser-check--disabled {
+  color: var(--text-tertiary);
+  cursor: not-allowed;
+}
+
+.parser-check--disabled input {
+  cursor: not-allowed;
+}
+
+.parser-hint--warn {
+  color: var(--warning-color, #b45309);
 }
 
 .parser-actions {

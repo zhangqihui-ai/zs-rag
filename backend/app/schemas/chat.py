@@ -92,6 +92,12 @@ class ChatConfigurationBase(BaseModel):
         default="mix",
         description="图知识库 LightRAG 检索模式：naive/local/global/hybrid/mix",
     )
+    lightrag_chunk_top_k: int | None = Field(
+        default=None,
+        ge=1,
+        le=100,
+        description="图知识库召回的文档片段数（chunk_top_k）；为空时沿用 LightRAG 默认（20）。",
+    )
     temperature: float = Field(0.7, ge=0.0, le=2.0)
     max_tokens: int = Field(2000, ge=1)
     top_p: float = Field(1.0, ge=0.0, le=1.0)

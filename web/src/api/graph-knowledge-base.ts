@@ -89,6 +89,8 @@ export interface GraphSearchRequest {
   query: string
   mode?: LightRagQueryMode
   top_k?: number
+  /** 向量侧召回的文档片段数；为空时沿用 LightRAG 默认（20） */
+  chunk_top_k?: number | null
   include_references?: boolean
 }
 

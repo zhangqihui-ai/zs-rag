@@ -238,3 +238,83 @@ class KnowledgeChunk(Base):
 
     def __repr__(self) -> str:
         return f"<KnowledgeChunk(id={self.id}, document_id={self.document_id}, chunk_index={self.chunk_index})>"
+
+
+class KbProcessBatchAction(enum.Enum):
+    UPLOAD = "upload"
+    PARSE = "parse"
+    REINDEX = "reindex"
+    DELETE = "delete"
+    CANCEL = "cancel"
+
+
+class KbProcessBatchStatus(enum.Enum):
+    RUNNING = "running"
+    SUCCESS = "success"
+    PARTIAL_FAILED = "partial_failed"
+    FAILED = "failed"
+
+
+class KbProcessBatchItemStatus(enum.Enum):
+    RUNNING = "running"
+    SUCCESS = "success"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class KbProcessBatch(Base):
+    __tablename__ = "kb_process_batch"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    batch_uid: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    enterprise_space_id: Mapped[int] = mapped_column(
+        ForeignKey("enterprise_space.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    knowledge_base_id: Mapped[int] = mapped_column(
+        ForeignKey("knowledge_base.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("user.id", ondelete="SET NULL"), nullable=True, index=True)
+    action: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), default=KbProcessBatchStatus.RUNNING.value, nullable=False
+    )
+    total_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    success_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    summary: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    metadata_json: Mapped[dict | None] = mapped_column("metadata", JSON, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    user = relationship("User")
+    knowledge_base = relationship("KnowledgeBase")
+    items = relationship(
+        "KbProcessBatchItem",
+        back_populates="batch",
+        cascade="all, delete-orphan",
+    )
+
+    def __repr__(self) -> str:
+        return f"<KbProcessBatch(id={self.id}, kb_id={self.knowledge_base_id}, action={self.action})>"
+
+
+class KbProcessBatchItem(Base):
+    __tablename__ = "kb_process_batch_item"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    batch_id: Mapped[int] = mapped_column(
+        ForeignKey("kb_process_batch.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    document_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    file_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), default=KbProcessBatchItemStatus.RUNNING.value, nullable=False
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    batch = relationship("KbProcessBatch", back_populates="items")
+
+    def __repr__(self) -> str:
+        return f"<KbProcessBatchItem(id={self.id}, batch_id={self.batch_id}, file_name={self.file_name})>"

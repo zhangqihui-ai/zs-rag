@@ -815,6 +815,47 @@ def list_lightrag_document_chunks(
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
+def _lightrag_document_excerpt(
+    knowledge_base: KnowledgeBase,
+    document: KnowledgeDocument,
+    *,
+    max_chars: int = 2000,
+    max_chunks: int = 4,
+) -> str:
+    """从 LightRAG text_chunks 存储拼接文档前若干切片正文。
+
+    图谱检索只命中文档级 reference（无 chunk 正文）时，用它兜底取回原文供引用展示。
+    """
+    _, entry = _lightrag_doc_status(knowledge_base, document)
+    chunks_list = entry.get("chunks_list") if entry else None
+    if not isinstance(chunks_list, list) or not chunks_list:
+        return ""
+    store = _read_lightrag_text_chunks_store(knowledge_base)
+    ordered: list[tuple[int, str]] = []
+    for idx, chunk_key in enumerate(chunks_list):
+        raw = store.get(str(chunk_key))
+        if not isinstance(raw, dict):
+            continue
+        content = str(raw.get("content") or "").strip()
+        if not content:
+            continue
+        order = raw.get("chunk_order_index")
+        sort_key = int(order) if isinstance(order, int) else idx
+        ordered.append((sort_key, content))
+    ordered.sort(key=lambda item: item[0])
+    pieces: list[str] = []
+    total = 0
+    for _, content in ordered[:max_chunks]:
+        pieces.append(content)
+        total += len(content)
+        if total >= max_chars:
+            break
+    text = "\n\n".join(pieces).strip()
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip() + "…"
+    return text
+
+
 def _assert_lightrag_doc_indexed(knowledge_base: KnowledgeBase, document: KnowledgeDocument) -> None:
     status, entry = _lightrag_doc_status(knowledge_base, document)
     if entry is None:
@@ -1184,6 +1225,8 @@ def _map_citations(
                 "file_path": file_path or None,
                 "chunk_id": chunk.get("chunk_id"),
                 "knowledge_base_id": knowledge_base.id,
+                # 图谱库切片不在关系库，附正文供前端直接展示（chunk_id 为 LightRAG 内部 ID，无法 getChunk）
+                "content": content,
             }
         )
 
@@ -1196,7 +1239,12 @@ def _map_citations(
             ref_no += 1
             doc = file_to_doc.get(file_path)
             doc_name = doc.document_name if doc else file_path
-            parts.append(f"[{ref_no}] 《{doc_name}》")
+            # 文档级 reference 不带正文，从本地 text_chunks 存储兜底取回原文片段。
+            content = _lightrag_document_excerpt(knowledge_base, doc) if doc else ""
+            if content:
+                parts.append(f"[{ref_no}] 《{doc_name}》\n{content}")
+            else:
+                parts.append(f"[{ref_no}] 《{doc_name}》")
             citations.append(
                 {
                     "ref": ref_no,
@@ -1205,6 +1253,7 @@ def _map_citations(
                     "file_path": file_path,
                     "chunk_id": None,
                     "knowledge_base_id": knowledge_base.id,
+                    "content": content or None,
                 }
             )
 
@@ -1218,10 +1267,19 @@ async def query_async(
     query: str,
     mode: LightRagQueryMode = "mix",
     top_k: int = 5,
+    chunk_top_k: int | None = None,
     include_references: bool = True,
 ) -> dict[str, Any]:
     rag = await get_lightrag_instance(db, knowledge_base)
-    param = QueryParam(mode=mode, top_k=top_k, include_references=include_references)
+    param_kwargs: dict[str, Any] = {
+        "mode": mode,
+        "top_k": top_k,
+        "include_references": include_references,
+    }
+    # chunk_top_k 控制向量侧召回的文档片段数；未指定时沿用 LightRAG 默认（20）。
+    if chunk_top_k is not None and chunk_top_k > 0:
+        param_kwargs["chunk_top_k"] = int(chunk_top_k)
+    param = QueryParam(**param_kwargs)
     runtime = _get_lightrag_runtime()
     async with runtime.env_lock:
         with _lightrag_runtime_env(db, knowledge_base):
@@ -1316,6 +1374,7 @@ async def _query_graph_runtime(
     query: str,
     mode: LightRagQueryMode = "mix",
     top_k: int = 5,
+    chunk_top_k: int | None = None,
     include_references: bool = True,
 ) -> dict[str, Any]:
     with SessionLocal() as db:
@@ -1326,6 +1385,7 @@ async def _query_graph_runtime(
             query=query,
             mode=mode,
             top_k=top_k,
+            chunk_top_k=chunk_top_k,
             include_references=include_references,
         )
 
@@ -1383,6 +1443,7 @@ def query_graph_kb(
     query: str,
     mode: LightRagQueryMode = "mix",
     top_k: int = 5,
+    chunk_top_k: int | None = None,
     include_references: bool = True,
 ) -> dict[str, Any]:
     return _get_lightrag_runtime().run(
@@ -1392,6 +1453,7 @@ def query_graph_kb(
             query,
             mode=mode,
             top_k=top_k,
+            chunk_top_k=chunk_top_k,
             include_references=include_references,
         )
     )

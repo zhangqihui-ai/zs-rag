@@ -37,7 +37,8 @@
               <h2 class="doc-split-title">{{ document.file_name }}</h2>
               <p class="doc-split-meta">
                 <span>大小：{{ formatFileSize(document.file_size) }}</span>
-                <span>上传时间：{{ formatDate(document.created_at) }}</span>
+                <span>上传时间：{{ formatApiDateTime(document.created_at) }}</span>
+                <span>解析时间：{{ formatApiDateTime(document.last_parsed_at) }}</span>
               </p>
             </header>
             <div class="doc-split-pane-body">
@@ -154,6 +155,33 @@
                     @keydown.enter.prevent="applyChunkKeyword"
                   />
                 </label>
+                <div
+                  v-if="graphChunkToggleVisible"
+                  class="doc-view-mode-segment doc-graph-chunk-toggle"
+                  role="tablist"
+                  aria-label="图切片视图"
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    :aria-selected="graphChunkViewMode === 'lightrag'"
+                    :class="['doc-view-mode-btn', { active: graphChunkViewMode === 'lightrag' }]"
+                    title="LightRAG 索引大段，与图检索召回一致、内容连贯"
+                    @click="graphChunkViewMode = 'lightrag'"
+                  >
+                    索引大段
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    :aria-selected="graphChunkViewMode === 'parse'"
+                    :class="['doc-view-mode-btn', { active: graphChunkViewMode === 'parse' }]"
+                    title="MinerU/ODL 解析切片，与经典向量库展示一致，可与左侧 PDF 联动"
+                    @click="graphChunkViewMode = 'parse'"
+                  >
+                    解析切片
+                  </button>
+                </div>
                 <div v-if="chunkTotal > 0" class="doc-split-pagination-top">
                   <span class="doc-split-total-top">共 {{ chunkTotal }} 切片</span>
                   <div class="doc-split-page-controls-top">
@@ -293,6 +321,16 @@
                 <div v-else class="doc-split-chunks-stack">
                   <div v-if="chunksLoading" class="loading-skeleton document-skeleton doc-split-scroll-inner"></div>
                   <div v-else-if="chunksError" class="status-box error doc-split-scroll-inner">{{ chunksError }}</div>
+                  <div
+                    v-else-if="chunkItems.length === 0"
+                    class="doc-split-empty doc-split-scroll-inner doc-split-empty-fill"
+                  >
+                    <p v-if="usesParseChunkList">
+                      暂无解析切片，请重新解析或重建索引以生成解析切片。
+                    </p>
+                    <p v-else-if="usesLightragChunkList">暂无 LightRAG 索引大段。</p>
+                    <p v-else>暂无切片数据。</p>
+                  </div>
                   <template v-else>
                     <ScrollRowWithVSlider
                       ref="chunkScrollSliderRef"
@@ -421,6 +459,7 @@ import {
 } from '../lib/docxContentDisplay'
 import { findMineruBlockForChunk, parseRouteFocusInt } from '../lib/documentCitationFocus'
 import { copyToClipboard } from '../lib/copy-to-clipboard'
+import { formatApiDateTime } from '../lib/formatDateTime'
 
 const route = useRoute()
 
@@ -560,20 +599,23 @@ onUnmounted(() => {
 
 const isLightragKb = computed(() => knowledgeBase.value?.kb_type === 'lightrag')
 
-const usesGraphSegmentPreview = computed(() => {
-  if (!isLightragKb.value || document.value?.status !== 'graph_indexed' || !mineruViewEnabled.value) {
-    return false
+// 图知识库切片视图：lightrag=索引大段；parse=解析切片（knowledge_chunk 表）
+const graphChunkViewMode = ref<'lightrag' | 'parse'>('lightrag')
+
+const graphChunkToggleVisible = computed(
+  () => isLightragKb.value && document.value?.status === 'graph_indexed',
+)
+
+const effectiveGraphChunkMode = computed<'lightrag' | 'parse' | null>(() => {
+  if (!isLightragKb.value || document.value?.status !== 'graph_indexed') {
+    return null
   }
-  return mineruContentList.value.some(shouldShowMineruBlock)
+  return graphChunkViewMode.value
 })
 
-const usesLightragChunkList = computed(() => {
-  const d = document.value
-  if (!d || !isLightragKb.value) {
-    return false
-  }
-  return d.status === 'graph_indexed' && d.chunk_count > 0 && !usesGraphSegmentPreview.value
-})
+const usesParseChunkList = computed(() => effectiveGraphChunkMode.value === 'parse')
+
+const usesLightragChunkList = computed(() => effectiveGraphChunkMode.value === 'lightrag')
 
 const hasChunksAvailable = computed(() => {
   const d = document.value
@@ -583,10 +625,10 @@ const hasChunksAvailable = computed(() => {
   if (d.status === 'indexed' && d.chunk_count > 0) {
     return true
   }
-  if (usesLightragChunkList.value) {
+  if (isLightragKb.value && d.status === 'graph_indexed') {
     return true
   }
-  return usesGraphSegmentPreview.value
+  return false
 })
 
 function docMetadata(): Record<string, unknown> | null {
@@ -1020,8 +1062,8 @@ const rightPaneSub = computed(() => {
   if (rightView.value === 'tables') {
     return '从 content_list 筛选表格类块；点击可与左侧块、切片联动'
   }
-  if (usesGraphSegmentPreview.value) {
-    return '图知识库使用 LightRAG 图谱索引；此处展示 PDF 解析段落供预览（非经典向量切片）'
+  if (usesParseChunkList.value) {
+    return '图知识库解析分块，与经典向量库展示一致（knowledge_chunk，仅展示不参与图检索）'
   }
   if (usesLightragChunkList.value) {
     return '图知识库 LightRAG 索引分块，用于实体抽取与图谱检索'
@@ -1317,60 +1359,14 @@ function chunkVectorLabel(chunk: KnowledgeChunk): string {
   const m = chunk.metadata
   if (m && typeof m === 'object') {
     const source = (m as { source?: string }).source
+    if (source === 'graph_parse_preview') {
+      return '解析切片'
+    }
     if (source === 'mineru_graph_preview' || source === 'lightrag_text_chunk') {
       return '图谱索引'
     }
   }
   return chunk.vector_status === 'indexed' ? '已向量化' : '待向量'
-}
-
-function buildGraphPreviewChunks(items: MineruContentItem[], documentId: number): KnowledgeChunk[] {
-  const now = new Date().toISOString()
-  const shown = items.filter(shouldShowMineruBlock)
-  return shown.map((item, index) => {
-    const text = mineruBlockPlainText(item)
-    const pageIdx = typeof item.page_idx === 'number' ? item.page_idx : 0
-    const preview = text.length > 240 ? `${text.slice(0, 240)}…` : text
-    return {
-      id: -(index + 1),
-      chunk_uid: `graph-preview-${documentId}-${index}`,
-      document_id: documentId,
-      chunk_index: index,
-      content: text,
-      content_preview: preview,
-      char_count: [...text].length,
-      token_count: null,
-      start_offset: null,
-      end_offset: null,
-      page_no: pageIdx + 1,
-      heading_path: null,
-      vector_status: 'indexed',
-      vector_id: null,
-      metadata: {
-        source: 'mineru_graph_preview',
-        type: item.type,
-        mineru_index: typeof item._index === 'number' ? item._index : index,
-      },
-      created_at: now,
-      updated_at: now,
-    }
-  })
-}
-
-function loadGraphPreviewChunksPage() {
-  if (!document.value) {
-    chunkItems.value = []
-    chunkTotal.value = 0
-    return
-  }
-  let all = buildGraphPreviewChunks(mineruContentList.value, document.value.id)
-  const kw = chunkKeyword.value.trim()
-  if (kw) {
-    all = all.filter((chunk) => chunk.content.includes(kw))
-  }
-  chunkTotal.value = all.length
-  const start = (chunkPage.value - 1) * chunkPageSize.value
-  chunkItems.value = all.slice(start, start + chunkPageSize.value)
 }
 
 function chunkCharCount(chunk: KnowledgeChunk): number {
@@ -1412,11 +1408,15 @@ function chunkEnrichmentKeywords(chunk: KnowledgeChunk): string[] {
 }
 
 function chunkEnrichmentEditable(chunk: KnowledgeChunk): boolean {
-  if (chunk.id <= 0 || usesGraphSegmentPreview.value) {
+  if (chunk.id <= 0 || usesParseChunkList.value || usesLightragChunkList.value) {
     return false
   }
   const source = String(chunk.metadata?.source ?? '')
-  return source !== 'mineru_graph_preview' && source !== 'lightrag_text_chunk'
+  return (
+    source !== 'mineru_graph_preview' &&
+    source !== 'lightrag_text_chunk' &&
+    source !== 'graph_parse_preview'
+  )
 }
 
 function chunkEnrichmentSummary(chunk: KnowledgeChunk): string {
@@ -1474,6 +1474,12 @@ watch(chunkKeyword, () => {
   void loadChunks()
 })
 
+// 切换图切片视图（索引大段 / 解析切片）：数据源不同，回到首页并重载
+watch(graphChunkViewMode, () => {
+  chunkPage.value = 1
+  void loadChunks()
+})
+
 let keywordDebounce: ReturnType<typeof setTimeout> | null = null
 watch(chunkKeywordInput, () => {
   if (keywordDebounce) {
@@ -1523,11 +1529,8 @@ async function loadPage() {
     }
     if (hasChunksAvailable.value) {
       await resolveCitationFocusChunk()
-      const chunkTotalHint = usesGraphSegmentPreview.value
-        ? mineruContentList.value.filter(shouldShowMineruBlock).length
-        : d.chunk_count
-      if (focusedChunkIndex.value != null && chunkTotalHint > 0) {
-        chunkPage.value = desiredPageForChunkIndex(focusedChunkIndex.value, chunkTotalHint)
+      if (focusedChunkIndex.value != null && d.chunk_count > 0 && !usesParseChunkList.value) {
+        chunkPage.value = desiredPageForChunkIndex(focusedChunkIndex.value, d.chunk_count)
       }
       await loadChunks()
     } else {
@@ -1548,17 +1551,22 @@ async function loadChunks() {
   chunksLoading.value = true
   chunksError.value = ''
   try {
-    if (usesGraphSegmentPreview.value) {
-      loadGraphPreviewChunksPage()
-    } else {
-      const data = await knowledgeBaseApi.listChunks(kbId.value, docId.value, {
-        page: chunkPage.value,
-        page_size: chunkPageSize.value,
-        keyword: chunkKeyword.value || undefined,
-      })
-      chunkItems.value = data.items
-      chunkTotal.value = data.total
+    const params: {
+      page: number
+      page_size: number
+      keyword?: string
+      chunk_view?: 'lightrag' | 'parse'
+    } = {
+      page: chunkPage.value,
+      page_size: chunkPageSize.value,
+      keyword: chunkKeyword.value || undefined,
     }
+    if (isLightragKb.value && document.value.status === 'graph_indexed') {
+      params.chunk_view = usesLightragChunkList.value ? 'lightrag' : 'parse'
+    }
+    const data = await knowledgeBaseApi.listChunks(kbId.value, docId.value, params)
+    chunkItems.value = data.items
+    chunkTotal.value = data.total
   } catch (value) {
     chunksError.value = getKnowledgeBaseErrorMessage(value, '加载切片失败')
     chunkItems.value = []

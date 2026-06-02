@@ -1,6 +1,12 @@
 <template>
   <Layout>
-    <div class="page-shell knowledge-detail-view" :class="{ 'knowledge-detail-view--graph-tab': activeTab === 'graph' }">
+    <div
+      class="page-shell knowledge-detail-view"
+      :class="{
+        'knowledge-detail-view--graph-tab': activeTab === 'graph',
+        'knowledge-detail-view--documents-tab': activeTab === 'documents',
+      }"
+    >
       <div v-if="notice.text" :class="['notice-bar', notice.type]">
         <AppIcon :name="notice.type === 'error' ? 'status' : 'check'" :size="16" />
         <p>{{ notice.text }}</p>
@@ -41,7 +47,11 @@
           </aside>
 
           <section class="detail-main">
-            <section v-if="activeTab === 'documents'" class="surface-card content-card">
+            <section
+              v-if="activeTab === 'documents'"
+              class="surface-card content-card documents-card"
+              :class="{ 'documents-card--fresh-empty': documentsListIsFreshEmpty }"
+            >
               <div class="section-heading">
                 <div>
                   <h3>文件列表</h3>
@@ -59,7 +69,7 @@
                 </div>
               </div>
 
-              <div class="toolbar-row documents-toolbar">
+              <div v-if="!documentsListIsFreshEmpty" class="toolbar-row documents-toolbar">
                 <label class="field toolbar-field toolbar-field-search">
                   <span class="field-label">搜索</span>
                   <div class="input-wrap">
@@ -68,30 +78,25 @@
                   </div>
                 </label>
 
-                <label class="field toolbar-field">
-                  <span class="field-label">状态</span>
-                  <select v-model="documentStatusFilter" class="select">
-                    <option value="all">全部</option>
-                    <option value="uploaded">待解析</option>
-                    <option value="parsing">解析中</option>
-                    <option value="chunking">分块中</option>
-                    <option value="indexing">索引中</option>
-                    <option value="indexed">已完成</option>
-                    <option v-if="isLightragKb" value="graph_indexing">图谱入库中</option>
-                    <option v-if="isLightragKb" value="graph_indexed">图谱就绪</option>
-                    <option value="failed">失败</option>
-                    <option v-if="isLightragKb" value="graph_failed">解析失败</option>
-                  </select>
-                </label>
+                <div class="field toolbar-field">
+                  <AppSelect
+                    v-model="documentStatusFilter"
+                    label="状态"
+                    :options="documentStatusFilterOptions"
+                  />
+                </div>
 
-                <label class="field toolbar-field">
-                  <span class="field-label">排序</span>
-                  <select v-model="sortOrder" class="select">
-                    <option value="newest">上传时间：最新优先</option>
-                    <option value="oldest">上传时间：最早优先</option>
-                    <option value="name">名称：A-Z</option>
-                  </select>
-                </label>
+                <div v-if="showDocumentFileTypeFilter" class="field toolbar-field">
+                  <AppSelect
+                    v-model="documentFileTypeFilter"
+                    label="类型"
+                    :options="documentFileTypeFilterOptions"
+                  />
+                </div>
+
+                <div class="field toolbar-field">
+                  <AppSelect v-model="sortOrder" label="排序" :options="documentSortOptions" />
+                </div>
 
                 <div v-if="selectedDocumentIds.length > 0" class="documents-batch-actions">
                   <span class="documents-batch-count">已选 {{ selectedDocumentIds.length }} 项</span>
@@ -124,26 +129,22 @@
 
               <div v-if="documentsLoading" class="loading-skeleton document-skeleton"></div>
 
-              <EmptyState
-                v-else-if="documents.length === 0"
-                :title="documentListEmptyTitle"
-                :description="documentListEmptyDescription"
-              >
-                <template #icon>
-                  <AppIcon name="folder" :size="20" />
-                </template>
-                <template #actions>
-                  <button
-                    v-if="!documentListFilterActive"
-                    class="btn btn-primary"
-                    type="button"
-                    @click="openUploadModal"
-                  >
-                    <AppIcon name="plus" :size="16" />
-                    添加文件
-                  </button>
-                </template>
-              </EmptyState>
+              <div v-else-if="documents.length === 0" class="documents-empty-wrap">
+                <EmptyState
+                  :title="documentListEmptyTitle"
+                  :description="documentListEmptyDescription"
+                  :compact="documentListFilterActive"
+                >
+                  <template #icon>
+                    <AppIcon name="folder" :size="20" />
+                  </template>
+                  <template v-if="documentListFilterActive" #actions>
+                    <button class="btn btn-ghost" type="button" @click="clearDocumentListFilters">
+                      清除筛选
+                    </button>
+                  </template>
+                </EmptyState>
+              </div>
 
               <template v-else>
                 <div class="document-table-wrap" :style="documentTableStyle">
@@ -172,7 +173,7 @@
                     />
                   </span>
                   <span>上传时间</span>
-                  <span class="document-col-compact">来源</span>
+                  <span class="document-col-compact">类型</span>
                   <span class="document-col-status">状态</span>
                   <span class="document-col-compact">分块数</span>
                   <span class="document-col-compact">解析器</span>
@@ -200,13 +201,13 @@
                       @keydown.enter.prevent="goToDocumentDetail(document)"
                       @keydown.space.prevent="goToDocumentDetail(document)"
                     >
-                      <DocumentFileIcon :ext="document.file_ext || document.parser_type" />
+                      <DocumentFileIcon :ext="document.file_ext || uploadExtension(document)" />
                       <div class="document-name-wrap">
                         <span class="document-name">{{ documentDisplayName(document) }}</span>
                       </div>
                     </div>
-                    <span class="document-meta-cell">{{ formatDate(document.created_at) }}</span>
-                    <span class="document-meta-cell document-col-compact">{{ formatSource(document) }}</span>
+                    <span class="document-meta-cell">{{ formatApiDateTime(document.created_at) }}</span>
+                    <span class="document-meta-cell document-col-compact">{{ documentUploadTypeDisplay(document) }}</span>
                     <span class="document-col-status">
                       <span :class="['status-pill', statusToneMap[getDocumentDisplayStatus(document)] || 'info']">
                         {{ statusLabelMap[getDocumentDisplayStatus(document)] || getDocumentDisplayStatus(document) }}
@@ -216,13 +217,13 @@
                     <span class="document-meta-cell document-col-compact">{{ documentParserDisplay(document, knowledgeBase) }}</span>
                     <div class="row-actions document-row-actions">
                       <DocumentParseProgress
-                        v-if="parseTasks.isRunning(document.id)"
-                        :percent="parseTasks.getTask(document.id)?.percent ?? 0"
+                        v-if="parseTasks.isRunning(document.id) || documentIsStuckProcessing(document)"
+                        :percent="documentProcessingPercent(document)"
                         :title="parseLogDotTitle(document)"
                         @open-log="openParseLogModal(document)"
                         @cancel="cancelDocumentParseAction(document.id)"
                       />
-                      <template v-else>
+                      <template v-else-if="!documentIsStuckProcessing(document)">
                         <button
                           v-if="documentCanStartParse(document)"
                           class="btn btn-primary btn-row btn-row-compact"
@@ -466,20 +467,31 @@
                   <span class="field-label">检索问题</span>
                   <textarea v-model.trim="graphSearchQuery" class="textarea" rows="3" placeholder="输入问题…" />
                 </label>
-                <div class="form-grid two">
+                <div class="form-grid graph-search-grid">
                   <label class="field">
                     <span class="field-label">查询模式</span>
-                    <select v-model="graphSearchMode" class="select">
-                      <option value="mix">mix（推荐）</option>
-                      <option value="naive">naive</option>
-                      <option value="local">local</option>
-                      <option value="global">global</option>
-                      <option value="hybrid">hybrid</option>
+                    <select v-model="graphSearchMode" class="select" :title="LIGHTRAG_MODE_DESC[graphSearchMode]">
+                      <option value="mix" :title="LIGHTRAG_MODE_DESC.mix">mix（推荐）</option>
+                      <option value="naive" :title="LIGHTRAG_MODE_DESC.naive">naive</option>
+                      <option value="local" :title="LIGHTRAG_MODE_DESC.local">local</option>
+                      <option value="global" :title="LIGHTRAG_MODE_DESC.global">global</option>
+                      <option value="hybrid" :title="LIGHTRAG_MODE_DESC.hybrid">hybrid</option>
                     </select>
                   </label>
                   <label class="field">
-                    <span class="field-label">Top K</span>
+                    <span class="field-label">Top K（实体/关系）</span>
                     <input v-model.number="graphSearchTopK" class="input" type="number" min="1" max="50" />
+                  </label>
+                  <label class="field">
+                    <span class="field-label">片段数（chunk_top_k）</span>
+                    <input
+                      v-model.number="graphSearchChunkTopK"
+                      class="input"
+                      type="number"
+                      min="1"
+                      max="100"
+                      placeholder="默认 20"
+                    />
                   </label>
                 </div>
                 <button class="btn btn-primary" type="submit" :disabled="graphSearching || !graphSearchQuery">
@@ -488,19 +500,170 @@
               </form>
               <div v-if="graphSearchError" class="status-box error">{{ graphSearchError }}</div>
               <div v-else-if="graphSearchResult" class="graph-search-results">
-                <p v-if="graphSearchResult.answer_context" class="graph-search-context">{{ graphSearchResult.answer_context }}</p>
-                <div v-if="graphSearchResult.entities?.length" class="graph-search-entities">
-                  <h4>实体</h4>
-                  <ul>
-                    <li v-for="(ent, idx) in graphSearchResult.entities.slice(0, 10)" :key="idx">
-                      {{ (ent as Record<string, string>).entity_name || (ent as Record<string, string>).entity_id || idx }}
-                      <ViewInGraphLink
-                        v-if="(ent as Record<string, string>).entity_name"
-                        :kb-id="kbId"
-                        :entity-id="(ent as Record<string, string>).entity_name"
-                      />
-                    </li>
-                  </ul>
+                <div class="graph-search-summary">
+                  <span class="chip chip-brand">{{ graphModeLabelMap[graphSearchResult.mode] || graphSearchResult.mode }}</span>
+                  <span class="chip">{{ graphChunks.length }} 片段</span>
+                  <span class="chip">{{ graphEntities.length }} 实体</span>
+                  <span class="chip">{{ graphRelationships.length }} 关系</span>
+                  <span class="chip">{{ graphCitations.length }} 引用</span>
+                </div>
+
+                <div class="graph-result-tabs" role="tablist">
+                  <button
+                    v-for="t in graphResultTabs"
+                    :key="t.key"
+                    type="button"
+                    class="graph-result-tab"
+                    :class="{ 'graph-result-tab--active': graphResultTab === t.key }"
+                    @click="graphResultTab = t.key"
+                  >
+                    {{ t.label }}
+                    <span v-if="t.key !== 'context'" class="graph-result-tab-count">{{ t.count }}</span>
+                  </button>
+                </div>
+
+                <div class="graph-result-body">
+                  <!-- 文档片段 -->
+                  <template v-if="graphResultTab === 'chunks'">
+                    <EmptyState v-if="!graphChunks.length" title="本次未召回文档片段" description="当前模式可能只命中实体/关系，可切到「实体」「关系」查看，或改用 mix 模式。" compact>
+                      <template #icon><AppIcon name="retrieval" :size="18" /></template>
+                    </EmptyState>
+                    <ol v-else class="graph-chunk-list">
+                      <li v-for="(ck, idx) in graphChunks" :key="idx" class="graph-chunk-card">
+                        <div class="graph-chunk-head">
+                          <span class="graph-chunk-index">#{{ idx + 1 }}</span>
+                          <span v-if="ck.source" class="graph-chunk-source">{{ ck.source }}</span>
+                        </div>
+                        <p class="graph-chunk-content">{{ ck.content }}</p>
+                      </li>
+                    </ol>
+                  </template>
+
+                  <!-- 实体 -->
+                  <template v-else-if="graphResultTab === 'entities'">
+                    <EmptyState v-if="!graphEntities.length" title="本次未命中实体" description="" compact>
+                      <template #icon><AppIcon name="graph" :size="18" /></template>
+                    </EmptyState>
+                    <template v-else>
+                      <div class="graph-entity-toolbar">
+                        <label class="graph-group-toggle">
+                          <input v-model="graphEntityGroupBy" type="checkbox" />
+                          <span>按类型分组</span>
+                        </label>
+                      </div>
+
+                      <!-- 平铺视图：保留相关度排序 -->
+                      <div v-if="!graphEntityGroupBy" class="graph-table-wrap">
+                        <table class="graph-table">
+                          <thead>
+                            <tr><th>实体</th><th>类型</th><th>描述</th><th class="graph-table-action"></th></tr>
+                          </thead>
+                          <tbody>
+                            <tr v-for="(ent, idx) in graphEntities" :key="idx">
+                              <td class="graph-cell-name">{{ ent.name || '—' }}</td>
+                              <td>
+                                <span
+                                  v-if="ent.type"
+                                  class="graph-type-chip"
+                                  :style="{ '--type-color': entTypeColor(ent.type) }"
+                                >
+                                  <span class="graph-type-dot"></span>{{ ent.type }}
+                                </span>
+                                <span v-else>—</span>
+                              </td>
+                              <td class="graph-cell-desc">{{ ent.description || '—' }}</td>
+                              <td class="graph-table-action">
+                                <ViewInGraphLink v-if="ent.name" :kb-id="kbId" :entity-id="ent.name" />
+                              </td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+
+                      <!-- 分组视图：按 entity_type 归堆 -->
+                      <div v-else class="graph-entity-groups">
+                        <section
+                          v-for="grp in graphEntityGroups"
+                          :key="grp.type"
+                          class="graph-entity-group"
+                        >
+                          <div class="graph-entity-group-head" :style="{ '--type-color': entTypeColor(grp.type) }">
+                            <span class="graph-type-dot"></span>
+                            <span class="graph-entity-group-name">{{ grp.type }}</span>
+                            <span class="graph-entity-group-count">{{ grp.items.length }}</span>
+                          </div>
+                          <div class="graph-table-wrap">
+                            <table class="graph-table">
+                              <tbody>
+                                <tr v-for="(ent, idx) in grp.items" :key="idx">
+                                  <td class="graph-cell-name">{{ ent.name || '—' }}</td>
+                                  <td class="graph-cell-desc">{{ ent.description || '—' }}</td>
+                                  <td class="graph-table-action">
+                                    <ViewInGraphLink v-if="ent.name" :kb-id="kbId" :entity-id="ent.name" />
+                                  </td>
+                                </tr>
+                              </tbody>
+                            </table>
+                          </div>
+                        </section>
+                      </div>
+                    </template>
+                  </template>
+
+                  <!-- 关系 -->
+                  <template v-else-if="graphResultTab === 'relationships'">
+                    <EmptyState v-if="!graphRelationships.length" title="本次未命中关系" description="" compact>
+                      <template #icon><AppIcon name="graph" :size="18" /></template>
+                    </EmptyState>
+                    <div v-else class="graph-table-wrap">
+                      <table class="graph-table">
+                        <thead>
+                          <tr><th>关系（起点 → 终点）</th><th>权重</th><th>关键词</th><th>描述</th></tr>
+                        </thead>
+                        <tbody>
+                          <tr v-for="(rel, idx) in graphRelationships" :key="idx">
+                            <td class="graph-cell-rel">
+                              <span class="graph-rel-node">{{ rel.src || '—' }}</span>
+                              <span class="graph-rel-arrow">→</span>
+                              <span class="graph-rel-node">{{ rel.tgt || '—' }}</span>
+                            </td>
+                            <td>
+                              <span
+                                v-if="rel.weight != null"
+                                class="graph-weight"
+                                :class="`graph-weight--${relWeightLevel(rel.weight)}`"
+                                :title="`权重 ${formatWeight(rel.weight)}`"
+                              >
+                                {{ relWeightLabel(rel.weight) }} {{ formatWeight(rel.weight) }}
+                              </span>
+                              <span v-else>—</span>
+                            </td>
+                            <td>{{ rel.keywords || '—' }}</td>
+                            <td class="graph-cell-desc">{{ rel.description || '—' }}</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </template>
+
+                  <!-- 引用来源 -->
+                  <template v-else-if="graphResultTab === 'citations'">
+                    <EmptyState v-if="!graphCitations.length" title="本次无引用来源" description="" compact>
+                      <template #icon><AppIcon name="retrieval" :size="18" /></template>
+                    </EmptyState>
+                    <ul v-else class="graph-citation-list">
+                      <li v-for="cite in graphCitations" :key="cite.ref" class="graph-citation-item">
+                        <span class="graph-citation-ref">[{{ cite.ref }}]</span>
+                        <span class="graph-citation-name">{{ cite.document_name }}</span>
+                      </li>
+                    </ul>
+                  </template>
+
+                  <!-- 原始上下文 -->
+                  <template v-else>
+                    <p class="graph-context-hint">LightRAG 注入给大模型的完整上下文（实体/关系/片段/引用拼接），用于调试。</p>
+                    <pre class="graph-context-raw">{{ graphSearchResult.answer_context || '（空）' }}</pre>
+                  </template>
                 </div>
               </div>
             </section>
@@ -519,31 +682,180 @@
               />
             </section>
 
-            <section v-else-if="activeTab === 'logs'" class="surface-card content-card">
+            <section v-else-if="activeTab === 'logs'" class="surface-card content-card kb-process-log">
               <div class="section-heading">
                 <div>
                   <h3>处理日志</h3>
-                  <p>基于当前文档状态汇总最近活动，便于快速排查问题。</p>
+                  <p>按用户与批次汇总文档操作审计；单文档技术日志仍可在文件列表中查看。</p>
                 </div>
+                <button
+                  class="btn btn-ghost"
+                  type="button"
+                  :disabled="processLogLoading"
+                  @click="fetchProcessLogData"
+                >
+                  <AppIcon name="refresh" :size="16" />
+                  刷新
+                </button>
               </div>
 
-              <EmptyState v-if="activityItems.length === 0" title="暂无日志" description="上传文档后会在这里展示最近处理活动。" compact>
+              <section v-if="processLogLoading && !processLogSummary" class="kb-log-kpi-grid">
+                <article v-for="n in 3" :key="n" class="kb-log-kpi-card kb-log-kpi-card--skeleton"></article>
+              </section>
+              <section v-else-if="processLogSummary" class="kb-log-kpi-grid">
+                <article class="kb-log-kpi-card">
+                  <span class="kb-log-kpi-icon tone-blue">
+                    <AppIcon name="folder" :size="22" />
+                  </span>
+                  <div class="kb-log-kpi-body">
+                    <p class="kb-log-kpi-value">{{ processLogSummary.total_documents }}</p>
+                    <p class="kb-log-kpi-label">文件总数</p>
+                  </div>
+                </article>
+                <article class="kb-log-kpi-card">
+                  <span class="kb-log-kpi-icon tone-green">
+                    <AppIcon name="check" :size="22" />
+                  </span>
+                  <div class="kb-log-kpi-body">
+                    <p class="kb-log-kpi-value">{{ processLogSummary.indexed_documents }}</p>
+                    <p class="kb-log-kpi-label">已完成解析</p>
+                  </div>
+                </article>
+                <article class="kb-log-kpi-card">
+                  <span class="kb-log-kpi-icon tone-teal">
+                    <AppIcon name="bolt" :size="22" />
+                  </span>
+                  <div class="kb-log-kpi-body">
+                    <p class="kb-log-kpi-value">{{ processLogSummary.processing_documents }}</p>
+                    <p class="kb-log-kpi-label">正在处理</p>
+                    <div class="kb-log-kpi-substats">
+                      <span><i class="kb-log-dot kb-log-dot--success"></i>成功 {{ processLogSummary.recent_24h_success }}</span>
+                      <span><i class="kb-log-dot kb-log-dot--failed"></i>失败 {{ processLogSummary.recent_24h_failed }}</span>
+                    </div>
+                  </div>
+                </article>
+              </section>
+
+              <div class="kb-log-toolbar">
+                <AppSelect
+                  v-model="processLogActionFilter"
+                  :options="processLogActionOptions"
+                  aria-label="动作筛选"
+                  class="kb-log-filter-select"
+                />
+                <input
+                  v-model.trim="processLogKeyword"
+                  class="input kb-log-search"
+                  type="search"
+                  placeholder="搜索用户、文件名或摘要"
+                  @keydown.enter="fetchProcessLogEvents"
+                />
+                <button class="btn btn-secondary" type="button" :disabled="processLogLoading" @click="fetchProcessLogEvents">
+                  搜索
+                </button>
+              </div>
+
+              <EmptyState
+                v-if="!processLogLoading && processLogEvents.length === 0"
+                title="暂无审计记录"
+                description="上传、解析、删除等操作会在这里按批次展示。历史操作无法回溯。"
+                compact
+              >
                 <template #icon>
                   <AppIcon name="clock" :size="18" />
                 </template>
               </EmptyState>
 
-              <div v-else class="activity-list">
-                <article v-for="item in activityItems" :key="item.id" class="activity-card">
-                  <div class="activity-header">
-                    <div>
-                      <strong>{{ item.title }}</strong>
-                      <p>{{ item.time }}</p>
-                    </div>
-                    <span :class="['status-pill', item.tone]">{{ item.status }}</span>
-                  </div>
-                  <p class="activity-message">{{ item.message }}</p>
-                </article>
+              <div v-else class="kb-log-table-wrap">
+                <table class="kb-log-table">
+                  <thead>
+                    <tr>
+                      <th>时间</th>
+                      <th>用户</th>
+                      <th>动作</th>
+                      <th>数量</th>
+                      <th>状态</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <template v-for="event in processLogEvents" :key="event.id">
+                      <tr>
+                        <td>{{ formatDate(event.started_at) }}</td>
+                        <td>{{ event.username }}</td>
+                        <td>
+                          <div class="kb-log-action-cell">
+                            <strong>{{ event.action_label }}</strong>
+                            <span class="kb-log-summary">{{ event.summary }}</span>
+                          </div>
+                        </td>
+                        <td>
+                          <span>{{ event.total_count }}</span>
+                          <span v-if="event.success_count" class="status-pill success">{{ event.success_count }} 成功</span>
+                          <span v-if="event.failed_count" class="status-pill error">{{ event.failed_count }} 失败</span>
+                        </td>
+                        <td>
+                          <span :class="['status-pill', processLogStatusTone(event.status)]">
+                            {{ processLogStatusLabel(event.status) }}
+                          </span>
+                        </td>
+                        <td>
+                          <button
+                            class="btn btn-ghost btn-sm"
+                            type="button"
+                            @click="toggleProcessLogBatchExpand(event.id)"
+                          >
+                            {{ expandedProcessLogBatchId === event.id ? '收起' : '展开' }}
+                          </button>
+                        </td>
+                      </tr>
+                      <tr v-if="expandedProcessLogBatchId === event.id" class="kb-log-expand-row">
+                        <td colspan="6">
+                          <div v-if="processLogBatchItemsLoading" class="kb-log-expand-loading">加载明细…</div>
+                          <ul v-else-if="processLogBatchItems.length > 0" class="kb-log-item-list">
+                            <li v-for="item in processLogBatchItems" :key="item.id" class="kb-log-item-row">
+                              <DocumentFileIcon :ext="uploadExtension(item.file_name)" />
+                              <span class="kb-log-item-name">{{ item.file_name }}</span>
+                              <span :class="['status-pill', processLogItemStatusTone(item.status)]">
+                                {{ processLogItemStatusLabel(item.status) }}
+                              </span>
+                              <span v-if="item.error_message" class="kb-log-item-error">{{ item.error_message }}</span>
+                              <button
+                                v-if="item.document_id && (item.status === 'failed' || item.status === 'cancelled')"
+                                class="btn btn-ghost btn-sm"
+                                type="button"
+                                @click="openParseLogFromBatchItem(item)"
+                              >
+                                查看日志
+                              </button>
+                            </li>
+                          </ul>
+                          <p v-else class="kb-log-expand-empty">暂无明细</p>
+                        </td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+
+              <div v-if="processLogTotalPages > 1" class="kb-log-pagination">
+                <button
+                  class="btn btn-ghost btn-sm"
+                  type="button"
+                  :disabled="processLogPage <= 1 || processLogLoading"
+                  @click="goProcessLogPage(processLogPage - 1)"
+                >
+                  上一页
+                </button>
+                <span>{{ processLogPage }} / {{ processLogTotalPages }}</span>
+                <button
+                  class="btn btn-ghost btn-sm"
+                  type="button"
+                  :disabled="processLogPage >= processLogTotalPages || processLogLoading"
+                  @click="goProcessLogPage(processLogPage + 1)"
+                >
+                  下一页
+                </button>
               </div>
             </section>
 
@@ -681,7 +993,7 @@
             <div>
               <h3>上传文件</h3>
               <p>
-                {{ knowledgeBase?.name || '当前知识库' }} · 支持 txt / md / pdf / docx / csv / Excel（xls、xlsx），可多选文件或整个文件夹。
+                {{ knowledgeBase?.name || '当前知识库' }} · 支持 txt / md / pdf / doc / docx / csv / Excel（xls、xlsx），可多选文件或整个文件夹。
               </p>
             </div>
             <button class="icon-button" type="button" @click="closeUploadModal">
@@ -695,7 +1007,7 @@
               class="hidden-file-input"
               type="file"
               multiple
-              accept=".txt,.md,.pdf,.docx,.csv,.xls,.xlsx,.xlsm"
+              accept=".txt,.md,.pdf,.doc,.docx,.csv,.xls,.xlsx,.xlsm"
               @change="handleMultiFileInputChange"
             />
             <input
@@ -720,7 +1032,7 @@
               </span>
               <strong>点击或拖拽文件到此处上传</strong>
               <p>
-                支持一次选择多个文件，或拖入多个文件；格式包括 txt、md、pdf、docx、csv、Excel（xls / xlsx / xlsm）。旧版 Word（.doc）请另存为 docx。
+                支持一次选择多个文件，或拖入多个文件；格式包括 txt、md、pdf、doc、docx、csv、Excel（xls / xlsx / xlsm）。旧版 .doc 上传后将自动转换为 docx 再解析。
               </p>
             </button>
 
@@ -762,7 +1074,11 @@
               @click="submitUpload"
             >
               {{
-                uploading ? `上传中 (${uploadProgress}/${uploadFiles.length})…` : '保存并上传'
+                uploading
+                  ? `上传中 (${Math.max(uploadCompletedCount, uploadProgress)}/${uploadFiles.length})${
+                      uploadCurrentFileName ? ` · ${uploadCurrentFileName}` : ''
+                    }…`
+                  : '保存并上传'
               }}
             </button>
           </div>
@@ -775,7 +1091,7 @@
             <div>
               <h3>{{ activeParseLogTask?.mode === 'reindex' ? '重建索引进度' : '解析进度' }}</h3>
               <p>{{ parseLogTitle }}</p>
-              <p v-if="activeParseLogTask?.status === 'running'" class="parse-log-progress-summary">
+              <p v-if="activeParseLogPhase === 'running' && activeParseLogTask" class="parse-log-progress-summary">
                 {{ activeParseLogTask.percent.toFixed(2) }}%
                 <span v-if="activeParseLogTask.progressMessage"> · {{ activeParseLogTask.progressMessage }}</span>
               </p>
@@ -850,13 +1166,20 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   getKnowledgeBaseErrorMessage,
   knowledgeBaseApi,
+  type DocumentFileExtOption,
+  type KbProcessLogBatchItem,
+  type KbProcessLogEvent,
+  type KbProcessLogSummary,
   type KnowledgeBase,
   type KnowledgeDocument,
   type KnowledgeSearchResponse,
   type RetrievalMode,
 } from '../api/knowledge-base'
+import { formatApiDateTime } from '../lib/formatDateTime'
+import { createBatchId } from '../lib/batchId'
 import { modelApi, defaultModelApi, getErrorMessage as getModelErrorMessage, type ModelItem, type DefaultModelOption } from '../api/model-management'
 import AppIcon from '../components/AppIcon.vue'
+import AppSelect from '../components/AppSelect.vue'
 import ChunkingSettingsPanel from '../components/knowledge-base/ChunkingSettingsPanel.vue'
 import EnrichmentSettingsPanel from '../components/knowledge-base/EnrichmentSettingsPanel.vue'
 import ParserSettingsPanel from '../components/knowledge-base/ParserSettingsPanel.vue'
@@ -875,17 +1198,18 @@ import {
 import RetrievalSearchResultList from '../components/knowledge-base/RetrievalSearchResultList.vue'
 import EmptyState from '../components/EmptyState.vue'
 import GraphVisualizationPanel from '../components/graph/GraphVisualizationPanel.vue'
-import { useDocumentParseTasks } from '../composables/useDocumentParseTasks'
+import { useDocumentParseTasks, wasUserCancelledParseTask } from '../composables/useDocumentParseTasks'
 import { useLayoutPageContext } from '../composables/useLayoutPageContext'
 import ViewInGraphLink from '../components/graph/ViewInGraphLink.vue'
 import Layout from '../components/Layout.vue'
 import { graphSearch, getGraphErrorMessage, type GraphSearchResponse, type LightRagQueryMode } from '../api/graph-knowledge-base'
 import { GRAPH_ENTITY_QUERY_KEY, GRAPH_TAB_QUERY_KEY } from '../lib/graphNavigation'
-import { documentParserDisplay } from '../lib/parserDisplay'
+import { colorForEntityType } from '../lib/graphEntityColors'
+import { documentParserDisplay, documentUploadTypeDisplay, uploadExtension } from '../lib/parserDisplay'
 
 const route = useRoute()
 const router = useRouter()
-const { setPageContext, clearPageContext } = useLayoutPageContext()
+const { setPageContext, clearPageContext, setFillPage } = useLayoutPageContext()
 
 const statusLabelMap: Record<string, string> = {
   active: '运行中',
@@ -975,12 +1299,132 @@ const documentsLoading = ref(false)
 const error = ref('')
 const activeTab = ref<DetailTab>('documents')
 const graphPanelRef = ref<InstanceType<typeof GraphVisualizationPanel> | null>(null)
+const LIGHTRAG_MODE_DESC: Record<LightRagQueryMode, string> = {
+  mix: 'mix（推荐）：综合知识图谱与向量检索，覆盖最全面，既能利用实体/关系，也能召回原文片段，适合大多数场景。',
+  naive: 'naive：基础向量相似度检索，不使用图谱结构，等同于普通 RAG，速度快但缺少关系推理。',
+  local: 'local：侧重实体的邻域（局部子图），适合针对某个具体实体、细节或定义的问题。',
+  global: 'global：侧重全局关系与主题脉络，适合概览、归纳、跨文档关联类的问题。',
+  hybrid: 'hybrid：同时执行 local 与 global 并融合结果，兼顾细节与全局，但不含 mix 的向量片段召回。',
+}
+
 const graphSearchQuery = ref('')
 const graphSearchMode = ref<LightRagQueryMode>('mix')
 const graphSearchTopK = ref(5)
+const graphSearchChunkTopK = ref<number | null>(null)
 const graphSearching = ref(false)
 const graphSearchError = ref('')
 const graphSearchResult = ref<GraphSearchResponse | null>(null)
+type GraphResultTab = 'chunks' | 'entities' | 'relationships' | 'citations' | 'context'
+const graphResultTab = ref<GraphResultTab>('chunks')
+const graphEntityGroupBy = ref(false)
+const entTypeColor = (type: string | null | undefined) => colorForEntityType(type)
+
+const pick = (row: Record<string, unknown>, ...keys: string[]): string => {
+  for (const k of keys) {
+    const v = row[k]
+    if (v !== undefined && v !== null && String(v).trim()) return String(v)
+  }
+  return ''
+}
+
+const cleanFilePath = (raw: string): string => raw.split('|||')[0].trim()
+
+const graphEntities = computed(() =>
+  (graphSearchResult.value?.entities ?? []).map((e) => ({
+    name: pick(e, 'entity_name', 'entity_id', 'name'),
+    type: pick(e, 'entity_type', 'type'),
+    description: pick(e, 'description'),
+    source: cleanFilePath(pick(e, 'file_path')),
+  })),
+)
+
+const graphRelationships = computed(() =>
+  (graphSearchResult.value?.relationships ?? []).map((r) => {
+    const raw = pick(r, 'weight')
+    const num = raw ? Number(raw) : NaN
+    return {
+      src: pick(r, 'src_id', 'entity1', 'source'),
+      tgt: pick(r, 'tgt_id', 'entity2', 'target'),
+      keywords: pick(r, 'keywords'),
+      description: pick(r, 'description'),
+      weight: Number.isFinite(num) ? num : null,
+    }
+  }),
+)
+
+// 实体按类型分组（用于「按类型分组」开关）
+const graphEntityGroups = computed(() => {
+  const groups = new Map<string, typeof graphEntities.value>()
+  for (const ent of graphEntities.value) {
+    const key = ent.type || '未分类'
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key)!.push(ent)
+  }
+  // 组内条数多的排前面，便于先看主类
+  return [...groups.entries()]
+    .map(([type, items]) => ({ type, items }))
+    .sort((a, b) => b.items.length - a.items.length)
+})
+
+// 关系权重未归一化，按结果集内最大值做相对分档
+const graphRelMaxWeight = computed(() => {
+  let max = 0
+  for (const r of graphRelationships.value) {
+    if (r.weight != null && r.weight > max) max = r.weight
+  }
+  return max
+})
+
+const relWeightLevel = (w: number | null): 'high' | 'mid' | 'low' | null => {
+  if (w == null) return null
+  const max = graphRelMaxWeight.value
+  if (max <= 0) return 'mid'
+  const ratio = w / max
+  if (ratio >= 0.66) return 'high'
+  if (ratio >= 0.33) return 'mid'
+  return 'low'
+}
+
+const relWeightLabel = (w: number | null): string => {
+  const lvl = relWeightLevel(w)
+  if (lvl === 'high') return '强'
+  if (lvl === 'mid') return '中'
+  if (lvl === 'low') return '弱'
+  return '—'
+}
+
+const formatWeight = (w: number | null): string => {
+  if (w == null) return ''
+  return Number.isInteger(w) ? String(w) : w.toFixed(1)
+}
+
+const graphChunks = computed(() =>
+  (graphSearchResult.value?.chunks ?? [])
+    .map((c) => ({
+      content: pick(c, 'content'),
+      source: cleanFilePath(pick(c, 'file_path')),
+      chunkId: pick(c, 'chunk_id'),
+    }))
+    .filter((c) => c.content),
+)
+
+const graphCitations = computed(() => graphSearchResult.value?.citations ?? [])
+
+const graphResultTabs = computed(() => [
+  { key: 'chunks' as const, label: '文档片段', count: graphChunks.value.length },
+  { key: 'entities' as const, label: '实体', count: graphEntities.value.length },
+  { key: 'relationships' as const, label: '关系', count: graphRelationships.value.length },
+  { key: 'citations' as const, label: '引用来源', count: graphCitations.value.length },
+  { key: 'context' as const, label: '原始上下文', count: 0 },
+])
+
+const graphModeLabelMap: Record<string, string> = {
+  mix: 'mix',
+  naive: 'naive',
+  local: 'local',
+  global: 'global',
+  hybrid: 'hybrid',
+}
 
 async function submitGraphSearch() {
   if (!kbId.value || Number.isNaN(kbId.value) || !graphSearchQuery.value.trim()) {
@@ -993,8 +1437,18 @@ async function submitGraphSearch() {
       query: graphSearchQuery.value.trim(),
       mode: graphSearchMode.value,
       top_k: graphSearchTopK.value,
+      chunk_top_k:
+        typeof graphSearchChunkTopK.value === 'number' && graphSearchChunkTopK.value > 0
+          ? graphSearchChunkTopK.value
+          : null,
       include_references: true,
     })
+    // 默认展示最有信息量的分页：有片段优先片段，否则退回实体
+    graphResultTab.value = graphChunks.value.length
+      ? 'chunks'
+      : graphEntities.value.length
+        ? 'entities'
+        : 'context'
   } catch (err) {
     graphSearchError.value = getGraphErrorMessage(err, '图检索失败')
     graphSearchResult.value = null
@@ -1019,12 +1473,72 @@ function syncDetailTabFromRoute() {
 }
 const documentKeyword = ref('')
 const documentStatusFilter = ref('all')
+const documentFileTypeFilter = ref('all')
+const documentFileExtOptions = ref<DocumentFileExtOption[]>([])
+const documentFileTypeFilterOptions = computed(() => [
+  { value: 'all', label: '全部' },
+  ...documentFileExtOptions.value.map((opt) => ({
+    value: opt.value,
+    label: `${opt.label} (${opt.count})`,
+  })),
+])
+const documentStatusFilterOptions = computed(() => {
+  const options = [
+    { value: 'all', label: '全部' },
+    { value: 'uploaded', label: '待解析' },
+    { value: 'parsing', label: '解析中' },
+    { value: 'chunking', label: '分块中' },
+    { value: 'indexing', label: '索引中' },
+    { value: 'indexed', label: '已完成' },
+  ]
+  if (isLightragKb.value) {
+    options.push(
+      { value: 'graph_indexing', label: '图谱入库中' },
+      { value: 'graph_indexed', label: '图谱就绪' },
+    )
+  }
+  options.push({ value: 'failed', label: '失败' })
+  if (isLightragKb.value) {
+    options.push({ value: 'graph_failed', label: '解析失败' })
+  }
+  return options
+})
+const documentSortOptions = [
+  { value: 'newest', label: '上传时间：最新优先' },
+  { value: 'oldest', label: '上传时间：最早优先' },
+  { value: 'name', label: '名称：A-Z' },
+] as const
+const showDocumentFileTypeFilter = computed(() => documentFileExtOptions.value.length > 0)
 const sortOrder = ref<'newest' | 'oldest' | 'name'>('newest')
 const documentsTotal = ref(0)
 const documentsPage = ref(1)
 const documentsPageSize = ref(10)
-const recentActivityDocuments = ref<KnowledgeDocument[]>([])
+const processLogSummary = ref<KbProcessLogSummary | null>(null)
+const processLogEvents = ref<KbProcessLogEvent[]>([])
+const processLogLoading = ref(false)
+const processLogPage = ref(1)
+const processLogPageSize = ref(20)
+const processLogTotal = ref(0)
+const processLogKeyword = ref('')
+const processLogActionFilter = ref('all')
+const expandedProcessLogBatchId = ref<number | null>(null)
+const processLogBatchItems = ref<KbProcessLogBatchItem[]>([])
+const processLogBatchItemsLoading = ref(false)
+
+const processLogActionOptions = [
+  { value: 'all', label: '全部动作' },
+  { value: 'upload', label: '上传' },
+  { value: 'parse', label: '解析' },
+  { value: 'reindex', label: '重建索引' },
+  { value: 'delete', label: '删除' },
+  { value: 'cancel', label: '取消解析' },
+]
+
+const processLogTotalPages = computed(() =>
+  Math.max(1, Math.ceil(processLogTotal.value / processLogPageSize.value)),
+)
 let documentKeywordDebounceTimer: number | null = null
+let suppressDocumentFileTypeFilterWatch = false
 const selectedDocumentIds = ref<number[]>([])
 const batchParsing = ref(false)
 const batchDeleting = ref(false)
@@ -1049,15 +1563,54 @@ const activeParseLogTask = computed(() => {
   return parseTasks.getTask(parseLogDocumentId.value)
 })
 
+function documentForParseLogModal(): KnowledgeDocument | undefined {
+  const id = parseLogDocumentId.value
+  if (id == null) {
+    return undefined
+  }
+  return documents.value.find((item) => item.id === id)
+}
+
+function isParseLogModalDocActive(): boolean {
+  const doc = documentForParseLogModal()
+  if (!doc) {
+    const id = parseLogDocumentId.value
+    return id != null && parseTasks.isRunning(id)
+  }
+  return parseTasks.isRunning(doc.id) || isDocumentProcessingOnServer(doc)
+}
+
 const activeParseLogLines = computed(() => {
+  const serverLines = parseLogLines.value
   const task = activeParseLogTask.value
+  const preferServer = !isParseLogModalDocActive()
+
+  if (preferServer && serverLines.length > 0) {
+    return serverLines
+  }
   if (task && task.logs.length > 0) {
+    if (serverLines.length > task.logs.length) {
+      return serverLines
+    }
     return task.logs
   }
-  return parseLogLines.value
+  return serverLines
 })
 
 const activeParseLogPhase = computed(() => {
+  const doc = documentForParseLogModal()
+  if (doc && !isDocumentProcessingOnServer(doc) && !parseTasks.isRunning(doc.id)) {
+    if (parseLogPhase.value === 'success' || parseLogPhase.value === 'error' || parseLogPhase.value === 'cancelled') {
+      return parseLogPhase.value
+    }
+    if (documentIsIndexed(doc)) {
+      return 'success'
+    }
+    if (documentIsParseFailed(doc)) {
+      return 'error'
+    }
+  }
+
   const task = activeParseLogTask.value
   if (task) {
     if (task.status === 'running') {
@@ -1109,6 +1662,14 @@ watch(activeParseLogLines, () => {
   })
 })
 
+watch(
+  activeTab,
+  (tab) => {
+    setFillPage(tab === 'documents')
+  },
+  { immediate: true },
+)
+
 onUnmounted(() => {
   clearPageContext()
   if (toastClearTimer != null) {
@@ -1129,11 +1690,13 @@ const uploadFiles = ref<File[]>([])
 const uploadError = ref('')
 const uploading = ref(false)
 const uploadProgress = ref(0)
+const uploadCompletedCount = ref(0)
+const uploadCurrentFileName = ref('')
 const isDragOver = ref(false)
 const fileInputRef = ref<HTMLInputElement | null>(null)
 const folderInputRef = ref<HTMLInputElement | null>(null)
 
-const UPLOAD_ACCEPT_EXT = new Set(['.txt', '.md', '.pdf', '.docx', '.csv', '.xls', '.xlsx', '.xlsm'])
+const UPLOAD_ACCEPT_EXT = new Set(['.txt', '.md', '.pdf', '.doc', '.docx', '.csv', '.xls', '.xlsx', '.xlsm'])
 
 const uploadQueueTotalBytes = computed(() => uploadFiles.value.reduce((sum, file) => sum + file.size, 0))
 
@@ -1217,33 +1780,171 @@ const documentListSort = computed(() => {
 const documentsTotalPages = computed(() => Math.max(1, Math.ceil(documentsTotal.value / documentsPageSize.value)))
 
 const documentListFilterActive = computed(
-  () => documentKeyword.value.trim() !== '' || documentStatusFilter.value !== 'all',
+  () =>
+    documentKeyword.value.trim() !== '' ||
+    documentStatusFilter.value !== 'all' ||
+    documentFileTypeFilter.value !== 'all',
+)
+
+const documentsListIsFreshEmpty = computed(
+  () => !documentsLoading.value && documents.value.length === 0 && !documentListFilterActive.value,
 )
 
 const documentListEmptyTitle = computed(() =>
   documentListFilterActive.value ? '没有匹配的文档' : '还没有文档',
 )
 
-const documentListEmptyDescription = computed(() =>
-  documentListFilterActive.value
-    ? '请调整搜索关键词或筛选条件。'
-    : '上传文件后，点击「开始解析」完成分块与向量索引。',
-)
-
-const activityItems = computed(() => {
-  return recentActivityDocuments.value.map((document) => ({
-    id: document.id,
-    title: document.document_name,
-    time: formatDate(document.updated_at),
-    status: statusLabelMap[document.status] || document.status,
-    tone: statusToneMap[document.status] || 'info',
-    message:
-      ((document.status === 'failed' || document.status === 'graph_failed') && document.error_message) ||
-      (document.status === 'indexed'
-        ? `文档已完成解析与索引，共生成 ${document.chunk_count} 个分块。`
-        : `当前状态为 ${statusLabelMap[document.status] || document.status}。`),
-  }))
+const documentListEmptyDescription = computed(() => {
+  if (documentListFilterActive.value) {
+    return '请调整搜索关键词或筛选条件。'
+  }
+  if (isLightragKb.value) {
+    return '支持 PDF、Word（doc/docx）、Excel 等格式。点击右上角「新增文件」上传，再执行「开始解析」完成分块与图谱入库。'
+  }
+  return '支持 PDF、Word（doc/docx）、Excel 等格式。点击右上角「新增文件」上传，再执行「开始解析」完成分块与向量索引。'
 })
+
+function clearDocumentListFilters() {
+  documentKeyword.value = ''
+  documentStatusFilter.value = 'all'
+  documentFileTypeFilter.value = 'all'
+}
+
+function syncDocumentFileExtOptions(options: DocumentFileExtOption[] | undefined): boolean {
+  documentFileExtOptions.value = options ?? []
+  if (
+    documentFileTypeFilter.value !== 'all' &&
+    !documentFileExtOptions.value.some((opt) => opt.value === documentFileTypeFilter.value)
+  ) {
+    suppressDocumentFileTypeFilterWatch = true
+    documentFileTypeFilter.value = 'all'
+    suppressDocumentFileTypeFilterWatch = false
+    return true
+  }
+  return false
+}
+
+
+function processLogStatusLabel(status: string) {
+  const map: Record<string, string> = {
+    running: '进行中',
+    success: '成功',
+    partial_failed: '部分失败',
+    failed: '失败',
+  }
+  return map[status] || status
+}
+
+function processLogStatusTone(status: string) {
+  if (status === 'success') return 'success'
+  if (status === 'running') return 'info'
+  if (status === 'partial_failed') return 'warning'
+  if (status === 'failed') return 'error'
+  return 'info'
+}
+
+function processLogItemStatusLabel(status: string) {
+  const map: Record<string, string> = {
+    running: '进行中',
+    success: '成功',
+    failed: '失败',
+    cancelled: '已取消',
+  }
+  return map[status] || status
+}
+
+function processLogItemStatusTone(status: string) {
+  if (status === 'success') return 'success'
+  if (status === 'failed') return 'error'
+  if (status === 'cancelled') return 'warning'
+  return 'info'
+}
+
+async function fetchProcessLogSummary() {
+  if (!kbId.value || Number.isNaN(kbId.value)) {
+    processLogSummary.value = null
+    return
+  }
+  try {
+    processLogSummary.value = await knowledgeBaseApi.getProcessLogSummary(kbId.value)
+  } catch {
+    processLogSummary.value = null
+  }
+}
+
+async function fetchProcessLogEvents() {
+  if (!kbId.value || Number.isNaN(kbId.value)) {
+    processLogEvents.value = []
+    processLogTotal.value = 0
+    return
+  }
+  processLogLoading.value = true
+  try {
+    const data = await knowledgeBaseApi.listProcessLogEvents(kbId.value, {
+      page: processLogPage.value,
+      page_size: processLogPageSize.value,
+      keyword: processLogKeyword.value || undefined,
+      action: processLogActionFilter.value === 'all' ? undefined : processLogActionFilter.value,
+    })
+    processLogEvents.value = data.items
+    processLogTotal.value = data.total
+  } catch {
+    processLogEvents.value = []
+    processLogTotal.value = 0
+  } finally {
+    processLogLoading.value = false
+  }
+}
+
+async function fetchProcessLogData() {
+  await Promise.all([fetchProcessLogSummary(), fetchProcessLogEvents()])
+}
+
+function goProcessLogPage(page: number) {
+  processLogPage.value = Math.min(Math.max(1, page), processLogTotalPages.value)
+  void fetchProcessLogEvents()
+}
+
+async function toggleProcessLogBatchExpand(batchId: number) {
+  if (expandedProcessLogBatchId.value === batchId) {
+    expandedProcessLogBatchId.value = null
+    processLogBatchItems.value = []
+    return
+  }
+  if (!kbId.value || Number.isNaN(kbId.value)) {
+    return
+  }
+  expandedProcessLogBatchId.value = batchId
+  processLogBatchItemsLoading.value = true
+  try {
+    const data = await knowledgeBaseApi.listProcessLogBatchItems(kbId.value, batchId)
+    processLogBatchItems.value = data.items
+  } catch {
+    processLogBatchItems.value = []
+  } finally {
+    processLogBatchItemsLoading.value = false
+  }
+}
+
+async function openParseLogFromBatchItem(item: KbProcessLogBatchItem) {
+  if (!item.document_id) {
+    return
+  }
+  parseLogDocumentId.value = item.document_id
+  parseLogKind.value = 'parse'
+  parseLogTitle.value = item.file_name
+  parseLogLines.value = []
+  parseLogPhase.value = item.status === 'failed' ? 'error' : 'cancelled'
+  try {
+    const data = await knowledgeBaseApi.getDocumentParseLog(kbId.value, item.document_id)
+    parseLogKind.value = (data.kind as 'parse' | 'reindex') || 'parse'
+    parseLogPhase.value = (data.phase as typeof parseLogPhase.value) || parseLogPhase.value
+    parseLogLines.value = data.lines || []
+  } catch {
+    parseLogLines.value = item.error_message ? [{ t: '', text: item.error_message }] : []
+  }
+  showParseLogModal.value = true
+}
 
 function documentIsParseFailed(document: KnowledgeDocument) {
   return document.status === 'failed' || document.status === 'graph_failed'
@@ -1255,6 +1956,19 @@ function documentIsIndexed(document: KnowledgeDocument) {
 
 function documentIsStuckProcessing(document: KnowledgeDocument) {
   return isDocumentProcessingOnServer(document) && !parseTasks.isRunning(document.id)
+}
+
+function documentProcessingPercent(document: KnowledgeDocument): number {
+  const task = parseTasks.getTask(document.id)
+  if (task && task.status === 'running') {
+    return task.percent
+  }
+  const status = document.status
+  if (status === 'graph_indexing') return 55
+  if (status === 'indexing') return 78
+  if (status === 'chunking') return 20
+  if (status === 'parsing') return 8
+  return 0
 }
 
 function documentCanStartParse(document: KnowledgeDocument) {
@@ -1392,14 +2106,24 @@ async function reconcileProcessingTasks() {
   }
   for (const doc of documents.value) {
     if (parseTasks.isRunning(doc.id)) {
+      parseTasks.reconcileTaskTerminalState(doc.id, doc.status)
+    }
+    if (parseTasks.isRunning(doc.id)) {
+      continue
+    }
+    if (kbId.value != null && wasUserCancelledParseTask(kbId.value, doc.id)) {
       continue
     }
     if (!isDocumentProcessingOnServer(doc)) {
       continue
     }
     const mode: 'parse' | 'reindex' =
-      doc.status === 'indexing' && (doc.chunk_count ?? 0) > 0 ? 'reindex' : 'parse'
-    await parseTasks.resumeWatch(doc.id, {
+      doc.status === 'graph_indexing' ||
+      doc.status === 'graph_failed' ||
+      (doc.status === 'indexing' && (doc.chunk_count ?? 0) > 0)
+        ? 'reindex'
+        : 'parse'
+    void parseTasks.resumeWatch(doc.id, {
       status: doc.status,
       mode,
       onTerminal: (snapshot) => {
@@ -1531,13 +2255,6 @@ async function setDocumentChunkingMode(document: KnowledgeDocument, next: Docume
   } finally {
     closeChunkingMenu()
   }
-}
-
-function formatSource(document: KnowledgeDocument) {
-  if (document.file_ext) {
-    return document.file_ext.replace('.', '').toUpperCase()
-  }
-  return document.source_type.toUpperCase()
 }
 
 const DOC_NAME_COL_WIDTH_KEY = 'kb-document-name-col-width'
@@ -1701,6 +2418,7 @@ async function fetchDocumentPage(options?: { withLoading?: boolean }) {
       page_size: documentsPageSize.value,
       keyword: kw || undefined,
       status: documentStatusFilter.value === 'all' ? undefined : documentStatusFilter.value,
+      file_ext: documentFileTypeFilter.value === 'all' ? undefined : documentFileTypeFilter.value,
       sort: documentListSort.value,
     }
     let data = await knowledgeBaseApi.listDocuments(kbId.value, params)
@@ -1711,8 +2429,12 @@ async function fetchDocumentPage(options?: { withLoading?: boolean }) {
     }
     documentsTotal.value = data.total
     documents.value = data.items.map(applyLocalProcessingOverlay)
+    const filterReset = syncDocumentFileExtOptions(data.file_ext_options)
     pruneProcessingDocumentIds()
     await reconcileProcessingTasks()
+    if (filterReset) {
+      return fetchDocumentPage({ withLoading: false })
+    }
   } catch (value) {
     const hasActiveParse = parseTasks.runningDocumentIds().length > 0
     if (withLoading || !hasActiveParse) {
@@ -1725,26 +2447,11 @@ async function fetchDocumentPage(options?: { withLoading?: boolean }) {
   }
 }
 
-async function fetchRecentActivity() {
-  if (!kbId.value || Number.isNaN(kbId.value)) {
-    recentActivityDocuments.value = []
-    return
-  }
-  try {
-    const data = await knowledgeBaseApi.listDocuments(kbId.value, {
-      page: 1,
-      page_size: 12,
-      sort: 'updated_desc',
-    })
-    recentActivityDocuments.value = data.items
-  } catch {
-    recentActivityDocuments.value = []
-  }
-}
-
 async function refreshDocuments() {
   await fetchDocumentPage()
-  await fetchRecentActivity()
+  if (activeTab.value === 'logs') {
+    await fetchProcessLogData()
+  }
 }
 
 function goDocumentsPagePrev() {
@@ -1963,42 +2670,95 @@ async function submitUpload() {
   uploading.value = true
   uploadError.value = ''
   uploadProgress.value = 0
+  uploadCompletedCount.value = 0
+  uploadCurrentFileName.value = ''
   const okNames: string[] = []
+  const skippedNames: string[] = []
   const failures: string[] = []
   const queue = [...uploadFiles.value]
   const total = queue.length
   try {
+    const batchId = createBatchId()
+    const batchAuditItems: Array<{ document_id: number; file_name: string }> = []
     for (let index = 0; index < total; index += 1) {
       const file = queue[index]
       uploadProgress.value = index + 1
+      uploadCurrentFileName.value = file.name
+      await nextTick()
       try {
-        await knowledgeBaseApi.uploadDocument(kbId.value, { file })
-        okNames.push(file.name)
+        const res = await knowledgeBaseApi.uploadDocument(kbId.value, {
+          file,
+          skip_if_duplicate: true,
+        })
+        batchAuditItems.push({ document_id: res.id, file_name: res.file_name || file.name })
+        if (res.upload_skipped) {
+          skippedNames.push(file.name)
+        } else {
+          okNames.push(file.name)
+        }
+        uploadCompletedCount.value = index + 1
       } catch (value) {
         failures.push(`${file.name}：${getKnowledgeBaseErrorMessage(value, '上传失败')}`)
+        uploadCompletedCount.value = index + 1
+      }
+    }
+    if (batchAuditItems.length > 0) {
+      try {
+        await knowledgeBaseApi.recordUploadBatch(kbId.value, {
+          batch_uid: batchId,
+          items: batchAuditItems,
+        })
+      } catch (value) {
+        /* 上传已成功，审计批次失败不阻断 */
+        console.warn('recordUploadBatch failed', value)
       }
     }
     await refreshDocuments()
     if (failures.length === 0) {
       closeUploadModal()
-      showToast(
-        okNames.length === 1
-          ? `「${okNames[0]}」上传成功，已加入列表。请点击「开始解析」完成分块与索引。`
-          : `已成功上传 ${okNames.length} 个文件，已加入列表。请点击「开始解析」完成分块与索引。`,
-        okNames.length === 1 ? 4000 : 5000,
-      )
+      if (okNames.length === 0 && skippedNames.length > 0) {
+        showToast(
+          skippedNames.length === 1
+            ? `「${skippedNames[0]}」内容未变化，已跳过上传。`
+            : `${skippedNames.length} 个文件内容未变化，已跳过上传。`,
+          5000,
+        )
+      } else if (skippedNames.length === 0) {
+        showToast(
+          okNames.length === 1
+            ? `「${okNames[0]}」上传成功，已加入列表。请点击「开始解析」完成分块与索引。`
+            : `已成功上传 ${okNames.length} 个文件，已加入列表。请点击「开始解析」完成分块与索引。`,
+          okNames.length === 1 ? 4000 : 5000,
+        )
+      } else {
+        showToast(
+          `新上传 ${okNames.length} 个，跳过重复 ${skippedNames.length} 个。请点击「开始解析」处理新文件。`,
+          5000,
+        )
+      }
     } else {
       uploadError.value =
         failures.length === total
           ? `全部上传失败：${failures.join('；')}`
           : `部分失败（${failures.length}/${total}）：${failures.join('；')}`
-      if (okNames.length > 0) {
-        showToast(`已上传 ${okNames.length} 个文件，另有 ${failures.length} 个失败，请查看下方错误信息。`, 5000)
+      if (okNames.length > 0 || skippedNames.length > 0) {
+        const parts: string[] = []
+        if (okNames.length > 0) {
+          parts.push(`已上传 ${okNames.length} 个`)
+        }
+        if (skippedNames.length > 0) {
+          parts.push(`跳过重复 ${skippedNames.length} 个`)
+        }
+        showToast(`${parts.join('，')}，另有 ${failures.length} 个失败，请查看下方错误信息。`, 5000)
       }
     }
+  } catch (value) {
+    uploadError.value = getKnowledgeBaseErrorMessage(value, '上传失败')
   } finally {
     uploading.value = false
     uploadProgress.value = 0
+    uploadCompletedCount.value = 0
+    uploadCurrentFileName.value = ''
   }
 }
 
@@ -2038,13 +2798,6 @@ function formatParseLogTimeDisplay(t: string): string {
 }
 
 function applyRemoteParseLog(remote: Awaited<ReturnType<typeof knowledgeBaseApi.getDocumentParseLog>>) {
-  if (!remote.lines?.length) {
-    return
-  }
-  parseLogLines.value = remote.lines.map((line) => ({
-    t: formatParseLogTimeDisplay(line.t),
-    text: line.text,
-  }))
   if (remote.kind === 'reindex' || remote.kind === 'parse') {
     parseLogKind.value = remote.kind
   }
@@ -2054,6 +2807,12 @@ function applyRemoteParseLog(remote: Awaited<ReturnType<typeof knowledgeBaseApi.
     parseLogPhase.value = 'success'
   } else if (remote.phase === 'running') {
     parseLogPhase.value = 'running'
+  }
+  if (remote.lines?.length) {
+    parseLogLines.value = remote.lines.map((line) => ({
+      t: formatParseLogTimeDisplay(line.t),
+      text: line.text,
+    }))
   }
 }
 
@@ -2159,22 +2918,43 @@ async function openParseLogModal(document: KnowledgeDocument) {
   const targetId = document.id
   parseLogModalOpenedFor.value = targetId
   parseLogTitle.value = document.file_name
+  parseLogDocumentId.value = targetId
 
-  const memoryHit = parseLogDocumentId.value === document.id && parseLogLines.value.length > 0
-  if (!memoryHit) {
+  const isActive = parseTasks.isRunning(document.id) || isDocumentProcessingOnServer(document)
+  if (!isActive) {
+    parseTasks.reconcileTaskTerminalState(document.id, document.status)
+  }
+
+  if (isActive) {
+    const task = parseTasks.getTask(document.id)
+    if (task && task.logs.length > 0) {
+      parseLogKind.value = task.mode
+      parseLogPhase.value = 'running'
+      parseLogLines.value = [...task.logs]
+    } else {
+      const stored = loadParseLogSnapshot(document.id)
+      if (stored) {
+        parseLogKind.value = stored.kind
+        parseLogPhase.value = stored.phase
+        parseLogLines.value = [...stored.lines]
+      } else {
+        parseLogLines.value = []
+        parseLogKind.value = 'parse'
+        parseLogPhase.value = 'running'
+      }
+    }
+  } else {
     const stored = loadParseLogSnapshot(document.id)
-    if (stored) {
-      parseLogDocumentId.value = document.id
+    if (stored && stored.lines.length > 0) {
       parseLogKind.value = stored.kind
       parseLogPhase.value = stored.phase
       parseLogLines.value = [...stored.lines]
     } else {
-      parseLogDocumentId.value = document.id
       parseLogLines.value = []
       parseLogKind.value = 'parse'
-      if (document.status === 'indexed' || document.status === 'graph_indexed') {
+      if (documentIsIndexed(document)) {
         parseLogPhase.value = 'success'
-      } else if (document.status === 'failed' || document.status === 'graph_failed') {
+      } else if (documentIsParseFailed(document)) {
         parseLogPhase.value = 'error'
       } else {
         parseLogPhase.value = 'running'
@@ -2303,7 +3083,7 @@ async function resolveDocumentForBatchParse(documentId: number): Promise<Knowled
   }
 }
 
-async function runDocumentParseSilent(documentId: number): Promise<{ ok: boolean; message?: string }> {
+async function runDocumentParseSilent(documentId: number, batchId?: string): Promise<{ ok: boolean; message?: string }> {
   if (!kbId.value || Number.isNaN(kbId.value)) {
     return { ok: false, message: '知识库无效' }
   }
@@ -2334,7 +3114,11 @@ async function runDocumentParseSilent(documentId: number): Promise<{ ok: boolean
   startDocumentStatusPoll(documentId)
   void fetchDocumentPage({ withLoading: false })
   try {
-    const result = await parseTasks.startTask(documentId, mode, { force: needsForce })
+    const result = await parseTasks.startTask(documentId, mode, {
+      force: needsForce,
+      graphKb: isLightragKb.value && mode === 'reindex',
+      batchId,
+    })
     if (result) {
       endDocumentStreamProcessing(documentId, result)
       return { ok: true }
@@ -2405,9 +3189,11 @@ async function batchParseSelectedDocuments() {
   let ok = 0
   let fail = 0
   const concurrency = isLightragKb.value ? 2 : 4
+  const batchId = createBatchId()
   try {
+    await knowledgeBaseApi.startProcessBatch(kbId.value, { batch_uid: batchId, action: 'parse' })
     const results = await runWithConcurrencyLimit(ids, concurrency, async (documentId) => {
-      const result = await runDocumentParseSilent(documentId)
+      const result = await runDocumentParseSilent(documentId, batchId)
       await fetchDocumentPage({ withLoading: false })
       return result
     })
@@ -2418,7 +3204,9 @@ async function batchParseSelectedDocuments() {
         fail += 1
       }
     }
-    await fetchRecentActivity()
+    if (activeTab.value === 'logs') {
+      await fetchProcessLogData()
+    }
     clearDocumentSelection()
     if (fail === 0) {
       showNotice(`已批量解析完成，共 ${ok} 个文件。`, 'success', 4000)
@@ -2438,21 +3226,26 @@ async function cancelDocumentParseAction(documentId: number) {
   if (!window.confirm('确定停止该文档的解析吗？已写入的部分将被清理。')) {
     return
   }
-  const snapshot = await parseTasks.cancelTask(documentId)
-  stopDocumentStatusPoll(documentId)
-  parseLogDocumentId.value = documentId
-  parseLogPhase.value = 'cancelled'
-  if (snapshot) {
-    patchDocumentInList(documentId, snapshot)
-  } else {
-    patchDocumentInList(documentId, {
-      status: 'uploaded',
-      error_message: null,
-      chunk_count: 0,
-    })
+  try {
+    const snapshot = await parseTasks.cancelTask(documentId)
+    stopDocumentStatusPoll(documentId)
+    parseLogDocumentId.value = documentId
+    parseLogPhase.value = 'cancelled'
+    if (snapshot) {
+      patchDocumentInList(documentId, snapshot)
+    } else {
+      patchDocumentInList(documentId, {
+        status: 'uploaded',
+        error_message: null,
+        chunk_count: 0,
+      })
+    }
+    await refreshDocuments()
+    showNotice('已停止解析', 'info', 3000)
+  } catch (value) {
+    showNotice(getKnowledgeBaseErrorMessage(value, '停止解析失败'), 'error')
+    await refreshDocuments()
   }
-  await refreshDocuments()
-  showNotice('已停止解析', 'info', 3000)
 }
 
 async function forceRestartParseAction(document: KnowledgeDocument) {
@@ -2537,7 +3330,10 @@ async function reindexDocumentAction(documentId: number, options?: { force?: boo
   startDocumentStatusPoll(documentId)
   void fetchDocumentPage({ withLoading: false })
   try {
-    const result = await parseTasks.startTask(documentId, 'reindex', { force: options?.force })
+    const result = await parseTasks.startTask(documentId, 'reindex', {
+      force: options?.force,
+      graphKb: isLightragKb.value,
+    })
     if (result) {
       endDocumentStreamProcessing(documentId, result)
       parseLogPhase.value = 'success'
@@ -2574,11 +3370,13 @@ async function batchDeleteSelectedDocuments() {
   batchDeleting.value = true
   let ok = 0
   let fail = 0
+  const batchId = createBatchId()
   try {
+    await knowledgeBaseApi.startProcessBatch(kbId.value, { batch_uid: batchId, action: 'delete' })
     for (const documentId of ids) {
       deletingDocumentIds.value = [...deletingDocumentIds.value, documentId]
       try {
-        await knowledgeBaseApi.deleteDocument(kbId.value, documentId)
+        await knowledgeBaseApi.deleteDocument(kbId.value, documentId, batchId)
         try {
           sessionStorage.removeItem(parseLogStorageKey(documentId))
         } catch {
@@ -2655,6 +3453,25 @@ async function submitSearch() {
 }
 
 watch(
+  processLogActionFilter,
+  () => {
+    processLogPage.value = 1
+    if (activeTab.value === 'logs') {
+      void fetchProcessLogEvents()
+    }
+  },
+)
+
+watch(
+  activeTab,
+  (tab) => {
+    if (tab === 'logs') {
+      void fetchProcessLogData()
+    }
+  },
+)
+
+watch(
   () => knowledgeBase.value?.name,
   (name) => {
     if (!name?.trim()) {
@@ -2676,6 +3493,16 @@ watch(
 watch(showGraphTab, () => {
   syncDetailTabFromRoute()
 })
+
+watch(
+  tabs,
+  (items) => {
+    if (!items.some((tab) => tab.key === activeTab.value)) {
+      activeTab.value = 'documents'
+    }
+  },
+  { immediate: true },
+)
 
 watch(
   () => [route.query[GRAPH_TAB_QUERY_KEY], route.query[GRAPH_ENTITY_QUERY_KEY], showGraphTab.value] as const,
@@ -2707,6 +3534,14 @@ watch(documentKeyword, () => {
 })
 
 watch(documentStatusFilter, () => {
+  documentsPage.value = 1
+  void fetchDocumentPage()
+})
+
+watch(documentFileTypeFilter, () => {
+  if (suppressDocumentFileTypeFilterWatch) {
+    return
+  }
   documentsPage.value = 1
   void fetchDocumentPage()
 })
@@ -3661,6 +4496,350 @@ watch(openChunkingMenuForId, (value) => {
   }
 }
 
+.graph-search-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+@media (max-width: 720px) {
+  .graph-search-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ===== 图检索结果 ===== */
+.graph-search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.graph-search-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.graph-result-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  border-bottom: 1px solid var(--border-subtle, var(--border-color, #e5e7eb));
+  padding-bottom: 0;
+}
+
+.graph-result-tab {
+  appearance: none;
+  border: none;
+  background: transparent;
+  padding: 8px 12px;
+  font-size: 0.85rem;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.graph-result-tab:hover {
+  color: var(--text-primary);
+}
+
+.graph-result-tab--active {
+  color: var(--brand-primary);
+  border-bottom-color: var(--brand-primary);
+  font-weight: 600;
+}
+
+.graph-result-tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  font-size: 0.7rem;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+
+.graph-result-tab--active .graph-result-tab-count {
+  background: var(--brand-primary-light);
+  color: var(--brand-primary);
+}
+
+.graph-result-body {
+  min-height: 80px;
+}
+
+.chip-soft {
+  background: var(--brand-primary-light);
+  color: var(--brand-primary);
+}
+
+/* 文档片段卡片 */
+.graph-chunk-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.graph-chunk-card {
+  border: 1px solid var(--border-subtle, var(--border-color, #e5e7eb));
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: var(--bg-secondary, #fff);
+}
+
+.graph-chunk-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.graph-chunk-index {
+  font-weight: 600;
+  color: var(--brand-primary);
+  font-size: 0.85rem;
+}
+
+.graph-chunk-source {
+  font-size: 0.78rem;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.graph-chunk-content {
+  margin: 0;
+  font-size: 0.88rem;
+  line-height: 1.65;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 实体 / 关系表格 */
+.graph-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border-subtle, var(--border-color, #e5e7eb));
+  border-radius: 10px;
+}
+
+.graph-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.graph-table th,
+.graph-table td {
+  text-align: left;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border-subtle, var(--border-color, #eef0f3));
+  vertical-align: top;
+}
+
+.graph-table thead th {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.graph-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.graph-cell-name {
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.graph-cell-desc {
+  color: var(--text-secondary);
+  line-height: 1.55;
+  max-width: 460px;
+}
+
+.graph-cell-rel {
+  white-space: nowrap;
+}
+
+.graph-rel-node {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.graph-rel-arrow {
+  margin: 0 6px;
+  color: var(--brand-primary);
+}
+
+.graph-table-action {
+  white-space: nowrap;
+  width: 1%;
+}
+
+/* 引用来源 */
+.graph-citation-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.graph-citation-item {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 0.88rem;
+  color: var(--text-primary);
+}
+
+.graph-citation-ref {
+  color: var(--brand-primary);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+/* 原始上下文 */
+.graph-context-hint {
+  margin: 0 0 8px;
+  font-size: 0.8rem;
+  color: var(--text-tertiary);
+}
+
+.graph-context-raw {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle, var(--border-color, #e5e7eb));
+  font-size: 0.8rem;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 460px;
+  overflow: auto;
+}
+
+/* 实体类型着色 chip */
+.graph-type-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 9px 2px 7px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--type-color) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--type-color) 32%, transparent);
+  white-space: nowrap;
+}
+
+.graph-type-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--type-color, #94a3b8);
+  flex-shrink: 0;
+}
+
+/* 实体分组 */
+.graph-entity-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 10px;
+}
+
+.graph-group-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.graph-group-toggle input {
+  cursor: pointer;
+}
+
+.graph-entity-groups {
+  display: grid;
+  gap: 16px;
+}
+
+.graph-entity-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid color-mix(in srgb, var(--type-color) 30%, transparent);
+}
+
+.graph-entity-group-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+}
+
+.graph-entity-group-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  font-size: 0.7rem;
+  background: color-mix(in srgb, var(--type-color) 16%, transparent);
+  color: var(--text-secondary);
+}
+
+/* 关系权重分档色块 */
+.graph-weight {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 0.76rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.graph-weight--high {
+  background: var(--success-soft, #dcfce7);
+  color: var(--success-strong, #15803d);
+}
+
+.graph-weight--mid {
+  background: var(--warning-soft, #fef3c7);
+  color: var(--warning-strong, #b45309);
+}
+
+.graph-weight--low {
+  background: var(--bg-tertiary, #f1f5f9);
+  color: var(--text-tertiary, #64748b);
+}
+
 .search-result-list {
   display: grid;
   gap: 14px;
@@ -4081,5 +5260,337 @@ watch(openChunkingMenuForId, (value) => {
 .knowledge-detail-view--graph-tab .graph-viz-card :deep(.graph-viz-panel) {
   flex: 1;
   min-height: 0;
+}
+
+/* 文件列表：一屏铺满，表格区内部滚动，避免浏览器右侧滚动条 */
+.knowledge-detail-view--documents-tab {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  margin-top: 0;
+  gap: 8px;
+}
+
+.knowledge-detail-view--documents-tab .knowledge-detail-layout {
+  flex: 1;
+  min-height: 0;
+  gap: 12px;
+  align-items: stretch;
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.knowledge-detail-view--documents-tab .detail-sidebar-nav {
+  padding: 12px 10px;
+  gap: 8px;
+}
+
+.knowledge-detail-view--documents-tab .detail-nav-item {
+  padding: 10px 12px;
+}
+
+.knowledge-detail-view--documents-tab .detail-main {
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.knowledge-detail-view--documents-tab .documents-card {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  gap: 8px;
+  overflow: hidden;
+  padding: 10px 18px 8px;
+}
+
+.knowledge-detail-view--documents-tab .documents-card .section-heading {
+  flex-shrink: 0;
+  margin-bottom: 0;
+  gap: 12px;
+  align-items: center;
+}
+
+.knowledge-detail-view--documents-tab .documents-card .section-heading p {
+  display: none;
+}
+
+.knowledge-detail-view--documents-tab .documents-card .section-heading h3 {
+  font-size: 1.05rem;
+}
+
+.knowledge-detail-view--documents-tab .documents-card .documents-toolbar {
+  flex-shrink: 0;
+  gap: 10px;
+}
+
+.knowledge-detail-view--documents-tab .documents-card .toolbar-field .field-label {
+  margin-bottom: 4px;
+  font-size: 0.8rem;
+}
+
+.knowledge-detail-view--documents-tab .document-table-wrap {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.knowledge-detail-view--documents-tab .document-table-head {
+  flex-shrink: 0;
+  padding-bottom: 6px;
+}
+
+.knowledge-detail-view--documents-tab .document-table-body {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.knowledge-detail-view--documents-tab .document-row {
+  padding: 9px 12px;
+}
+
+.knowledge-detail-view--documents-tab .documents-pagination {
+  flex-shrink: 0;
+  margin-top: 0;
+  padding-top: 6px;
+  gap: 10px 16px;
+}
+
+.documents-card--fresh-empty {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.documents-empty-wrap {
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.documents-empty-wrap :deep(.empty-state-card) {
+  width: min(100%, 440px);
+  margin: 0 auto;
+  padding: 28px 24px;
+  border-style: dashed;
+}
+
+.documents-empty-wrap :deep(.empty-state-copy p) {
+  max-width: 360px;
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+.kb-process-log {
+  gap: 20px;
+}
+
+.kb-log-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.kb-log-kpi-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 18px 16px;
+  border: 1px solid var(--border-color);
+  border-radius: 16px;
+  background: var(--bg-secondary);
+  box-shadow: var(--card-shadow-xs);
+}
+
+.kb-log-kpi-card--skeleton {
+  min-height: 88px;
+  background: linear-gradient(120deg, var(--bg-tertiary) 0%, rgba(148, 163, 184, 0.14) 50%, var(--bg-tertiary) 100%);
+}
+
+.kb-log-kpi-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
+  flex-shrink: 0;
+}
+
+.kb-log-kpi-icon.tone-blue {
+  background: color-mix(in srgb, #3b82f6 14%, var(--bg-tertiary));
+  color: #2563eb;
+}
+
+.kb-log-kpi-icon.tone-green {
+  background: color-mix(in srgb, #22c55e 14%, var(--bg-tertiary));
+  color: #16a34a;
+}
+
+.kb-log-kpi-icon.tone-teal {
+  background: color-mix(in srgb, #14b8a6 14%, var(--bg-tertiary));
+  color: #0d9488;
+}
+
+.kb-log-kpi-body {
+  min-width: 0;
+}
+
+.kb-log-kpi-value {
+  margin: 0;
+  font-size: 1.65rem;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--text-primary);
+}
+
+.kb-log-kpi-label {
+  margin: 4px 0 0;
+  color: var(--text-tertiary);
+  font-size: 0.84rem;
+}
+
+.kb-log-kpi-substats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+}
+
+.kb-log-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 4px;
+  border-radius: 999px;
+  vertical-align: middle;
+}
+
+.kb-log-dot--success {
+  background: #22c55e;
+}
+
+.kb-log-dot--failed {
+  background: #ef4444;
+}
+
+.kb-log-toolbar {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.kb-log-filter-select {
+  flex: 0 0 auto;
+  width: 132px;
+}
+
+.kb-log-search {
+  width: 320px;
+  max-width: 320px;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.kb-log-toolbar .btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.kb-log-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border-color);
+  border-radius: 16px;
+}
+
+.kb-log-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+
+.kb-log-table th,
+.kb-log-table td {
+  padding: 12px 14px;
+  text-align: left;
+  border-bottom: 1px solid var(--border-color);
+  vertical-align: top;
+}
+
+.kb-log-table th {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.kb-log-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.kb-log-action-cell {
+  display: grid;
+  gap: 4px;
+}
+
+.kb-log-summary {
+  color: var(--text-tertiary);
+  font-size: 0.8rem;
+}
+
+.kb-log-expand-row td {
+  background: var(--bg-tertiary);
+}
+
+.kb-log-item-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.kb-log-item-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.kb-log-item-name {
+  min-width: 0;
+  flex: 1 1 180px;
+}
+
+.kb-log-item-error {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+}
+
+.kb-log-expand-loading,
+.kb-log-expand-empty {
+  color: var(--text-tertiary);
+  font-size: 0.84rem;
+}
+
+.kb-log-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+@media (max-width: 960px) {
+  .kb-log-kpi-grid {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

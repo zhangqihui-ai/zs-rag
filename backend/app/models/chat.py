@@ -40,6 +40,7 @@ class ChatConversation(Base):
     show_citations: Mapped[bool] = mapped_column(default=True, nullable=False)
     retrieval_top_k: Mapped[int] = mapped_column(Integer, default=8, nullable=False)
     lightrag_query_mode: Mapped[str] = mapped_column(String(20), default="mix", nullable=False)
+    lightrag_chunk_top_k: Mapped[int | None] = mapped_column(Integer, nullable=True)
     temperature: Mapped[float] = mapped_column(Float, default=0.7, nullable=False)
     max_tokens: Mapped[int] = mapped_column(Integer, default=2000, nullable=False)
     top_p: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)

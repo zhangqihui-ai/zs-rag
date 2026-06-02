@@ -347,6 +347,10 @@
                           <span class="msg-citation-ref">{{ c.ref }}</span>
                           <span class="msg-citation-meta">
                             <span class="msg-citation-doc">{{ c.document_name }}</span>
+                            <span v-if="c.source === 'graph'" class="msg-citation-graph-badge">
+                              <AppIcon name="graph" :size="11" />
+                              图检索
+                            </span>
                             <span v-if="c.page_no != null" class="msg-citation-page">第 {{ c.page_no }} 页</span>
                             <span v-if="c.chunk_index != null" class="msg-citation-chunk"
                               >片段 #{{ c.chunk_index + 1 }}</span
@@ -757,14 +761,36 @@
               <select
                 class="select"
                 :value="activeConfig.lightrag_query_mode || 'mix'"
+                :title="LIGHTRAG_MODE_DESC[activeConfig.lightrag_query_mode || 'mix']"
                 @change="onLightragModeChange"
               >
-                <option value="mix">mix（推荐）</option>
-                <option value="naive">naive</option>
-                <option value="local">local</option>
-                <option value="global">global</option>
-                <option value="hybrid">hybrid</option>
+                <option value="mix" :title="LIGHTRAG_MODE_DESC.mix">mix（推荐）</option>
+                <option value="naive" :title="LIGHTRAG_MODE_DESC.naive">naive</option>
+                <option value="local" :title="LIGHTRAG_MODE_DESC.local">local</option>
+                <option value="global" :title="LIGHTRAG_MODE_DESC.global">global</option>
+                <option value="hybrid" :title="LIGHTRAG_MODE_DESC.hybrid">hybrid</option>
               </select>
+            </div>
+
+            <div v-if="activeConfig && hasLightragKbSelected" class="field chat-lightrag-chunk-field">
+              <span class="field-label chat-field-label-block">
+                图片段数（chunk_top_k）
+                <span class="chat-field-hint-wrap" tabindex="0" role="button" aria-label="图片段数说明">
+                  <span class="chat-topk-help">?</span>
+                </span>
+                <span class="chat-field-hint-tooltip" role="tooltip">{{ LIGHTRAG_CHUNK_TOP_K_HELP }}</span>
+              </span>
+              <input
+                v-model.number="chatChunkTopK"
+                class="input"
+                type="number"
+                min="1"
+                max="100"
+                placeholder="默认 20"
+                aria-label="图片段数"
+                @change="onChatChunkTopKCommit"
+                @blur="onChatChunkTopKCommit"
+              />
             </div>
 
             <div v-if="activeConfig" class="field chat-citation-toggle-field">
@@ -1062,7 +1088,7 @@
             </p>
             <div v-if="citationModalLoading" class="loading-inline">加载中…</div>
             <p v-else-if="citationModalError" class="status-box error citation-chunk-modal-err">{{ citationModalError }}</p>
-            <pre v-else-if="citationModalChunk" class="citation-chunk-modal-body">{{ citationModalChunk.content }}</pre>
+            <pre v-else-if="citationModalContent" class="citation-chunk-modal-body">{{ citationModalContent }}</pre>
           </div>
           <div class="modal-footer citation-chunk-modal-footer">
             <button
@@ -1100,12 +1126,12 @@
           </div>
           <div class="modal-body">
             <div class="field">
-              <label class="field-label">请输入新对话名称</label>
+              <label class="field-label">请输入聊天助手名称</label>
               <input 
                 v-model="newChatTitle" 
                 type="text" 
                 class="input" 
-                placeholder="例如：关于XX的讨论" 
+                placeholder="例如：智能对话助手" 
                 @keyup.enter="handleCreate"
                 ref="createInputRef"
               />
@@ -1804,15 +1830,35 @@ function normalizeCitations(raw: unknown): ChatCitation[] | undefined {
     if (!Number.isFinite(ref)) {
       continue
     }
+    const rawChunkId = r.chunk_id
+    let chunk_id: number | string | undefined
+    if (typeof rawChunkId === 'number' && Number.isFinite(rawChunkId)) {
+      chunk_id = rawChunkId
+    } else if (typeof rawChunkId === 'string' && rawChunkId.trim()) {
+      const asNum = Number(rawChunkId)
+      chunk_id = Number.isFinite(asNum) && String(asNum) === rawChunkId.trim() ? asNum : rawChunkId.trim()
+    }
+    const rawSource = r.source
+    const source =
+      typeof rawSource === 'string' && rawSource.trim() ? rawSource.trim() : undefined
+    const rawContent = r.content
+    const content =
+      rawContent == null || rawContent === ''
+        ? null
+        : typeof rawContent === 'string'
+          ? rawContent
+          : String(rawContent)
     out.push({
       ref,
       document_name: String(r.document_name ?? ''),
       page_no: r.page_no == null ? null : Number(r.page_no),
       knowledge_base_id: r.knowledge_base_id != null ? Number(r.knowledge_base_id) : undefined,
-      chunk_id: r.chunk_id != null ? Number(r.chunk_id) : undefined,
+      chunk_id,
       document_id: r.document_id != null ? Number(r.document_id) : undefined,
       chunk_index: r.chunk_index != null ? Number(r.chunk_index) : undefined,
       score: r.score != null ? Number(r.score) : undefined,
+      source,
+      content,
     })
   }
   return out.length ? out : undefined
@@ -1880,6 +1926,7 @@ const isEmbedPanelMode = computed(() => {
 const citationModalOpen = ref(false)
 const citationModalCitation = ref<ChatCitation | null>(null)
 const citationModalChunk = ref<KnowledgeChunk | null>(null)
+const citationModalContent = ref('')
 const citationModalLoading = ref(false)
 const citationModalError = ref('')
 
@@ -1895,6 +1942,7 @@ function closeCitationModal() {
   citationModalOpen.value = false
   citationModalCitation.value = null
   citationModalChunk.value = null
+  citationModalContent.value = ''
   citationModalError.value = ''
   citationModalLoading.value = false
 }
@@ -1902,8 +1950,18 @@ function closeCitationModal() {
 async function openCitationDetail(c: ChatCitation) {
   citationModalCitation.value = c
   citationModalChunk.value = null
+  citationModalContent.value = ''
   citationModalError.value = ''
   citationModalOpen.value = true
+  // 图谱库引用：chunk_id 为 LightRAG 内部 ID，无法 getChunk，直接展示随附正文
+  if (c.source === 'graph' || (typeof c.chunk_id !== 'number' && c.content != null)) {
+    if (c.content != null && String(c.content).trim()) {
+      citationModalContent.value = String(c.content)
+    } else {
+      citationModalError.value = '该图谱引用未携带正文，请点击「打开文档原文」查看。'
+    }
+    return
+  }
   const kbId = resolveCitationKbId(c)
   const chunkId = c.chunk_id
   if (kbId == null || chunkId == null) {
@@ -1915,7 +1973,9 @@ async function openCitationDetail(c: ChatCitation) {
   }
   citationModalLoading.value = true
   try {
-    citationModalChunk.value = await knowledgeBaseApi.getChunk(kbId, chunkId)
+    const chunk = await knowledgeBaseApi.getChunk(kbId, chunkId)
+    citationModalChunk.value = chunk
+    citationModalContent.value = chunk.content
   } catch (e) {
     console.error(e)
     citationModalError.value = '加载切片正文失败，请稍后重试。'
@@ -2508,6 +2568,17 @@ const SYSTEM_PROMPT_HELP =
 const LIGHTRAG_MODE_HELP =
   '图知识库（LightRAG）的检索策略：mix 综合多种图检索；naive 简单向量；local 侧重实体邻域；global 侧重全局关系；hybrid 混合 local 与 global。'
 
+const LIGHTRAG_MODE_DESC: Record<'naive' | 'local' | 'global' | 'hybrid' | 'mix', string> = {
+  mix: 'mix（推荐）：综合知识图谱与向量检索，覆盖最全面，既能利用实体/关系，也能召回原文片段，适合大多数场景。',
+  naive: 'naive：基础向量相似度检索，不使用图谱结构，等同于普通 RAG，速度快但缺少关系推理。',
+  local: 'local：侧重实体的邻域（局部子图），适合针对某个具体实体、细节或定义的问题。',
+  global: 'global：侧重全局关系与主题脉络，适合概览、归纳、跨文档关联类的问题。',
+  hybrid: 'hybrid：同时执行 local 与 global 并融合结果，兼顾细节与全局，但不含 mix 的向量片段召回。',
+}
+
+const LIGHTRAG_CHUNK_TOP_K_HELP =
+  '图知识库向量侧召回的文档片段数（chunk_top_k），与上方 Top K（控制实体/关系）相互独立。留空则沿用 LightRAG 默认值 20。'
+
 const DEFAULT_OPENING_GREETING = '你好，我是你的智能助手，有什么需要帮助的吗？'
 
 const OPENING_GREETING_HELP =
@@ -2616,6 +2687,17 @@ watch(
       return
     }
     chatTopK.value = clampChatRetrievalTopK(v ?? DEFAULT_CHAT_TOP_K)
+  },
+  { immediate: true },
+)
+
+// 图知识库片段数（chunk_top_k）：null/空表示沿用 LightRAG 默认（20）
+const chatChunkTopK = ref<number | null>(null)
+
+watch(
+  () => activeConfig.value?.lightrag_chunk_top_k,
+  (v) => {
+    chatChunkTopK.value = typeof v === 'number' && v > 0 ? v : null
   },
   { immediate: true },
 )
@@ -3817,6 +3899,24 @@ const updateConfig = async (key: string, value: any) => {
       await chatStore.updateConfiguration({ [key]: value })
     }
   }
+}
+
+function onChatChunkTopKCommit() {
+  if (!activeConfig.value) return
+  const raw = chatChunkTopK.value
+  const next =
+    typeof raw === 'number' && Number.isFinite(raw) && raw > 0
+      ? Math.min(100, Math.max(1, Math.round(raw)))
+      : null
+  chatChunkTopK.value = next
+  const prev =
+    typeof activeConfig.value.lightrag_chunk_top_k === 'number' && activeConfig.value.lightrag_chunk_top_k > 0
+      ? activeConfig.value.lightrag_chunk_top_k
+      : null
+  if (next === prev) {
+    return
+  }
+  void updateConfig('lightrag_chunk_top_k', next)
 }
 
 function onChatTopKCommit() {
@@ -6153,13 +6253,13 @@ function onChatTopKCommit() {
   box-sizing: border-box;
 }
 
+/* 下拉浮层已 Teleport 到 body（fixed 定位），不再需要放开容器 overflow，
+   否则会把可滚动的设置面板内容整段铺开。保持 overflow-y:auto 即可。 */
 .chat-settings-panel.chat-settings-panel--kb-open {
-  overflow: visible;
   z-index: 12;
 }
 
 .chat-settings-panel:has(.kb-select--open) {
-  overflow: visible;
   z-index: 8;
 }
 
@@ -6561,6 +6661,20 @@ function onChatTopKCommit() {
   color: var(--text-secondary);
 }
 
+.msg-citation-graph-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.5;
+  color: #7c3aed;
+  background: rgba(168, 85, 247, 0.12);
+  border: 1px solid rgba(168, 85, 247, 0.32);
+}
+
 .citation-chunk-modal {
   max-width: 640px;
   width: min(96vw, 640px);
@@ -6871,6 +6985,14 @@ function onChatTopKCommit() {
 
 .modal-header--embed .btn {
   margin-top: 2px;
+}
+
+.modal-content > .modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
 }
 
 .modal-header h3 {

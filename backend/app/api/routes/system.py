@@ -7,8 +7,8 @@ from app.core.config import get_settings
 from app.core.enterprise_space_context import RequireSystemAdmin
 from app.core.errors import AppError
 from app.db.session import engine
-from app.schemas.system_components import ServiceComponentsStatusResponse
-from app.services.system_component_service import collect_status
+from app.schemas.system_components import ComponentStatus, ServiceComponentsStatusResponse
+from app.services.system_component_service import _probe_odl_hybrid, collect_status
 
 router = APIRouter(tags=["system"])
 
@@ -35,10 +35,17 @@ def healthcheck() -> dict[str, str]:
 def parser_capabilities() -> dict[str, dict[str, object]]:
     settings = get_settings()
     formats = sorted(settings.mineru_format_set)
+    # 探测 odl-hybrid sidecar 实时可用性，供前端决定是否允许勾选 Hybrid 模式
+    hybrid_status, hybrid_message, _ = _probe_odl_hybrid(settings)
+    hybrid_available = hybrid_status == ComponentStatus.alive
     return {
         "mineru": {
             "enabled": settings.mineru_enabled,
             "formats": formats,
+        },
+        "opendataloader": {
+            "hybrid_available": hybrid_available,
+            "hybrid_message": hybrid_message,
         },
     }
 

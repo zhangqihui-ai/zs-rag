@@ -30,41 +30,51 @@
       <AppIcon name="chevron-down" :size="16" class="kb-select-chevron" :class="{ 'is-open': open }" />
     </button>
 
-    <div v-if="open" class="kb-select-panel" role="listbox" aria-multiselectable="true" @click.stop>
-      <div class="kb-select-search">
-        <AppIcon name="search" :size="16" class="kb-select-search-icon" />
-        <input
-          v-model="searchQuery"
-          type="search"
-          class="input kb-select-search-input"
-          placeholder="搜索…"
-          aria-label="搜索知识库"
-          @keydown.escape.stop="closeWithoutSave"
-        />
+    <Teleport to="body">
+      <div
+        v-if="open"
+        ref="panelEl"
+        class="kb-select-panel"
+        :style="panelStyle"
+        role="listbox"
+        aria-multiselectable="true"
+        @click.stop
+      >
+        <div class="kb-select-search">
+          <AppIcon name="search" :size="16" class="kb-select-search-icon" />
+          <input
+            v-model="searchQuery"
+            type="search"
+            class="input kb-select-search-input"
+            placeholder="搜索…"
+            aria-label="搜索知识库"
+            @keydown.escape.stop="closeWithoutSave"
+          />
+        </div>
+        <div class="kb-select-list scrollbar-pill">
+          <label
+            v-for="kb in filteredKbs"
+            :key="kb.id"
+            class="kb-select-row"
+            :class="{ 'is-checked': isSelected(kb.id) }"
+          >
+            <input type="checkbox" class="kb-select-check" :checked="isSelected(kb.id)" @change="toggleKb(kb.id)" />
+            <span class="kb-row-dot" :style="{ background: kbAvatarColor(kb.id) }" aria-hidden="true">{{
+              kbInitial(kb)
+            }}</span>
+            <span class="kb-row-text">
+              <span class="kb-row-name">{{ kb.name }}</span>
+              <span class="kb-row-embed" :title="embeddingLabelTitleForKb(kb)">{{ embeddingLabelForKb(kb) }}</span>
+            </span>
+          </label>
+          <div v-if="filteredKbs.length === 0" class="kb-select-empty">无匹配知识库</div>
+        </div>
+        <div class="kb-select-footer">
+          <button type="button" class="btn-text-inline" @click="clearDraft">清除</button>
+          <button type="button" class="btn-text-inline btn-text-inline--primary" @click.stop="saveAndClose">保存</button>
+        </div>
       </div>
-      <div class="kb-select-list scrollbar-pill">
-        <label
-          v-for="kb in filteredKbs"
-          :key="kb.id"
-          class="kb-select-row"
-          :class="{ 'is-checked': isSelected(kb.id) }"
-        >
-          <input type="checkbox" class="kb-select-check" :checked="isSelected(kb.id)" @change="toggleKb(kb.id)" />
-          <span class="kb-row-dot" :style="{ background: kbAvatarColor(kb.id) }" aria-hidden="true">{{
-            kbInitial(kb)
-          }}</span>
-          <span class="kb-row-text">
-            <span class="kb-row-name">{{ kb.name }}</span>
-            <span class="kb-row-embed" :title="embeddingLabelTitleForKb(kb)">{{ embeddingLabelForKb(kb) }}</span>
-          </span>
-        </label>
-        <div v-if="filteredKbs.length === 0" class="kb-select-empty">无匹配知识库</div>
-      </div>
-      <div class="kb-select-footer">
-        <button type="button" class="btn-text-inline" @click="clearDraft">清除</button>
-        <button type="button" class="btn-text-inline btn-text-inline--primary" @click.stop="saveAndClose">保存</button>
-      </div>
-    </div>
+    </Teleport>
   </div>
 </template>
 
@@ -98,9 +108,39 @@ const emit = defineEmits<{
 const open = defineModel<boolean>('open', { default: false })
 
 const rootEl = ref<HTMLElement | null>(null)
+const panelEl = ref<HTMLElement | null>(null)
+/** Teleport 到 body 的 fixed 浮层定位样式，避免被祖先 overflow 裁切 */
+const panelStyle = ref<Record<string, string>>({})
 /** 下拉内勾选仅改草稿，点「保存」再写回 modelValue */
 const draftIds = ref<number[]>([])
 const searchQuery = ref('')
+
+function updatePanelPosition() {
+  const trigger = rootEl.value
+  if (!trigger) {
+    return
+  }
+  const rect = trigger.getBoundingClientRect()
+  const gap = 6
+  const spaceBelow = window.innerHeight - rect.bottom - 12
+  const spaceAbove = rect.top - 12
+  const openBelow = spaceBelow >= 240 || spaceBelow >= spaceAbove
+  const maxHeight = Math.max(180, Math.min(360, openBelow ? spaceBelow : spaceAbove))
+  const style: Record<string, string> = {
+    position: 'fixed',
+    left: `${Math.round(rect.left)}px`,
+    width: `${Math.round(rect.width)}px`,
+    right: 'auto',
+    maxHeight: `${Math.round(maxHeight)}px`,
+    zIndex: '1000',
+  }
+  if (openBelow) {
+    style.top = `${Math.round(rect.bottom + gap)}px`
+  } else {
+    style.top = `${Math.round(rect.top - gap - maxHeight)}px`
+  }
+  panelStyle.value = style
+}
 const internalEmbeddingModels = ref<ModelItem[]>([])
 const internalEmbeddingDefault = ref<DefaultModelOption | null>(null)
 
@@ -242,30 +282,43 @@ function toggleOpen() {
 }
 
 function onDocumentClick(ev: MouseEvent) {
-  if (!open.value || !rootEl.value) {
+  if (!open.value) {
     return
   }
   const t = ev.target as Node | null
-  if (t && rootEl.value.contains(t)) {
+  if (t && (rootEl.value?.contains(t) || panelEl.value?.contains(t))) {
     return
   }
   saveAndClose()
+}
+
+function onReposition() {
+  if (open.value) {
+    updatePanelPosition()
+  }
 }
 
 watch(open, (v) => {
   if (v) {
     draftIds.value = [...props.modelValue]
     void nextTick(() => {
+      updatePanelPosition()
       document.addEventListener('click', onDocumentClick)
+      window.addEventListener('resize', onReposition)
+      window.addEventListener('scroll', onReposition, true)
     })
   } else {
     document.removeEventListener('click', onDocumentClick)
+    window.removeEventListener('resize', onReposition)
+    window.removeEventListener('scroll', onReposition, true)
     searchQuery.value = ''
   }
 })
 
 onBeforeUnmount(() => {
   document.removeEventListener('click', onDocumentClick)
+  window.removeEventListener('resize', onReposition)
+  window.removeEventListener('scroll', onReposition, true)
 })
 
 onMounted(async () => {
@@ -415,10 +468,7 @@ onMounted(async () => {
 }
 
 .kb-select-panel {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: calc(100% + 6px);
+  position: fixed;
   display: flex;
   flex-direction: column;
   max-height: min(360px, 52vh);

@@ -147,6 +147,11 @@ services:
       APP_HOST: 0.0.0.0
       APP_PORT: 8000
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-zs_rag}
+      # 解析并发上限（超出排队）；DB 连接池需 >= 并发并留余量给普通接口
+      DOC_PARSE_MAX_CONCURRENCY: ${DOC_PARSE_MAX_CONCURRENCY:-3}
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
+      DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-20}
+      DB_POOL_TIMEOUT: ${DB_POOL_TIMEOUT:-30}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
       CORS_ALLOW_LAN_REGEX: ${CORS_ALLOW_LAN_REGEX:-true}
       REQUEST_ID_HEADER: X-Request-ID
@@ -176,6 +181,9 @@ services:
       ODL_TIMEOUT: ${ODL_TIMEOUT:-120}
     ports:
       - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      # 原始文档与解析产物持久化（storage_type=local）；缺此卷则容器重建会丢失已上传文件
+      - backend_storage:/app/storage
     depends_on:
       postgres:
         condition: service_healthy
@@ -276,6 +284,7 @@ volumes:
   milvus_data:
   neo4j_data:
   opensearch_data:
+  backend_storage:
   mineru_models:
   mineru_models_gpu:
 

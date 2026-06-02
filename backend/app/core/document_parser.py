@@ -1238,6 +1238,7 @@ def _parse_docx(file_bytes: bytes) -> ParsedDocument:
         char_count=len(full_text),
         segments=segments,
         metadata={
+            "parser_backend": "python-docx",
             "paragraph_and_table_blocks": len(segments),
             "heading_count": heading_count,
             "table_count": table_count,
@@ -1611,6 +1612,91 @@ def _metadata_log_preview(metadata: dict | None, *, max_len: int = 800) -> str:
     return preview
 
 
+def _parse_html_word_doc(file_bytes: bytes, *, file_name: str, log: Callable[[str], None] | None = None) -> ParsedDocument:
+    """Parse Word-exported HTML saved with a .doc extension (fallback when LO convert fails)."""
+
+    def _log(msg: str) -> None:
+        if log:
+            log(msg)
+
+    from html.parser import HTMLParser
+
+    class _TextExtractor(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self._parts: list[str] = []
+            self._skip_depth = 0
+
+        def handle_starttag(self, tag: str, attrs) -> None:
+            if tag.lower() in {"script", "style"}:
+                self._skip_depth += 1
+
+        def handle_endtag(self, tag: str) -> None:
+            if tag.lower() in {"script", "style"} and self._skip_depth:
+                self._skip_depth -= 1
+
+        def handle_data(self, data: str) -> None:
+            if self._skip_depth:
+                return
+            text = html_module.unescape(data.strip())
+            if text:
+                self._parts.append(text)
+
+    charset = "utf-8"
+    head_sample = file_bytes[:4096].decode("latin-1", errors="ignore").lower()
+    charset_match = re.search(r'charset\s*=\s*["\']?([\w-]+)', head_sample)
+    if charset_match:
+        charset = charset_match.group(1)
+    try:
+        html_text = file_bytes.decode(charset)
+    except (LookupError, UnicodeDecodeError):
+        for encoding in ("gb18030", "gbk", "utf-8", "latin-1"):
+            try:
+                html_text = file_bytes.decode(encoding)
+                break
+            except UnicodeDecodeError:
+                html_text = ""
+        else:
+            html_text = file_bytes.decode("utf-8", errors="ignore")
+
+    parser = _TextExtractor()
+    parser.feed(html_text)
+    body_text = "\n".join(parser._parts).strip()
+    if not body_text:
+        raise UnsupportedDocumentError(
+            "该 .doc 为 HTML 网页格式，但未能提取正文。请用 Word/WPS 打开后另存为 .docx 再上传。"
+        )
+
+    _log(f"HTML 型 .doc：提取正文 {len(body_text)} 字符")
+    segments: list[ParsedSegment] = []
+    offset = 0
+    for idx, block in enumerate(part for part in body_text.splitlines() if part.strip()):
+        start = offset
+        end = start + len(block)
+        segments.append(
+            ParsedSegment(
+                text=block,
+                start_offset=start,
+                end_offset=end,
+                metadata={"block_index": idx, "source_format": "doc_html"},
+            )
+        )
+        offset = end + 1
+
+    return ParsedDocument(
+        parser_type="doc",
+        text=body_text,
+        char_count=len(body_text),
+        segments=segments,
+        metadata={
+            "source_format": "doc",
+            "converted_via": "html_text_extract",
+            "parser_backend": "native",
+            "original_file_name": file_name,
+        },
+    )
+
+
 def parse_document(
     file_name: str,
     file_bytes: bytes,
@@ -1641,9 +1727,46 @@ def parse_document(
     _log(f"开始解析「{file_name}」，扩展名 .{suffix or '（无）'}，大小 {len(file_bytes)} 字节")
 
     if suffix == "doc":
-        raise UnsupportedDocumentError(
-            "暂不支持旧版 Word（.doc）。请在 Word 中将文件「另存为」.docx 后再上传。"
-        )
+        from app.core.doc_conversion import convert_doc_to_docx_bytes, detect_doc_container
+
+        container = detect_doc_container(file_bytes)
+        if container == "html":
+            _log("检测到 HTML 型 .doc（Word 网页导出），正在转换为 docx…")
+        else:
+            _log("检测到旧版 Word（.doc），正在转换为 .docx…")
+        try:
+            docx_bytes = convert_doc_to_docx_bytes(file_bytes, source_name=file_name, log=_log)
+        except UnsupportedDocumentError:
+            if container == "html":
+                _log("LibreOffice 转换失败，改用 HTML 正文提取…")
+                return _parse_html_word_doc(file_bytes, file_name=file_name, log=log)
+            raise
+        _log(f".doc 已转换，继续按 docx 解析（引擎={opts.docx_engine}）…")
+        if opts.docx_engine == "mineru":
+            docx_name = file_name.rsplit(".", 1)[0] + ".docx" if "." in file_name else f"{file_name}.docx"
+            doc = _parse_with_mineru(
+                docx_bytes,
+                suffix="docx",
+                file_name=docx_name,
+                parser_type="docx",
+                log=log,
+                require_format_whitelist=False,
+            )
+        else:
+            _log(f"使用 {opts.docx_engine} 解析 docx…")
+            doc = _parse_docx(docx_bytes)
+            _log(f"docx：字符数 {doc.char_count}，分段 {len(doc.segments)}")
+        meta = dict(doc.metadata or {})
+        meta["source_format"] = "doc"
+        if meta.get("converted_via") is None:
+            meta["converted_via"] = "libreoffice"
+        if opts.docx_engine == "mineru":
+            meta["parser_backend"] = "mineru"
+        elif not meta.get("parser_backend"):
+            meta["parser_backend"] = opts.docx_engine or "python-docx"
+        doc.metadata = meta
+        doc.parser_type = "doc"
+        return doc
 
     if suffix == "docx":
         if opts.docx_engine == "mineru":

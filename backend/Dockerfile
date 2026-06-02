@@ -24,8 +24,16 @@ RUN set -eux; \
     gcc \
     libpq-dev \
     default-jre-headless \
+    libreoffice-writer-nogui \
+    libreoffice-java-common \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# javaldx 需要能找到 JVM（与 OpenDataLoader / PDF 解析共用）
+RUN mkdir -p /usr/lib/jvm \
+    && if [ -d /usr/lib/jvm/default-java ]; then true; \
+    elif [ -d /opt/java/bin ]; then ln -sfn /opt/java /usr/lib/jvm/default-java; \
+    fi
 
 # Copy and install Python dependencies
 COPY requirements.txt .
@@ -58,7 +66,9 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload
 FROM base AS production
 
 # Create non-root user for security
+# 预建 /app/storage 并归属 appuser：挂载空命名卷时 Docker 会继承该目录属主，避免 PermissionError
 RUN useradd --create-home --shell /bin/bash appuser && \
+    mkdir -p /app/storage && \
     chown -R appuser:appuser /app
 USER appuser
 

@@ -18,6 +18,18 @@
           <h3>知识库管理</h3>
         </div>
         <div class="toolbar-row">
+          <div class="kb-search">
+            <AppIcon name="search" :size="15" />
+            <input
+              v-model.trim="searchTerm"
+              class="kb-search-input"
+              type="text"
+              placeholder="搜索知识库名称 / 描述"
+            />
+            <button v-if="searchTerm" class="kb-search-clear" type="button" aria-label="清除" @click="searchTerm = ''">
+              <AppIcon name="close" :size="14" />
+            </button>
+          </div>
           <button class="btn btn-secondary" type="button" :disabled="loading" @click="refreshKnowledgeBases">
             <AppIcon name="refresh" :size="16" />
             刷新
@@ -53,9 +65,13 @@
       </EmptyState>
 
       <section v-else class="kb-grid-panel">
-        <div class="kb-grid">
+        <div v-if="filteredKnowledgeBases.length === 0" class="surface-card kb-no-result">
+          <AppIcon name="search" :size="18" />
+          <p>未找到匹配“{{ searchTerm }}”的知识库</p>
+        </div>
+        <div v-else class="kb-grid">
           <article
-            v-for="kb in knowledgeBases"
+            v-for="kb in pagedKnowledgeBases"
             :key="kb.id"
             class="kb-tile"
             role="button"
@@ -104,6 +120,27 @@
               <span class="kb-tile-date">{{ formatDate(kb.created_at) }}</span>
             </div>
           </article>
+        </div>
+
+        <div v-if="filteredKnowledgeBases.length > 0" class="kb-pagination">
+          <span class="kb-pagination-info">共 {{ filteredKnowledgeBases.length }} 个知识库</span>
+          <div class="kb-pagination-controls">
+            <label class="kb-page-size">
+              每页
+              <select v-model.number="pageSize" class="select">
+                <option :value="12">12</option>
+                <option :value="24">24</option>
+                <option :value="48">48</option>
+              </select>
+            </label>
+            <button class="btn btn-ghost btn-sm" type="button" :disabled="currentPage <= 1" @click="currentPage -= 1">
+              上一页
+            </button>
+            <span class="kb-pagination-page">{{ currentPage }} / {{ totalPages }}</span>
+            <button class="btn btn-ghost btn-sm" type="button" :disabled="currentPage >= totalPages" @click="currentPage += 1">
+              下一页
+            </button>
+          </div>
         </div>
       </section>
 
@@ -223,7 +260,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { getKnowledgeBaseErrorMessage, knowledgeBaseApi, type KnowledgeBase, type KnowledgeBasePayload } from '../api/knowledge-base'
@@ -241,6 +278,39 @@ const statusLabelMap: Record<string, string> = {
 const router = useRouter()
 
 const knowledgeBases = ref<KnowledgeBase[]>([])
+const searchTerm = ref('')
+const currentPage = ref(1)
+const pageSize = ref(12)
+
+const filteredKnowledgeBases = computed(() => {
+  const term = searchTerm.value.trim().toLowerCase()
+  if (!term) {
+    return knowledgeBases.value
+  }
+  return knowledgeBases.value.filter((kb) => {
+    const name = (kb.name || '').toLowerCase()
+    const desc = (kb.description || '').toLowerCase()
+    return name.includes(term) || desc.includes(term)
+  })
+})
+
+const totalPages = computed(() => Math.max(1, Math.ceil(filteredKnowledgeBases.value.length / pageSize.value)))
+
+const pagedKnowledgeBases = computed(() => {
+  const start = (currentPage.value - 1) * pageSize.value
+  return filteredKnowledgeBases.value.slice(start, start + pageSize.value)
+})
+
+watch([searchTerm, pageSize], () => {
+  currentPage.value = 1
+})
+
+watch([totalPages, currentPage], () => {
+  if (currentPage.value > totalPages.value) {
+    currentPage.value = totalPages.value
+  }
+})
+
 const embeddingModels = ref<ModelItem[]>([])
 const embeddingDefault = ref<DefaultModelOption | null>(null)
 const loading = ref(true)
@@ -689,6 +759,104 @@ onBeforeUnmount(() => {
 
 .panel-skeleton {
   min-height: 360px;
+}
+
+.kb-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--bg-secondary);
+  color: var(--text-tertiary);
+  min-width: 220px;
+}
+
+.kb-search:focus-within {
+  border-color: var(--brand-primary);
+}
+
+.kb-search-input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  outline: none;
+  color: var(--text-primary);
+  font-size: 0.88rem;
+}
+
+.kb-search-clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  padding: 2px;
+}
+
+.kb-no-result {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 40px;
+  color: var(--text-secondary);
+}
+
+.kb-no-result p {
+  margin: 0;
+}
+
+.kb-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 18px;
+  flex-wrap: wrap;
+}
+
+.kb-pagination-info {
+  color: var(--text-tertiary);
+  font-size: 0.85rem;
+}
+
+.kb-pagination-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.kb-page-size {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-tertiary);
+  font-size: 0.85rem;
+}
+
+.kb-page-size .select {
+  height: 32px;
+  padding: 0 6px;
+  border-radius: 8px;
+}
+
+.kb-pagination-page {
+  color: var(--text-secondary);
+  font-size: 0.88rem;
+  min-width: 56px;
+  text-align: center;
+}
+
+.btn-sm {
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: 10px;
+  font-size: 0.85rem;
 }
 
 .kb-grid-panel {

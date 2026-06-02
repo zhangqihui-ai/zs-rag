@@ -113,6 +113,7 @@
           'app-content--chat': isChatRoute,
           'app-content--chat-embed-panel': isChatEmbedPanel,
           'app-content--flush': isFillPage,
+          'app-content--flush-kb-detail': isFillPage && route.name === 'knowledge-base-detail',
         }"
       >
         <div
@@ -135,7 +136,12 @@ import { useRoute, useRouter } from 'vue-router'
 
 import { useAppStore } from '../stores/app'
 import { useAuthStore } from '../stores/auth'
-import { layoutBreadcrumbTailOverride, layoutChatHomeHandler, layoutPageTitleOverride } from '../composables/useLayoutPageContext'
+import {
+  layoutBreadcrumbTailOverride,
+  layoutChatHomeHandler,
+  layoutFillPageOverride,
+  layoutPageTitleOverride,
+} from '../composables/useLayoutPageContext'
 import AppIcon from './AppIcon.vue'
 import SpaceSelector from './SpaceSelector.vue'
 
@@ -205,7 +211,9 @@ const breadcrumbs = computed(() => {
 const userInitial = computed(() => (authStore.currentUser?.username || 'U').charAt(0).toUpperCase())
 const isChatRoute = computed(() => route.name === 'chat')
 /** 铺满型页面：内容区收小上下留白，便于子内容撑满一屏 */
-const isFillPage = computed(() => route.name === 'knowledge-document-detail')
+const isFillPage = computed(
+  () => route.name === 'knowledge-document-detail' || layoutFillPageOverride.value === true,
+)
 /** iframe 嵌入：仅保留对话主区域，隐藏侧栏与顶栏 */
 const isChatEmbedPanel = computed(() => {
   if (route.name !== 'chat') return false
@@ -618,6 +626,11 @@ button.app-breadcrumb-link {
   overflow: hidden;
   padding-top: 18px;
   padding-bottom: 18px;
+}
+
+.app-content.app-content--flush-kb-detail {
+  padding-top: 8px;
+  padding-bottom: 10px;
 }
 
 .app-content-inner {

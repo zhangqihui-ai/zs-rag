@@ -156,6 +156,11 @@ services:
       APP_HOST: 0.0.0.0
       APP_PORT: 8000
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-zs_rag}
+      # 解析并发上限（超出排队）；DB 连接池需 >= 并发并留余量给普通接口
+      DOC_PARSE_MAX_CONCURRENCY: ${DOC_PARSE_MAX_CONCURRENCY:-3}
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
+      DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-20}
+      DB_POOL_TIMEOUT: ${DB_POOL_TIMEOUT:-30}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://192.168.11.19,http://192.168.11.19:80,http://192.168.11.19:5173}
       REQUEST_ID_HEADER: X-Request-ID
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}

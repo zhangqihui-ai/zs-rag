@@ -38,6 +38,11 @@ cd backend
    ./scripts/download_offline_jre.sh
    或随 download_offline_wheels.sh 一并下载（默认会自动拉 JRE）。
 
+   支持 .doc 上传时，还需 offline_deps/apt/*.deb（LibreOffice，约 200MB+）：
+   ./scripts/download_offline_apt.sh
+   # 国内镜像加速示例：
+   APT_MIRROR=http://mirrors.aliyun.com/debian ./scripts/download_offline_apt.sh
+
 4. 构建镜像（离线，无需 apt 外网；**Docker build context 必须是 backend 目录**）：
 
    # 在仓库根目录：

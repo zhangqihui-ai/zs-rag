@@ -37,6 +37,9 @@ class KnowledgeDocumentResponse(BaseModel):
     error_message: str | None
     metadata: dict | None = None
     chunking_config: dict | None = None
+    upload_skipped: bool = False
+    skip_reason: str | None = None
+    last_parsed_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -93,11 +96,18 @@ class KnowledgeDocumentChunkingPreviewResponse(BaseModel):
     )
 
 
+class DocumentFileExtOption(BaseModel):
+    value: str
+    label: str
+    count: int
+
+
 class KnowledgeDocumentListResponse(BaseModel):
     items: list[KnowledgeDocumentResponse]
     total: int
     page: int
     page_size: int
+    file_ext_options: list[DocumentFileExtOption] = Field(default_factory=list)
 
 
 class KnowledgeChunkResponse(BaseModel):

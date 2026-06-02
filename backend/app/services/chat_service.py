@@ -292,6 +292,7 @@ def _retrieve_for_user_turn(
         query=retrieval_query,
         merge_top_k=_merge_top_k_for_conversation(conv),
         lightrag_query_mode=str(getattr(conv, "lightrag_query_mode", None) or "mix"),
+        lightrag_chunk_top_k=_clamp_chunk_top_k(getattr(conv, "lightrag_chunk_top_k", None)),
     )
     empty_reply = _empty_response_if_configured(conv, kb_block=kb_block)
     if empty_reply is None and kb_block:
@@ -306,6 +307,16 @@ def _clamp_retrieval_top_k(raw: Any) -> int:
         return max(1, min(50, int(raw)))
     except (TypeError, ValueError):
         return DEFAULT_TOP_K
+
+
+def _clamp_chunk_top_k(raw: Any) -> int | None:
+    """图知识库片段数（chunk_top_k）；为空表示沿用 LightRAG 默认。"""
+    if raw is None or raw == "":
+        return None
+    try:
+        return max(1, min(100, int(raw)))
+    except (TypeError, ValueError):
+        return None
 
 
 def _default_top_k_for_kb_ids(db: Session, *, enterprise_space_id: int, kb_ids: list[int]) -> int:
@@ -337,6 +348,7 @@ def _retrieve_knowledge_block_and_citations(
     query: str,
     merge_top_k: int = 8,
     lightrag_query_mode: str = "mix",
+    lightrag_chunk_top_k: int | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     q = (query or "").strip()
     ids = [int(x) for x in knowledge_base_ids if x is not None]
@@ -414,6 +426,7 @@ def _retrieve_knowledge_block_and_citations(
                         "chunk_index": item.get("chunk_index"),
                         "knowledge_base_id": int(src_kb_id),
                         "score": round(float(item.get("score") or 0), 4),
+                        "source": "vector",
                     }
                 )
         except AppError:
@@ -430,20 +443,31 @@ def _retrieve_knowledge_block_and_citations(
                 query=q[:2000],
                 mode=mode,
                 top_k=per_kb_top_k,
+                chunk_top_k=lightrag_chunk_top_k,
                 include_references=True,
             )
         except AppError:
             continue
+        # 图谱库内部引用从 1 起编号；统一加上当前已有的 ref 偏移，避免与经典库/其它库撞号。
+        base = ref
         block = str(graph_data.get("answer_context") or "").strip()
         if block:
+            # 同步偏移块内 "[n] 《" 角标，使正文角标与全局连续编号一一对应。
+            block = re.sub(
+                r"\[(\d+)\]\s*《",
+                lambda m: f"[{int(m.group(1)) + base}] 《",
+                block,
+            )
             parts.append(block)
         for cite in graph_data.get("citations") or []:
             if not isinstance(cite, dict):
                 continue
-            ref = int(cite.get("ref") or ref + 1)
+            local = cite.get("ref")
+            new_ref = base + int(local) if local is not None else ref + 1
+            ref = max(ref, new_ref)
             citations.append(
                 {
-                    "ref": ref,
+                    "ref": new_ref,
                     "document_name": cite.get("document_name"),
                     "page_no": None,
                     "chunk_id": cite.get("chunk_id"),
@@ -451,6 +475,9 @@ def _retrieve_knowledge_block_and_citations(
                     "chunk_index": None,
                     "knowledge_base_id": kb_id,
                     "score": None,
+                    "source": "graph",
+                    # 图谱库切片正文随引用下发，前端直接展示（无法用 getChunk）
+                    "content": cite.get("content"),
                 }
             )
 
@@ -545,6 +572,7 @@ def _config_response(conv: ChatConversation) -> ChatConfigurationResponse:
         show_citations=bool(getattr(conv, "show_citations", True)),
         retrieval_top_k=_merge_top_k_for_conversation(conv),
         lightrag_query_mode=str(getattr(conv, "lightrag_query_mode", None) or "mix"),
+        lightrag_chunk_top_k=getattr(conv, "lightrag_chunk_top_k", None),
         temperature=float(conv.temperature),
         max_tokens=int(conv.max_tokens),
         top_p=float(conv.top_p),
@@ -824,6 +852,7 @@ def create_chat_conversation(
         show_citations=bool(config_data.get("show_citations", True)),
         retrieval_top_k=_clamp_retrieval_top_k(top_k_raw),
         lightrag_query_mode=str(config_data.get("lightrag_query_mode") or "mix"),
+        lightrag_chunk_top_k=_clamp_chunk_top_k(config_data.get("lightrag_chunk_top_k")),
         temperature=float(config_data.get("temperature", 0.7)),
         max_tokens=int(config_data.get("max_tokens", 2000)),
         top_p=float(config_data.get("top_p", 1.0)),

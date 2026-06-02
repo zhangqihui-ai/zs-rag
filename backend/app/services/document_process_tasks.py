@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -83,3 +84,51 @@ def cancel_force_and_wait(key: TaskKey, *, timeout_sec: float = 5.0) -> None:
 def check_cancelled(cancel_event: threading.Event | None) -> None:
     if cancel_event is not None and cancel_event.is_set():
         raise DocumentProcessCancelled()
+
+
+# 全局解析并发闸门：限制同时执行的解析/重建任务数，保护 CPU/内存与 DB 连接池。
+_parse_semaphore_lock = threading.Lock()
+_parse_semaphore: threading.BoundedSemaphore | None = None
+
+
+def _get_parse_semaphore() -> threading.BoundedSemaphore:
+    global _parse_semaphore
+    if _parse_semaphore is not None:
+        return _parse_semaphore
+    with _parse_semaphore_lock:
+        if _parse_semaphore is None:
+            from app.core.config import get_settings
+
+            limit = max(1, int(get_settings().doc_parse_max_concurrency))
+            _parse_semaphore = threading.BoundedSemaphore(value=limit)
+    return _parse_semaphore
+
+
+def acquire_parse_slot(
+    cancel_event: threading.Event | None,
+    *,
+    on_wait: Callable[[], None] | None = None,
+    poll_interval: float = 1.0,
+) -> None:
+    """获取一个解析名额；满了则排队等待，期间可被取消。
+
+    返回前需保证已获取名额；调用方务必在 finally 中调用 release_parse_slot()。
+    """
+    sem = _get_parse_semaphore()
+    if sem.acquire(blocking=False):
+        return
+    if on_wait is not None:
+        on_wait()
+    while True:
+        check_cancelled(cancel_event)
+        if sem.acquire(timeout=poll_interval):
+            return
+
+
+def release_parse_slot() -> None:
+    sem = _get_parse_semaphore()
+    try:
+        sem.release()
+    except ValueError:
+        # 释放次数多于获取次数时 BoundedSemaphore 会抛错，吞掉以免影响清理。
+        pass

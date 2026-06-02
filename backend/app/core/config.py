@@ -22,6 +22,13 @@ class Settings(BaseSettings):
     app_host: str = "0.0.0.0"
     app_port: int = 8000
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/zs_rag"
+    db_pool_size: int = Field(default=10, description="SQLAlchemy 连接池常驻连接数")
+    db_max_overflow: int = Field(default=20, description="SQLAlchemy 连接池可溢出连接数")
+    db_pool_timeout: int = Field(default=30, description="等待空闲连接的超时（秒）")
+    doc_parse_max_concurrency: int = Field(
+        default=3,
+        description="文档解析/重建的全局最大并发数；超出的任务排队等待，保护 CPU/内存与数据库连接池",
+    )
     cors_origins: str = Field(default="http://localhost:5173,http://localhost:80,http://localhost:3000")
     cors_allow_lan_regex: bool = Field(
         default=True,
