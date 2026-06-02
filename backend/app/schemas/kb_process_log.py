@@ -65,3 +65,7 @@ class StartProcessBatchRequest(BaseModel):
     batch_uid: str = Field(..., min_length=8, max_length=64)
     action: Literal["parse", "reindex", "delete"]
     force: bool = False
+
+
+class ReconcileProcessBatchRequest(BaseModel):
+    batch_uid: str = Field(..., min_length=8, max_length=64)

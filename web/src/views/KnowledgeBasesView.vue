@@ -103,8 +103,8 @@
               </div>
             </div>
 
-            <h4>{{ kb.name }}</h4>
-            <p class="kb-tile-desc">{{ kb.description || '该知识库暂无描述。' }}</p>
+            <h4 class="kb-tile-title" :title="displayKbName(kb)">{{ displayKbName(kb) }}</h4>
+            <p class="kb-tile-desc">{{ kb.description?.trim() || '该知识库暂无描述。' }}</p>
             <div class="kb-tile-tags">
               <span class="kb-tag kb-tag--embed" :title="embeddingLabelTitleForKb(kb)">
                 <AppIcon name="vector-db" :size="12" />
@@ -263,7 +263,13 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
-import { getKnowledgeBaseErrorMessage, knowledgeBaseApi, type KnowledgeBase, type KnowledgeBasePayload } from '../api/knowledge-base'
+import {
+  getKnowledgeBaseErrorMessage,
+  knowledgeBaseApi,
+  normalizeKnowledgeBaseList,
+  type KnowledgeBase,
+  type KnowledgeBasePayload,
+} from '../api/knowledge-base'
 import { defaultModelApi, modelApi, type DefaultModelOption, type ModelItem } from '../api/model-management'
 import AppIcon from '../components/AppIcon.vue'
 import EmptyState from '../components/EmptyState.vue'
@@ -288,7 +294,7 @@ const filteredKnowledgeBases = computed(() => {
     return knowledgeBases.value
   }
   return knowledgeBases.value.filter((kb) => {
-    const name = (kb.name || '').toLowerCase()
+    const name = displayKbName(kb).toLowerCase()
     const desc = (kb.description || '').toLowerCase()
     return name.includes(term) || desc.includes(term)
   })
@@ -422,12 +428,29 @@ const resetForm = () => {
   modalError.value = ''
 }
 
+function displayKbName(kb: KnowledgeBase) {
+  const name = (kb.name || '').trim()
+  return name || '未命名知识库'
+}
+
 const refreshKnowledgeBases = async () => {
   loading.value = true
   error.value = ''
   try {
-    const [kbs] = await Promise.all([knowledgeBaseApi.list(), loadEmbeddingContext()])
-    knowledgeBases.value = kbs
+    const [raw] = await Promise.all([knowledgeBaseApi.list(), loadEmbeddingContext()])
+    const list = normalizeKnowledgeBaseList(raw)
+    if (
+      list.length === 0 &&
+      raw != null &&
+      typeof raw === 'object' &&
+      !Array.isArray(raw) &&
+      ('data' in (raw as Record<string, unknown>) || 'items' in (raw as Record<string, unknown>))
+    ) {
+      error.value = '知识库列表数据格式异常，请硬刷新后重试；若仍为空请检查 Network 中 /knowledge-bases 响应。'
+      knowledgeBases.value = []
+      return
+    }
+    knowledgeBases.value = list
   } catch (value) {
     error.value = getKnowledgeBaseErrorMessage(value, '加载知识库失败')
   } finally {
@@ -743,6 +766,7 @@ onBeforeUnmount(() => {
 .toolbar-panel h3,
 .error-panel h3,
 .kb-card h4,
+.kb-tile-title,
 .kb-modal-header h3 {
   margin: 0;
   color: var(--text-primary);
@@ -1011,8 +1035,15 @@ onBeforeUnmount(() => {
   color: var(--danger-color);
 }
 
-.kb-tile h4 {
-  margin: 0;
+.kb-tile-title {
+  font-size: 1.06rem;
+  font-weight: 600;
+  line-height: 1.4;
+  word-break: break-word;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 
 .kb-tile-desc {

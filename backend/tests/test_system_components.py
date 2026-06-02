@@ -98,6 +98,40 @@ def test_components_status_returns_items(client: TestClient):
     assert data["items"][0]["visit_port"] == 8000
 
 
+def test_frontend_component_when_exposed():
+    settings = Settings(
+        frontend_exposed_port=8090,
+        frontend_container_port=80,
+        app_env="production",
+        mineru_enabled=False,
+        odl_hybrid=False,
+        neo4j_uri=None,
+        opensearch_url=None,
+    )
+    frontend = next(defn for defn in svc.COMPONENT_DEFINITIONS if defn.id == "frontend")
+    item = svc._build_item(frontend, settings)
+    assert item.name == "ZS-RAG 前端"
+    assert item.exposed is True
+    assert item.external_port == 8090
+    assert item.visit_port == 8090
+    assert item.port == 80
+
+
+def test_frontend_dev_container_port_defaults_to_5173():
+    settings = Settings(
+        app_env="development",
+        frontend_container_port=80,
+        mineru_enabled=False,
+        odl_hybrid=False,
+        neo4j_uri=None,
+        opensearch_url=None,
+    )
+    frontend = next(defn for defn in svc.COMPONENT_DEFINITIONS if defn.id == "frontend")
+    host, port = svc._resolve_definition_host_port(frontend, settings)
+    assert host == "frontend"
+    assert port == 5173
+
+
 def test_exposed_port_when_configured():
     settings = Settings(
         backend_exposed_port=8000,

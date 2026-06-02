@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 from typing import Any, Literal
 from uuid import uuid4
@@ -7,6 +8,8 @@ from uuid import uuid4
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
 
 from app.core.errors import AppError
 from app.models.enterprise_space import User
@@ -38,6 +41,11 @@ _PROCESSING_STATUSES = (
 _INDEXED_STATUSES = (
     KnowledgeDocumentStatus.INDEXED.value,
     KnowledgeDocumentStatus.GRAPH_INDEXED.value,
+)
+
+_FAILED_DOC_STATUSES = (
+    KnowledgeDocumentStatus.FAILED.value,
+    KnowledgeDocumentStatus.GRAPH_FAILED.value,
 )
 
 _TERMINAL_ITEM_STATUSES = (
@@ -460,6 +468,152 @@ def complete_process_item(
     db.commit()
 
 
+def _infer_item_outcome_from_document(document: KnowledgeDocument | None) -> Literal["success", "failed", "cancelled"] | None:
+    if document is None:
+        return "failed"
+    status = document.status
+    if status in _INDEXED_STATUSES:
+        return "success"
+    if status in _FAILED_DOC_STATUSES:
+        return "failed"
+    if status == KnowledgeDocumentStatus.UPLOADED.value:
+        return "cancelled"
+    if status == KnowledgeDocumentStatus.DELETED.value:
+        return "failed"
+    return None
+
+
+def reconcile_batch_running_items(db: Session, *, batch: KbProcessBatch) -> bool:
+    """根据文档实际状态修正仍为 running 的审计明细（解析已完成但审计未收尾时）。"""
+    items = db.execute(
+        select(KbProcessBatchItem).where(
+            KbProcessBatchItem.batch_id == batch.id,
+            KbProcessBatchItem.status == KbProcessBatchItemStatus.RUNNING.value,
+        )
+    ).scalars().all()
+    if not items:
+        return False
+
+    changed = False
+    for item in items:
+        if item.document_id is None:
+            continue
+        document = db.get(KnowledgeDocument, item.document_id)
+        outcome = _infer_item_outcome_from_document(document)
+        if outcome is None:
+            continue
+        finish_item(
+            db,
+            batch=batch,
+            document_id=item.document_id,
+            status=outcome,
+            file_name=item.file_name,
+            error_message=document.error_message if document and outcome == "failed" else None,
+        )
+        changed = True
+        logger.info(
+            "Reconciled process audit item batch_id=%s document_id=%s outcome=%s",
+            batch.id,
+            item.document_id,
+            outcome,
+        )
+
+    if changed:
+        _recompute_batch(db, batch)
+    return changed
+
+
+def reconcile_batch_by_uid(
+    db: Session,
+    *,
+    space_id: int,
+    kb_id: int,
+    batch_uid: str,
+) -> KbProcessBatch | None:
+    batch = _find_batch_by_uid(db, space_id=space_id, kb_id=kb_id, batch_uid=batch_uid)
+    if batch is None:
+        return None
+    if reconcile_batch_running_items(db, batch=batch):
+        db.commit()
+        db.refresh(batch)
+    return batch
+
+
+def complete_process_item_in_new_session(
+    *,
+    space_id: int,
+    kb_id: int,
+    batch_uid: str | None,
+    document_id: int,
+    file_name: str,
+    mode: Literal["parse", "reindex"],
+    outcome: Literal["success", "failed", "cancelled"],
+    error_message: str | None = None,
+    user_id: int | None = None,
+    force: bool = False,
+) -> None:
+    """解析线程在独立 Session 中收尾审计，避免长事务 Session 状态导致未提交。"""
+    from app.db.session import SessionLocal
+
+    with SessionLocal() as db:
+        complete_process_item(
+            db,
+            space_id=space_id,
+            kb_id=kb_id,
+            batch_uid=batch_uid,
+            document_id=document_id,
+            file_name=file_name,
+            mode=mode,
+            outcome=outcome,
+            error_message=error_message,
+            user_id=user_id,
+            force=force,
+        )
+
+
+def finalize_process_audit_from_document(
+    *,
+    space_id: int,
+    kb_id: int,
+    batch_uid: str | None,
+    document_id: int,
+    file_name: str,
+    mode: Literal["parse", "reindex"],
+    user_id: int | None = None,
+    force: bool = False,
+) -> None:
+    """worker 异常退出时按文档状态兜底写入审计终态。"""
+    from app.db.session import SessionLocal
+
+    with SessionLocal() as db:
+        document = db.execute(
+            select(KnowledgeDocument).where(
+                KnowledgeDocument.id == document_id,
+                KnowledgeDocument.knowledge_base_id == kb_id,
+                KnowledgeDocument.enterprise_space_id == space_id,
+            )
+        ).scalar_one_or_none()
+        if document is None:
+            logger.warning("finalize_process_audit: document %s not found", document_id)
+            return
+        outcome = _infer_item_outcome_from_document(document)
+        if outcome is None:
+            return
+        complete_process_item(
+            db,
+            space_id=space_id,
+            kb_id=kb_id,
+            batch_uid=batch_uid,
+            document_id=document_id,
+            file_name=file_name or document.file_name,
+            mode=mode,
+            outcome=outcome,
+            error_message=document.error_message if outcome == "failed" else None,
+            user_id=user_id,
+            force=force,
+        )
+
+
 def get_process_log_summary(db: Session, *, space_id: int, kb_id: int) -> dict[str, Any]:
     get_knowledge_base_or_error(db, space_id=space_id, kb_id=kb_id)
     doc_base = (
@@ -589,6 +743,16 @@ def list_process_log_events(
         .limit(page_size)
     ).scalars().all()
 
+    dirty = False
+    for row in rows:
+        if row.status == KbProcessBatchStatus.RUNNING.value or (
+            row.success_count + row.failed_count < row.total_count
+        ):
+            if reconcile_batch_running_items(db, batch=row):
+                dirty = True
+    if dirty:
+        db.commit()
+
     return {
         "items": [_serialize_batch(db, row) for row in rows],
         "total": total,
@@ -613,6 +777,10 @@ def list_process_log_batch_items(
     ).scalar_one_or_none()
     if batch is None:
         raise AppError(status_code=404, code="BATCH_NOT_FOUND", message="批次不存在")
+
+    if reconcile_batch_running_items(db, batch=batch):
+        db.commit()
+        db.refresh(batch)
 
     items = db.execute(
         select(KbProcessBatchItem)

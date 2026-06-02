@@ -25,7 +25,8 @@
             <th>名称</th>
             <th>服务类型</th>
             <th>Host</th>
-            <th>Port</th>
+            <th>宿主机端口</th>
+            <th>容器端口</th>
             <th>状态</th>
             <th>Actions</th>
           </tr>
@@ -65,6 +66,10 @@
             </td>
             <td>
               <span class="endpoint-badge">{{ item.host }}</span>
+            </td>
+            <td>
+              <span v-if="hostPort(item) !== null" class="endpoint-badge">{{ hostPort(item) }}</span>
+              <span v-else class="host-port-unexposed">未暴露</span>
             </td>
             <td>
               <span class="endpoint-badge">{{ item.port }}</span>
@@ -156,6 +161,7 @@ import { copyToClipboard } from '../../lib/copy-to-clipboard'
 import {
   buildComponentAccessLines,
   buildComponentExternalEndpoint,
+  buildComponentHostPort,
   buildComponentVisitUrl,
   fetchServiceComponentsStatus,
   type ComponentAccessLine,
@@ -171,6 +177,7 @@ const credentialModalItem = ref<ServiceComponentItem | null>(null)
 
 const serviceTypeLabels: Record<string, string> = {
   app_server: '应用服务',
+  web_ui: '前端',
   meta_data: '元数据',
   file_store: '文件存储',
   retrieval: '检索',
@@ -207,6 +214,10 @@ function visitUrl(item: ServiceComponentItem): string | null {
 
 function externalEndpoint(item: ServiceComponentItem): string | null {
   return buildComponentExternalEndpoint(item)
+}
+
+function hostPort(item: ServiceComponentItem): number | null {
+  return buildComponentHostPort(item)
 }
 
 function hasCredentials(item: ServiceComponentItem): boolean {
@@ -356,6 +367,11 @@ defineExpose({ loadStatus })
   color: var(--text-secondary);
   font-size: 0.82rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.host-port-unexposed {
+  color: var(--text-tertiary);
+  font-size: 0.82rem;
 }
 
 .status-pill {

@@ -46,6 +46,25 @@ def _positive_port(value: int | None) -> int | None:
     return value
 
 
+def _resolved_frontend_container_port(settings: Settings) -> int:
+    """容器内监听端口：compose 显式配置优先；开发环境默认 5173（Vite）。"""
+    port = settings.frontend_container_port
+    if port > 0 and not (settings.app_env.lower() == "development" and port == 80):
+        return port
+    if settings.app_env.lower() == "development":
+        return 5173
+    return 80 if port <= 0 else port
+
+
+def _frontend_probe_ports(settings: Settings) -> list[int]:
+    primary = _resolved_frontend_container_port(settings)
+    ports = [primary]
+    for alt in (5173, 80):
+        if alt not in ports:
+            ports.append(alt)
+    return ports
+
+
 def _parse_url_host_port(url: str, default_port: int) -> tuple[str, int]:
     parsed = urlparse(url)
     host = parsed.hostname or "localhost"
@@ -131,6 +150,25 @@ def _probe_backend(_settings: Settings) -> tuple[ComponentStatus, str | None, fl
     return ComponentStatus.alive, "后端服务运行中", 0.0
 
 
+def _probe_frontend(settings: Settings) -> tuple[ComponentStatus, str | None, float | None]:
+    start = time.time()
+    last_detail: str | None = None
+    for port in _frontend_probe_ports(settings):
+        url = f"http://frontend:{port}/"
+        try:
+            with httpx.Client(timeout=5.0, follow_redirects=True) as client:
+                response = client.get(url)
+                if response.status_code < 500:
+                    elapsed = (time.time() - start) * 1000
+                    hint = f"（容器端口 {port}）" if port != _resolved_frontend_container_port(settings) else ""
+                    return ComponentStatus.alive, f"前端页面可访问{hint}", elapsed
+                last_detail = f"{url} HTTP {response.status_code}"
+        except Exception as exc:
+            last_detail = f"{url} {exc}"
+    elapsed = (time.time() - start) * 1000
+    return ComponentStatus.dead, f"前端连接失败：{last_detail or '无可用端口'}", elapsed
+
+
 def _probe_mineru(settings: Settings) -> tuple[ComponentStatus, str | None, float | None]:
     base_url = settings.mineru_base_url.rstrip("/")
     start = time.time()
@@ -198,6 +236,10 @@ def _build_credentials(component_id: str, settings: Settings) -> list[ComponentC
             ComponentCredential(label="说明", value="Swagger /docs 无需登录"),
             ComponentCredential(label="平台管理员", value=f"{settings.admin_username} / {settings.admin_password}"),
         ]
+    if component_id == "frontend":
+        return [
+            ComponentCredential(label="说明", value="浏览器主入口；生产环境由 nginx 同源反代 /api 至后端"),
+        ]
     if component_id == "postgres":
         return _parse_postgres_credentials(settings)
     if component_id == "milvus":
@@ -246,6 +288,18 @@ COMPONENT_DEFINITIONS: list[ComponentDefinition] = [
         visit_port_getter=lambda s: _positive_port(s.backend_exposed_port),
         visit_path="/docs",
         visit_label="API 文档",
+    ),
+    ComponentDefinition(
+        id="frontend",
+        name="ZS-RAG 前端",
+        service_type="web_ui",
+        host="frontend",
+        port=80,
+        is_enabled=lambda _s: True,
+        exposed_port_getter=lambda s: _positive_port(s.frontend_exposed_port),
+        visit_port_getter=lambda s: _positive_port(s.frontend_exposed_port),
+        visit_path="/",
+        visit_label="访问",
     ),
     ComponentDefinition(
         id="postgres",
@@ -338,6 +392,7 @@ COMPONENT_DEFINITIONS: list[ComponentDefinition] = [
 
 PROBE_FUNCTIONS: dict[str, ProbeFn] = {
     "backend": _probe_backend,
+    "frontend": _probe_frontend,
     "postgres": _probe_postgres,
     "milvus": _probe_milvus,
     "minio": _probe_minio,
@@ -356,6 +411,8 @@ def _resolve_definition_host_port(defn: ComponentDefinition, settings: Settings)
         return _odl_host_port(settings)
     if defn.id == "backend":
         return defn.host, settings.app_port
+    if defn.id == "frontend":
+        return defn.host, _resolved_frontend_container_port(settings)
     if defn.id == "milvus":
         return settings.milvus_host, settings.milvus_port
     return defn.host, defn.port

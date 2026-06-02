@@ -103,6 +103,14 @@ export function buildComponentExternalEndpoint(item: ServiceComponentItem): stri
   return `${window.location.hostname}:${item.external_port}`
 }
 
+/** 宿主机映射端口；未在 compose 中暴露时返回 null */
+export function buildComponentHostPort(item: ServiceComponentItem): number | null {
+  if (!item.exposed || !item.external_port) {
+    return null
+  }
+  return item.external_port
+}
+
 export type ComponentAccessLine = {
   label: string
   text: string

@@ -2202,6 +2202,8 @@ def iter_document_process_sse_events(
     def worker() -> None:
         slot_acquired = False
         doc_file_name = "未知文档"
+        audit_started = False
+        audit_completed = False
         with SessionLocal() as db:
             try:
                 document = get_document_or_error(db, space_id=space_id, kb_id=kb_id, document_id=document_id)
@@ -2217,6 +2219,7 @@ def iter_document_process_sse_events(
                     batch_uid=batch_uid,
                     force=force,
                 )
+                audit_started = True
                 acquire_parse_slot(
                     cancel_event,
                     on_wait=lambda: emit("当前解析任务较多，正在排队等待空闲名额…"),
@@ -2246,8 +2249,7 @@ def iter_document_process_sse_events(
                         cancel_event=cancel_event,
                         force=force,
                     )
-                kb_process_audit_service.complete_process_item(
-                    db,
+                kb_process_audit_service.complete_process_item_in_new_session(
                     space_id=space_id,
                     kb_id=kb_id,
                     batch_uid=batch_uid,
@@ -2258,6 +2260,7 @@ def iter_document_process_sse_events(
                     user_id=user_id,
                     force=force,
                 )
+                audit_completed = True
                 q.put(("done", result))
             except DocumentProcessCancelled:
                 knowledge_base = get_knowledge_base_or_error(db, space_id=space_id, kb_id=kb_id)
@@ -2269,8 +2272,7 @@ def iter_document_process_sse_events(
                     document=document,
                     log_kind=mode,
                 )
-                kb_process_audit_service.complete_process_item(
-                    db,
+                kb_process_audit_service.complete_process_item_in_new_session(
                     space_id=space_id,
                     kb_id=kb_id,
                     batch_uid=batch_uid,
@@ -2281,10 +2283,10 @@ def iter_document_process_sse_events(
                     user_id=user_id,
                     force=force,
                 )
+                audit_completed = True
                 q.put(("cancelled", result))
             except AppError as exc:
-                kb_process_audit_service.complete_process_item(
-                    db,
+                kb_process_audit_service.complete_process_item_in_new_session(
                     space_id=space_id,
                     kb_id=kb_id,
                     batch_uid=batch_uid,
@@ -2296,10 +2298,10 @@ def iter_document_process_sse_events(
                     user_id=user_id,
                     force=force,
                 )
+                audit_completed = True
                 q.put(("app_error", exc))
             except Exception as exc:
-                kb_process_audit_service.complete_process_item(
-                    db,
+                kb_process_audit_service.complete_process_item_in_new_session(
                     space_id=space_id,
                     kb_id=kb_id,
                     batch_uid=batch_uid,
@@ -2311,8 +2313,28 @@ def iter_document_process_sse_events(
                     user_id=user_id,
                     force=force,
                 )
+                audit_completed = True
                 q.put(("fatal", exc))
             finally:
+                if audit_started and not audit_completed:
+                    try:
+                        kb_process_audit_service.finalize_process_audit_from_document(
+                            space_id=space_id,
+                            kb_id=kb_id,
+                            batch_uid=batch_uid,
+                            document_id=document_id,
+                            file_name=doc_file_name,
+                            mode=mode,
+                            user_id=user_id,
+                            force=force,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to finalize process audit (kb_id=%s document_id=%s batch_uid=%s)",
+                            kb_id,
+                            document_id,
+                            batch_uid,
+                        )
                 if slot_acquired:
                     release_parse_slot()
                 unregister_task(key)

@@ -133,9 +133,27 @@ watch(
         <div class="enrichment-row">
           <label class="enrichment-label">启用</label>
           <div class="enrichment-field">
-            <label class="enrichment-check">
-              <input type="checkbox" :checked="enabled" :disabled="saving" @change="onEnabledChange" />
-              启用入库 LLM 增强
+            <label
+              :class="['enrichment-enable-card', { 'enrichment-enable-card--active': enabled, 'is-disabled': saving }]"
+            >
+              <input
+                type="checkbox"
+                class="enrichment-enable-input"
+                :checked="enabled"
+                :disabled="saving"
+                @change="onEnabledChange"
+              />
+              <div class="enrichment-enable-card-head">
+                <span class="enrichment-enable-indicator" aria-hidden="true">
+                  <span v-if="enabled" class="enrichment-enable-dot"></span>
+                </span>
+                <div>
+                  <div class="enrichment-enable-title">启用入库 LLM 增强</div>
+                  <p class="enrichment-enable-desc">
+                    索引前为每个切片生成关键词与假设问题，提升检索匹配；会增加索引耗时与 LLM 费用。
+                  </p>
+                </div>
+              </div>
             </label>
           </div>
         </div>
@@ -237,12 +255,78 @@ watch(
   gap: 6px;
 }
 
-.enrichment-check {
+.enrichment-enable-card {
+  display: block;
+  border: 1px solid var(--border-color);
+  border-radius: 16px;
+  padding: 16px 18px;
+  background: var(--bg-elevated);
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.enrichment-enable-card--active {
+  border-color: var(--brand-primary);
+  box-shadow: 0 0 0 1px var(--brand-primary-light);
+}
+
+.enrichment-enable-card.is-disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.enrichment-enable-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.enrichment-enable-card-head {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.enrichment-enable-indicator {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  margin-top: 3px;
+  border: 2px solid var(--border-strong);
+  border-radius: 50%;
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 0.9rem;
+  justify-content: center;
+  transition: border-color 0.15s ease;
+}
+
+.enrichment-enable-card--active .enrichment-enable-indicator {
+  border-color: var(--brand-primary);
+}
+
+.enrichment-enable-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--brand-primary);
+}
+
+.enrichment-enable-title {
+  font-weight: 600;
   color: var(--text-primary);
+}
+
+.enrichment-enable-desc {
+  margin: 4px 0 0;
+  font-size: 0.88rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
 }
 
 .enrichment-hint {

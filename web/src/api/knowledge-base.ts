@@ -311,12 +311,45 @@ interface ApiEnvelope<T> {
 }
 
 const isEnvelope = <T>(value: unknown): value is ApiEnvelope<T> => {
-  return Boolean(value) && typeof value === 'object' && 'code' in (value as Record<string, unknown>) && 'data' in (value as Record<string, unknown>)
+  return (
+    Boolean(value) &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    'code' in (value as Record<string, unknown>) &&
+    'data' in (value as Record<string, unknown>)
+  )
 }
 
-const unwrap = async <T>(request: Promise<{ data: T | ApiEnvelope<T> }>): Promise<T> => {
+/** 解包接口响应：支持裸数据、{ code, data }、仅 { data }、分页 { items } */
+export function unwrapPayload<T>(payload: unknown): T {
+  if (isEnvelope<T>(payload)) {
+    return payload.data
+  }
+  if (
+    payload &&
+    typeof payload === 'object' &&
+    !Array.isArray(payload) &&
+    'data' in (payload as Record<string, unknown>)
+  ) {
+    return (payload as ApiEnvelope<T>).data
+  }
+  return payload as T
+}
+
+export function normalizeKnowledgeBaseList(raw: unknown): KnowledgeBase[] {
+  const payload = unwrapPayload<unknown>(raw)
+  if (Array.isArray(payload)) {
+    return payload as KnowledgeBase[]
+  }
+  if (payload && typeof payload === 'object' && Array.isArray((payload as { items?: unknown }).items)) {
+    return (payload as { items: KnowledgeBase[] }).items
+  }
+  return []
+}
+
+const unwrap = async <T>(request: Promise<{ data: unknown }>): Promise<T> => {
   const response = await request
-  return isEnvelope<T>(response.data) ? response.data.data : (response.data as T)
+  return unwrapPayload<T>(response.data)
 }
 
 export const getKnowledgeBaseErrorMessage = (error: unknown, fallback = '操作失败') => {
@@ -469,6 +502,9 @@ export const knowledgeBaseApi = {
     },
   ) {
     return unwrap<void>(http.post(`/knowledge-bases/${kbId}/process-log/start-batch`, payload))
+  },
+  reconcileProcessBatch(kbId: number, payload: { batch_uid: string }) {
+    return unwrap<KbProcessLogEvent>(http.post(`/knowledge-bases/${kbId}/process-log/reconcile-batch`, payload))
   },
   /** 开始解析、分块与索引（仅待解析/失败状态） */
   parseDocument(kbId: number, documentId: number, embedding_model_id?: number | null) {

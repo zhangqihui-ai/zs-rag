@@ -145,6 +145,8 @@ class Settings(BaseSettings):
     opensearch_exposed_port: int | None = Field(default=None, description="OpenSearch 宿主机映射端口")
     neo4j_http_exposed_port: int | None = Field(default=None, description="Neo4j Browser HTTP 宿主机映射端口")
     backend_exposed_port: int | None = Field(default=None, description="后端 API 宿主机映射端口")
+    frontend_container_port: int = Field(default=80, description="前端容器内监听端口（生产 80，开发 5173）")
+    frontend_exposed_port: int | None = Field(default=None, description="前端 Web 宿主机映射端口")
     mineru_exposed_port: int | None = Field(default=None, description="MinerU 宿主机映射端口")
     odl_hybrid_exposed_port: int | None = Field(default=None, description="ODL Hybrid 宿主机映射端口")
 

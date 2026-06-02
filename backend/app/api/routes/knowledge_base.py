@@ -49,7 +49,9 @@ from app.schemas.knowledge_document import (
 from app.schemas.kb_process_log import (
     KbProcessLogBatchItemsResponse,
     KbProcessLogEventListResponse,
+    KbProcessLogEventResponse,
     KbProcessLogSummaryResponse,
+    ReconcileProcessBatchRequest,
     StartProcessBatchRequest,
     UploadBatchAuditRequest,
 )
@@ -585,6 +587,28 @@ def start_kb_process_batch(
         force=payload.force,
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/{kb_id}/process-log/reconcile-batch",
+    response_model=KbProcessLogEventResponse,
+)
+def reconcile_kb_process_batch(
+    kb_id: int,
+    payload: ReconcileProcessBatchRequest,
+    current_space: CurrentSpace,
+    membership: RequireMembership,
+    db: Session = Depends(get_db),
+) -> dict:
+    batch = kb_process_audit_service.reconcile_batch_by_uid(
+        db,
+        space_id=current_space.id,
+        kb_id=kb_id,
+        batch_uid=payload.batch_uid,
+    )
+    if batch is None:
+        raise AppError(status_code=404, code="BATCH_NOT_FOUND", message="批次不存在")
+    return kb_process_audit_service._serialize_batch(db, batch)
 
 
 @router.post("/{kb_id}/documents/upload", response_model=KnowledgeDocumentResponse, status_code=status.HTTP_201_CREATED)

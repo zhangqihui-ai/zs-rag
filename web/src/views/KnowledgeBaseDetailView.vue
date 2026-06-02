@@ -504,6 +504,7 @@
                   <span class="chip chip-brand">{{ graphModeLabelMap[graphSearchResult.mode] || graphSearchResult.mode }}</span>
                   <span class="chip">{{ graphChunks.length }} 片段</span>
                   <span class="chip">{{ graphEntities.length }} 实体</span>
+                  <span class="chip">{{ graphEntityConceptCount }} 概念</span>
                   <span class="chip">{{ graphRelationships.length }} 关系</span>
                   <span class="chip">{{ graphCitations.length }} 引用</span>
                 </div>
@@ -546,6 +547,11 @@
                     </EmptyState>
                     <template v-else>
                       <div class="graph-entity-toolbar">
+                        <p class="graph-entity-stats">
+                          共 <strong>{{ graphEntities.length }}</strong> 个实体，
+                          <strong>{{ graphEntityConceptCount }}</strong> 种概念（类型）；
+                          鼠标悬停实体名称或类型标签约 0.7 秒可查看介绍。
+                        </p>
                         <label class="graph-group-toggle">
                           <input v-model="graphEntityGroupBy" type="checkbox" />
                           <span>按类型分组</span>
@@ -560,15 +566,18 @@
                           </thead>
                           <tbody>
                             <tr v-for="(ent, idx) in graphEntities" :key="idx">
-                              <td class="graph-cell-name">{{ ent.name || '—' }}</td>
+                              <td class="graph-cell-name">
+                                <DelayedHoverPopover v-if="ent.name" :delay-ms="700">
+                                  <span class="graph-entity-name-trigger">{{ ent.name }}</span>
+                                  <template #content>
+                                    <p class="popover-title">{{ ent.name }}</p>
+                                    <p class="popover-desc">{{ graphEntityIntro(ent) }}</p>
+                                  </template>
+                                </DelayedHoverPopover>
+                                <span v-else>—</span>
+                              </td>
                               <td>
-                                <span
-                                  v-if="ent.type"
-                                  class="graph-type-chip"
-                                  :style="{ '--type-color': entTypeColor(ent.type) }"
-                                >
-                                  <span class="graph-type-dot"></span>{{ ent.type }}
-                                </span>
+                                <GraphEntityTypeChip v-if="ent.type" :type="ent.type" />
                                 <span v-else>—</span>
                               </td>
                               <td class="graph-cell-desc">{{ ent.description || '—' }}</td>
@@ -588,15 +597,23 @@
                           class="graph-entity-group"
                         >
                           <div class="graph-entity-group-head" :style="{ '--type-color': entTypeColor(grp.type) }">
-                            <span class="graph-type-dot"></span>
-                            <span class="graph-entity-group-name">{{ grp.type }}</span>
-                            <span class="graph-entity-group-count">{{ grp.items.length }}</span>
+                            <GraphEntityTypeChip :type="grp.type" />
+                            <span class="graph-entity-group-count">{{ grp.items.length }} 个实体</span>
                           </div>
                           <div class="graph-table-wrap">
                             <table class="graph-table">
                               <tbody>
                                 <tr v-for="(ent, idx) in grp.items" :key="idx">
-                                  <td class="graph-cell-name">{{ ent.name || '—' }}</td>
+                                  <td class="graph-cell-name">
+                                    <DelayedHoverPopover v-if="ent.name" :delay-ms="700">
+                                      <span class="graph-entity-name-trigger">{{ ent.name }}</span>
+                                      <template #content>
+                                        <p class="popover-title">{{ ent.name }}</p>
+                                        <p class="popover-desc">{{ graphEntityIntro(ent) }}</p>
+                                      </template>
+                                    </DelayedHoverPopover>
+                                    <span v-else>—</span>
+                                  </td>
                                   <td class="graph-cell-desc">{{ ent.description || '—' }}</td>
                                   <td class="graph-table-action">
                                     <ViewInGraphLink v-if="ent.name" :kb-id="kbId" :entity-id="ent.name" />
@@ -1201,10 +1218,13 @@ import GraphVisualizationPanel from '../components/graph/GraphVisualizationPanel
 import { useDocumentParseTasks, wasUserCancelledParseTask } from '../composables/useDocumentParseTasks'
 import { useLayoutPageContext } from '../composables/useLayoutPageContext'
 import ViewInGraphLink from '../components/graph/ViewInGraphLink.vue'
+import DelayedHoverPopover from '../components/graph/DelayedHoverPopover.vue'
+import GraphEntityTypeChip from '../components/graph/GraphEntityTypeChip.vue'
 import Layout from '../components/Layout.vue'
 import { graphSearch, getGraphErrorMessage, type GraphSearchResponse, type LightRagQueryMode } from '../api/graph-knowledge-base'
 import { GRAPH_ENTITY_QUERY_KEY, GRAPH_TAB_QUERY_KEY } from '../lib/graphNavigation'
 import { colorForEntityType } from '../lib/graphEntityColors'
+import { countDistinctEntityTypes } from '../lib/graphEntityTypeMeta'
 import { documentParserDisplay, documentUploadTypeDisplay, uploadExtension } from '../lib/parserDisplay'
 
 const route = useRoute()
@@ -1337,6 +1357,21 @@ const graphEntities = computed(() =>
     source: cleanFilePath(pick(e, 'file_path')),
   })),
 )
+
+const graphEntityConceptCount = computed(() =>
+  countDistinctEntityTypes(graphEntities.value.map((e) => e.type)),
+)
+
+function graphEntityIntro(ent: { name: string; description: string }): string {
+  const desc = ent.description?.trim()
+  if (desc) {
+    return desc
+  }
+  if (ent.name) {
+    return `实体「${ent.name}」暂无详细描述，可结合检索问题、关系 Tab 或知识图谱可视化理解其在文档中的角色。`
+  }
+  return '暂无介绍'
+}
 
 const graphRelationships = computed(() =>
   (graphSearchResult.value?.relationships ?? []).map((r) => {
@@ -1665,7 +1700,7 @@ watch(activeParseLogLines, () => {
 watch(
   activeTab,
   (tab) => {
-    setFillPage(tab === 'documents')
+    setFillPage(tab === 'documents' || tab === 'graph')
   },
   { immediate: true },
 )
@@ -3203,6 +3238,11 @@ async function batchParseSelectedDocuments() {
       } else {
         fail += 1
       }
+    }
+    try {
+      await knowledgeBaseApi.reconcileProcessBatch(kbId.value, { batch_uid: batchId })
+    } catch {
+      /* 对账失败不阻断批量解析结果提示 */
     }
     if (activeTab.value === 'logs') {
       await fetchProcessLogData()
@@ -4762,8 +4802,30 @@ watch(openChunkingMenuForId, (value) => {
 /* 实体分组 */
 .graph-entity-toolbar {
   display: flex;
-  justify-content: flex-end;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
   margin-bottom: 10px;
+}
+
+.graph-entity-stats {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.graph-entity-stats strong {
+  color: var(--brand-primary);
+  font-weight: 700;
+}
+
+.graph-entity-name-trigger {
+  font-weight: 600;
+  color: var(--text-primary);
+  border-bottom: 1px dashed color-mix(in srgb, var(--brand-primary) 35%, transparent);
+  cursor: help;
 }
 
 .graph-group-toggle {
@@ -5228,38 +5290,71 @@ watch(openChunkingMenuForId, (value) => {
   gap: 16px;
 }
 
+/* 知识图谱：与文件列表相同的一屏铺满布局，仅抽屉/画布内部滚动 */
 .knowledge-detail-view--graph-tab {
-  --graph-viz-viewport-offset: 220px;
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  height: calc(100vh - var(--graph-viz-viewport-offset));
-  min-height: 560px;
+  overflow: hidden;
+  margin-top: 0;
+  gap: 8px;
 }
 
 .knowledge-detail-view--graph-tab .knowledge-detail-layout {
   flex: 1;
   min-height: 0;
+  gap: 12px;
   align-items: stretch;
+}
+
+.knowledge-detail-view--graph-tab .detail-sidebar-nav {
+  padding: 12px 10px;
+  gap: 8px;
+}
+
+.knowledge-detail-view--graph-tab .detail-nav-item {
+  padding: 10px 12px;
 }
 
 .knowledge-detail-view--graph-tab .detail-main {
   min-height: 0;
+  height: 100%;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
+  gap: 0;
 }
 
 .knowledge-detail-view--graph-tab .graph-viz-card {
-  padding-bottom: 20px;
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 8px;
+  overflow: hidden;
+  padding: 10px 18px 10px;
 }
 
 .knowledge-detail-view--graph-tab .graph-viz-card .section-heading {
   flex-shrink: 0;
   margin: 0;
+  gap: 0;
+  align-items: center;
+}
+
+.knowledge-detail-view--graph-tab .graph-viz-card .section-heading p {
+  display: none;
+}
+
+.knowledge-detail-view--graph-tab .graph-viz-card .section-heading h3 {
+  font-size: 1.05rem;
 }
 
 .knowledge-detail-view--graph-tab .graph-viz-card :deep(.graph-viz-panel) {
-  flex: 1;
   min-height: 0;
+  height: 100%;
+  overflow: hidden;
 }
 
 /* 文件列表：一屏铺满，表格区内部滚动，避免浏览器右侧滚动条 */
