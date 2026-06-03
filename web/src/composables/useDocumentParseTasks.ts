@@ -330,6 +330,7 @@ export function useDocumentParseTasks(kbId: () => number | undefined) {
           current.percent = 100
           persistTaskSnapshot(current)
           options?.onTerminal?.(doc)
+          globalTasks.delete(key)
           resolve(doc)
         } catch {
           /* 网络抖动时继续轮询 */
@@ -542,6 +543,17 @@ export function useDocumentParseTasks(kbId: () => number | undefined) {
     task.percent = 100
     task.progressMessage = ''
     persistTaskSnapshot(task)
+    finishTask(documentId)
+  }
+
+  function finishTask(documentId: number) {
+    const id = resolveKbId()
+    if (id == null) {
+      return
+    }
+    const key = taskKey(id, documentId)
+    stopWatchPoll(key)
+    globalTasks.delete(key)
   }
 
   return {
@@ -555,5 +567,6 @@ export function useDocumentParseTasks(kbId: () => number | undefined) {
     appendLog,
     syncLogsFromServer,
     reconcileTaskTerminalState,
+    finishTask,
   }
 }

@@ -177,3 +177,31 @@ class KnowledgeDocumentParseLogResponse(BaseModel):
     phase: str | None = None
     lines: list[ParseLogLineItem] = Field(default_factory=list)
     updated_at: str | None = None
+
+
+class BatchDocumentProcessRequest(BaseModel):
+    document_ids: list[int] = Field(..., min_length=1, max_length=500)
+    batch_uid: str | None = None
+    force: bool = False
+    embedding_model_id: int | None = None
+
+
+class BatchDocumentProcessItemResult(BaseModel):
+    document_id: int
+    queued: bool = False
+    skipped: bool = False
+    mode: str | None = None
+    celery_task_id: str | None = None
+    background_task_id: int | None = None
+    force: bool = False
+    fallback: bool = False
+    skip_reason: str | None = None
+    error: str | None = None
+
+
+class BatchDocumentProcessResponse(BaseModel):
+    items: list[BatchDocumentProcessItemResult]
+    queued_count: int
+    failed_count: int
+    skipped_count: int
+    total: int

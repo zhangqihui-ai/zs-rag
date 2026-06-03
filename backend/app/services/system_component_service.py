@@ -72,6 +72,14 @@ def _parse_url_host_port(url: str, default_port: int) -> tuple[str, int]:
     return host, port
 
 
+def _effective_redis_url(settings: Settings) -> str:
+    return settings.redis_url or "redis://redis:6379/0"
+
+
+def _redis_host_port(settings: Settings) -> tuple[str, int]:
+    return _parse_url_host_port(_effective_redis_url(settings), 6379)
+
+
 def _probe_postgres(_settings: Settings) -> tuple[ComponentStatus, str | None, float | None]:
     start = time.time()
     try:
@@ -144,6 +152,37 @@ def _probe_etcd(_settings: Settings) -> tuple[ComponentStatus, str | None, float
     except OSError as exc:
         elapsed = (time.time() - start) * 1000
         return ComponentStatus.unknown, f"etcd 状态未知：{exc}", elapsed
+
+
+def _probe_redis(settings: Settings) -> tuple[ComponentStatus, str | None, float | None]:
+    import redis
+
+    start = time.time()
+    try:
+        client = redis.from_url(_effective_redis_url(settings), socket_connect_timeout=3.0)
+        client.ping()
+        elapsed = (time.time() - start) * 1000
+        return ComponentStatus.alive, "Redis PING 正常", elapsed
+    except Exception as exc:
+        elapsed = (time.time() - start) * 1000
+        return ComponentStatus.dead, f"Redis 连接失败：{exc}", elapsed
+
+
+def _probe_celery_worker(settings: Settings) -> tuple[ComponentStatus, str | None, float | None]:
+    from app.worker.tasks import celery_app
+
+    start = time.time()
+    try:
+        inspect = celery_app.control.inspect(timeout=3.0)
+        ping = inspect.ping()
+        elapsed = (time.time() - start) * 1000
+        if ping:
+            workers = sorted(ping.keys())
+            return ComponentStatus.alive, f"{len(workers)} 个 Worker 在线", elapsed
+        return ComponentStatus.dead, "无 Celery Worker 响应", elapsed
+    except Exception as exc:
+        elapsed = (time.time() - start) * 1000
+        return ComponentStatus.dead, f"Celery 探测失败：{exc}", elapsed
 
 
 def _probe_backend(_settings: Settings) -> tuple[ComponentStatus, str | None, float | None]:
@@ -230,6 +269,33 @@ def _parse_postgres_credentials(settings: Settings) -> list[ComponentCredential]
     return credentials
 
 
+def _parse_redis_credentials(settings: Settings) -> list[ComponentCredential]:
+    url = _effective_redis_url(settings)
+    parsed = urlparse(url)
+    host, port = _redis_host_port_from_parsed(parsed)
+    credentials: list[ComponentCredential] = [
+        ComponentCredential(label="连接地址", value=url),
+        ComponentCredential(label="主机", value=host),
+        ComponentCredential(label="端口", value=str(port)),
+    ]
+    if parsed.username:
+        credentials.append(ComponentCredential(label="用户名", value=unquote(parsed.username)))
+    if parsed.password:
+        credentials.append(ComponentCredential(label="密码", value=unquote(parsed.password)))
+    db = (parsed.path or "").lstrip("/")
+    if db:
+        credentials.append(ComponentCredential(label="DB 索引", value=unquote(db)))
+    if not parsed.username and not parsed.password:
+        credentials.append(ComponentCredential(label="认证", value="默认无需账号密码"))
+    return credentials
+
+
+def _redis_host_port_from_parsed(parsed) -> tuple[str, int]:
+    host = parsed.hostname or "localhost"
+    port = parsed.port or 6379
+    return host, port
+
+
 def _build_credentials(component_id: str, settings: Settings) -> list[ComponentCredential]:
     if component_id == "backend":
         return [
@@ -273,6 +339,13 @@ def _build_credentials(component_id: str, settings: Settings) -> list[ComponentC
         return credentials
     if component_id in {"etcd", "mineru", "odl_hybrid"}:
         return [ComponentCredential(label="认证", value="默认无需账号密码")]
+    if component_id == "redis":
+        return _parse_redis_credentials(settings)
+    if component_id == "celery_worker":
+        return [
+            ComponentCredential(label="Broker", value=_effective_redis_url(settings)),
+            ComponentCredential(label="说明", value="后台 Worker 进程，无 Web 管理界面"),
+        ]
     return []
 
 
@@ -368,6 +441,24 @@ COMPONENT_DEFINITIONS: list[ComponentDefinition] = [
         exposed_port_getter=lambda _s: None,
     ),
     ComponentDefinition(
+        id="redis",
+        name="Redis",
+        service_type="queue",
+        host="redis",
+        port=6379,
+        is_enabled=lambda _s: True,
+        exposed_port_getter=lambda s: _positive_port(s.redis_exposed_port),
+    ),
+    ComponentDefinition(
+        id="celery_worker",
+        name="Celery Worker",
+        service_type="task_worker",
+        host="celery-worker",
+        port=0,
+        is_enabled=lambda s: s.celery_enabled,
+        exposed_port_getter=lambda _s: None,
+    ),
+    ComponentDefinition(
         id="mineru",
         name="MinerU",
         service_type="parser",
@@ -399,6 +490,8 @@ PROBE_FUNCTIONS: dict[str, ProbeFn] = {
     "opensearch": _probe_opensearch,
     "neo4j": _probe_neo4j,
     "etcd": _probe_etcd,
+    "redis": _probe_redis,
+    "celery_worker": _probe_celery_worker,
     "mineru": _probe_mineru,
     "odl_hybrid": _probe_odl_hybrid,
 }
@@ -415,6 +508,8 @@ def _resolve_definition_host_port(defn: ComponentDefinition, settings: Settings)
         return defn.host, _resolved_frontend_container_port(settings)
     if defn.id == "milvus":
         return settings.milvus_host, settings.milvus_port
+    if defn.id == "redis":
+        return _redis_host_port(settings)
     return defn.host, defn.port
 
 

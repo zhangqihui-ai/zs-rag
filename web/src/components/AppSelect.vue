@@ -15,31 +15,29 @@
       <AppIcon name="chevron-down" class="app-select-arrow" :class="{ 'is-open': open }" :size="16" />
     </button>
 
-    <Teleport to="body">
-      <div
-        v-if="open"
-        ref="panelEl"
-        class="app-select-panel"
-        :style="panelStyle"
-        role="listbox"
-        @click.stop
+    <div
+      v-if="open"
+      ref="panelEl"
+      class="app-select-panel"
+      :style="panelStyle"
+      role="listbox"
+      @pointerdown.stop
+    >
+      <button
+        v-for="opt in options"
+        :key="String(opt.value)"
+        type="button"
+        class="app-select-option"
+        :class="{ 'is-active': opt.value === modelValue }"
+        role="option"
+        :aria-selected="opt.value === modelValue"
+        @pointerdown.stop.prevent="selectOption(opt.value)"
       >
-        <button
-          v-for="opt in options"
-          :key="String(opt.value)"
-          type="button"
-          class="app-select-option"
-          :class="{ 'is-active': opt.value === modelValue }"
-          role="option"
-          :aria-selected="opt.value === modelValue"
-          @click="selectOption(opt.value)"
-        >
-          <span class="app-select-option-text">{{ opt.label }}</span>
-          <AppIcon v-if="opt.value === modelValue" name="check" :size="15" class="app-select-option-check" />
-        </button>
-        <div v-if="options.length === 0" class="app-select-empty">暂无选项</div>
-      </div>
-    </Teleport>
+        <span class="app-select-option-text">{{ opt.label }}</span>
+        <AppIcon v-if="opt.value === modelValue" name="check" :size="15" class="app-select-option-check" />
+      </button>
+      <div v-if="options.length === 0" class="app-select-empty">暂无选项</div>
+    </div>
   </div>
 </template>
 
@@ -76,6 +74,7 @@ const open = ref(false)
 const rootEl = ref<HTMLElement | null>(null)
 const panelEl = ref<HTMLElement | null>(null)
 const panelStyle = ref<Record<string, string>>({})
+let outsideListenerTimer: ReturnType<typeof setTimeout> | null = null
 
 const selectedLabel = computed(() => {
   const match = props.options.find((opt) => opt.value === props.modelValue)
@@ -93,14 +92,15 @@ function updatePanelPosition() {
     top: `${Math.round(rect.bottom + 6)}px`,
     left: `${Math.round(rect.left)}px`,
     minWidth: `${Math.round(rect.width)}px`,
-    zIndex: '1200',
+    zIndex: '9999',
   }
 }
 
 function selectOption(value: string) {
-  if (value !== props.modelValue) {
-    emit('update:modelValue', value)
+  if (!open.value) {
+    return
   }
+  emit('update:modelValue', value)
   open.value = false
 }
 
@@ -109,6 +109,16 @@ function toggleOpen() {
     return
   }
   open.value = !open.value
+}
+
+function removeOutsideListeners() {
+  if (outsideListenerTimer !== null) {
+    clearTimeout(outsideListenerTimer)
+    outsideListenerTimer = null
+  }
+  document.removeEventListener('click', onDocumentClick)
+  window.removeEventListener('resize', onReposition)
+  window.removeEventListener('scroll', onReposition, true)
 }
 
 function onDocumentClick(ev: MouseEvent) {
@@ -132,21 +142,20 @@ watch(open, (v) => {
   if (v) {
     void nextTick(() => {
       updatePanelPosition()
-      document.addEventListener('click', onDocumentClick)
-      window.addEventListener('resize', onReposition)
-      window.addEventListener('scroll', onReposition, true)
+      outsideListenerTimer = setTimeout(() => {
+        outsideListenerTimer = null
+        document.addEventListener('click', onDocumentClick)
+        window.addEventListener('resize', onReposition)
+        window.addEventListener('scroll', onReposition, true)
+      }, 0)
     })
   } else {
-    document.removeEventListener('click', onDocumentClick)
-    window.removeEventListener('resize', onReposition)
-    window.removeEventListener('scroll', onReposition, true)
+    removeOutsideListeners()
   }
 })
 
 onBeforeUnmount(() => {
-  document.removeEventListener('click', onDocumentClick)
-  window.removeEventListener('resize', onReposition)
-  window.removeEventListener('scroll', onReposition, true)
+  removeOutsideListeners()
 })
 </script>
 
@@ -156,6 +165,7 @@ onBeforeUnmount(() => {
   flex-direction: column;
   gap: 6px;
   min-width: 0;
+  position: relative;
 }
 
 .app-select-label {
@@ -229,6 +239,7 @@ onBeforeUnmount(() => {
   background: var(--bg-primary);
   box-shadow: 0 12px 40px rgba(15, 23, 42, 0.16);
   animation: app-select-pop 0.14s ease;
+  pointer-events: auto;
 }
 
 @keyframes app-select-pop {

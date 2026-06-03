@@ -178,6 +178,27 @@ export interface KnowledgeDocumentParseLog {
   updated_at: string | null
 }
 
+export interface BatchDocumentProcessItemResult {
+  document_id: number
+  queued: boolean
+  skipped?: boolean
+  mode?: 'parse' | 'reindex' | null
+  celery_task_id?: string | null
+  background_task_id?: number | null
+  force?: boolean
+  fallback?: boolean
+  skip_reason?: string | null
+  error?: string | null
+}
+
+export interface BatchDocumentProcessResponse {
+  items: BatchDocumentProcessItemResult[]
+  queued_count: number
+  failed_count: number
+  skipped_count: number
+  total: number
+}
+
 export interface KnowledgeChunk {
   id: number
   chunk_uid: string
@@ -505,6 +526,22 @@ export const knowledgeBaseApi = {
   },
   reconcileProcessBatch(kbId: number, payload: { batch_uid: string }) {
     return unwrap<KbProcessLogEvent>(http.post(`/knowledge-bases/${kbId}/process-log/reconcile-batch`, payload))
+  },
+  /** 批量提交解析/重建至 Celery 队列（一次 HTTP，不占用浏览器 SSE 连接） */
+  batchEnqueueProcess(
+    kbId: number,
+    payload: {
+      document_ids: number[]
+      batch_uid?: string
+      force?: boolean
+      embedding_model_id?: number | null
+    },
+  ) {
+    return unwrap<BatchDocumentProcessResponse>(
+      http.post(`/knowledge-bases/${kbId}/documents/batch-process`, payload, {
+        timeout: longRequestTimeoutMs,
+      }),
+    )
   },
   /** 开始解析、分块与索引（仅待解析/失败状态） */
   parseDocument(kbId: number, documentId: number, embedding_model_id?: number | null) {

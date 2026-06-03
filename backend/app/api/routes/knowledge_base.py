@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.enterprise_space_context import CurrentSpace, CurrentUser, RequireMembership
 from app.core.errors import AppError
-from app.core.knowledge_retrieval_defaults import apply_retrieval_defaults_to_payload
+from app.core.platform_audit_helper import audit_action
 from app.core.neo4j_client import test_neo4j_connection
 from app.db.session import SessionLocal, get_db
 from app.core.milvus_client import drop_collection_if_exists
@@ -34,6 +34,8 @@ from app.schemas.knowledge_base import (
     Neo4jConnectionUpdate,
 )
 from app.schemas.knowledge_document import (
+    BatchDocumentProcessRequest,
+    BatchDocumentProcessResponse,
     ChunkSourceContextResponse,
     KnowledgeChunkEnrichmentRegenerateResponse,
     KnowledgeChunkEnrichmentUpdate,
@@ -55,6 +57,7 @@ from app.schemas.kb_process_log import (
     StartProcessBatchRequest,
     UploadBatchAuditRequest,
 )
+from app.schemas.document_background_task import DocumentBackgroundTaskResponse
 from app.schemas.graph_search import GraphSearchRequest, GraphSearchResponse
 from app.schemas.retrieval import (
     KnowledgeSearchRequest,
@@ -62,8 +65,10 @@ from app.schemas.retrieval import (
     MultiKnowledgeSearchRequest,
     MultiKnowledgeSearchResponse,
 )
+from app.core.knowledge_retrieval_defaults import apply_retrieval_defaults_to_payload
 from app.core.kb_type import ensure_lightrag_kb
 from app.services.lightrag_engine import query_graph_kb
+from app.services import document_background_task_service as bg_task_service
 from app.services import kb_process_audit_service
 from app.services.knowledge_base_service import (
     build_deleted_knowledge_base_name,
@@ -81,6 +86,7 @@ from app.services.knowledge_document_service import (
     MINERU_VIEW_MD_FILENAME,
     cancel_document_process,
     delete_document_asset,
+    enqueue_documents_process_batch,
     get_document_detail,
     get_document_or_error,
     get_document_parse_log,
@@ -171,7 +177,9 @@ def list_knowledge_bases(
 @router.post("", response_model=KnowledgeBaseResponse, status_code=status.HTTP_201_CREATED)
 def create_knowledge_base(
     payload: KnowledgeBaseCreate,
+    request: Request,
     current_space: CurrentSpace,
+    current_user: CurrentUser,
     membership: RequireMembership,
     db: Session = Depends(get_db),
 ) -> KnowledgeBase:
@@ -204,6 +212,17 @@ def create_knowledge_base(
             pass
     db.commit()
     db.refresh(knowledge_base)
+    audit_action(
+        db,
+        request,
+        action="knowledge_base.create",
+        resource_type="knowledge_base",
+        resource_id=knowledge_base.id,
+        enterprise_space_id=current_space.id,
+        user_id=current_user.id,
+        detail={"name": knowledge_base.name, "kb_type": knowledge_base.kb_type},
+    )
+    db.commit()
     return knowledge_base
 
 
@@ -237,7 +256,9 @@ def get_knowledge_base(
 def update_knowledge_base(
     kb_id: int,
     payload: KnowledgeBaseUpdate,
+    request: Request,
     current_space: CurrentSpace,
+    current_user: CurrentUser,
     membership: RequireMembership,
     db: Session = Depends(get_db),
 ) -> KnowledgeBase:
@@ -291,19 +312,43 @@ def update_knowledge_base(
             pass
     db.commit()
     db.refresh(knowledge_base)
+    audit_action(
+        db,
+        request,
+        action="knowledge_base.update",
+        resource_type="knowledge_base",
+        resource_id=kb_id,
+        enterprise_space_id=current_space.id,
+        user_id=current_user.id,
+        detail={"fields": list(update_data.keys())},
+    )
+    db.commit()
     return knowledge_base
 
 
 @router.delete("/{kb_id}", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
 def delete_knowledge_base(
     kb_id: int,
+    request: Request,
     current_space: CurrentSpace,
+    current_user: CurrentUser,
     membership: RequireMembership,
     db: Session = Depends(get_db),
 ) -> Response:
     knowledge_base = get_knowledge_base_or_error(db, space_id=current_space.id, kb_id=kb_id)
+    kb_name = knowledge_base.name
     knowledge_base.status = "deleted"
     knowledge_base.name = build_deleted_knowledge_base_name(knowledge_base.name, knowledge_base.id)
+    audit_action(
+        db,
+        request,
+        action="knowledge_base.delete",
+        resource_type="knowledge_base",
+        resource_id=kb_id,
+        enterprise_space_id=current_space.id,
+        user_id=current_user.id,
+        detail={"name": kb_name},
+    )
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -637,6 +682,28 @@ async def upload_document_endpoint(
         skip_if_duplicate=skip_if_duplicate,
         user_id=current_user.id,
         record_audit=False,
+    )
+
+
+@router.post("/{kb_id}/documents/batch-process", response_model=BatchDocumentProcessResponse)
+def batch_process_documents(
+    kb_id: int,
+    payload: BatchDocumentProcessRequest,
+    current_space: CurrentSpace,
+    current_user: CurrentUser,
+    membership: RequireMembership,
+    db: Session = Depends(get_db),
+) -> dict:
+    """一次性将多篇文档提交至 Celery 队列，由 worker 按并发度消费（不占用浏览器 SSE 连接数）。"""
+    return enqueue_documents_process_batch(
+        db,
+        space_id=current_space.id,
+        kb_id=kb_id,
+        document_ids=payload.document_ids,
+        embedding_model_id=payload.embedding_model_id,
+        force=payload.force,
+        user_id=current_user.id,
+        batch_uid=payload.batch_uid,
     )
 
 
@@ -1070,6 +1137,23 @@ def regenerate_knowledge_chunk_enrichment_endpoint(
         space_id=current_space.id,
         kb_id=kb_id,
         chunk_id=chunk_id,
+    )
+
+
+@router.get("/{kb_id}/background-tasks", response_model=list[DocumentBackgroundTaskResponse])
+def list_background_tasks(
+    kb_id: int,
+    current_space: CurrentSpace,
+    membership: RequireMembership,
+    db: Session = Depends(get_db),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> list[DocumentBackgroundTaskResponse]:
+    get_knowledge_base_or_error(db, space_id=current_space.id, kb_id=kb_id)
+    return bg_task_service.list_document_background_tasks(
+        db,
+        enterprise_space_id=current_space.id,
+        knowledge_base_id=kb_id,
+        limit=limit,
     )
 
 

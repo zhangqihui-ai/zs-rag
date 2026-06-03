@@ -170,6 +170,55 @@ def get_embedding_model_for_knowledge_base(
     return model
 
 
+def get_rerank_model_for_knowledge_base(
+    db: Session,
+    *,
+    knowledge_base: KnowledgeBase,
+    override_model_id: int | None = None,
+) -> AIModel:
+    model_id = override_model_id
+    if model_id is None:
+        stored = knowledge_base.config if isinstance(knowledge_base.config, dict) else {}
+        retrieval = stored.get("retrieval") if isinstance(stored.get("retrieval"), dict) else {}
+        raw_id = retrieval.get("rerank_model_id")
+        if raw_id is not None:
+            try:
+                model_id = int(raw_id)
+            except (TypeError, ValueError):
+                model_id = None
+    if model_id is None:
+        default_binding = db.execute(
+            select(AIModelDefault)
+            .options(selectinload(AIModelDefault.model).selectinload(AIModel.provider))
+            .where(
+                AIModelDefault.enterprise_space_id == knowledge_base.enterprise_space_id,
+                AIModelDefault.model_type == "rerank",
+            )
+        ).scalar_one_or_none()
+        if default_binding is not None and default_binding.model is not None:
+            model = default_binding.model
+            if not model.is_enabled:
+                raise AppError(status_code=400, code="MODEL_DISABLED", message="默认 rerank 模型尚未启用")
+            return model
+        raise AppError(status_code=400, code="RERANK_MODEL_NOT_CONFIGURED", message="当前知识库未配置 rerank 模型")
+
+    model = db.execute(
+        select(AIModel)
+        .options(selectinload(AIModel.provider))
+        .where(
+            AIModel.id == model_id,
+            AIModel.enterprise_space_id == knowledge_base.enterprise_space_id,
+        )
+    ).scalar_one_or_none()
+    if model is None:
+        raise AppError(status_code=404, code="MODEL_NOT_FOUND", message="rerank 模型不存在")
+    if not model.is_enabled:
+        raise AppError(status_code=400, code="MODEL_DISABLED", message="指定 rerank 模型尚未启用")
+    if model.model_type != "rerank":
+        raise AppError(status_code=400, code="MODEL_TYPE_MISMATCH", message="指定模型不是 rerank 模型")
+    return model
+
+
 def format_ai_model_for_log(model: AIModel, *, role: str) -> str:
     """生成解析/入库日志中展示的模型一行说明。"""
     prov_name = ""

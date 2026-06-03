@@ -214,6 +214,13 @@ async function loadChunkDetail() {
   const result = props.result
   const kbId = resolveKbId()
   if (!props.open || !result || !kbId) return
+
+  const isLightragResult =
+    result.metadata?.source === 'lightrag' || result.chunk_uid.startsWith('lightrag:')
+  if (isLightragResult) {
+    return
+  }
+
   loading.value = true
   try {
     const [chunk, document] = await Promise.all([

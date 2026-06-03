@@ -56,7 +56,7 @@
         'app-main--fill': isFillPage,
       }"
     >
-      <header class="app-header">
+      <header class="app-header" :class="{ 'app-header--kb-fill': isKbDetailFillPage }">
         <div class="app-header-main">
           <div class="app-breadcrumb">
             <template v-for="(item, index) in breadcrumbs" :key="`${item.label}-${index}`">
@@ -121,6 +121,7 @@
           :class="{
             'app-content-inner--chat': isChatRoute,
             'app-content-inner--chat-embed-panel': isChatEmbedPanel,
+            'app-content-inner--fill': isFillPage,
           }"
         >
           <slot />
@@ -213,6 +214,9 @@ const isChatRoute = computed(() => route.name === 'chat')
 /** 铺满型页面：内容区收小上下留白，便于子内容撑满一屏 */
 const isFillPage = computed(
   () => route.name === 'knowledge-document-detail' || layoutFillPageOverride.value === true,
+)
+const isKbDetailFillPage = computed(
+  () => isFillPage.value && route.name === 'knowledge-base-detail',
 )
 /** iframe 嵌入：仅保留对话主区域，隐藏侧栏与顶栏 */
 const isChatEmbedPanel = computed(() => {
@@ -629,8 +633,18 @@ button.app-breadcrumb-link {
 }
 
 .app-content.app-content--flush-kb-detail {
-  padding-top: 8px;
-  padding-bottom: 10px;
+  padding: 0 40px 10px;
+}
+
+.app-header.app-header--kb-fill {
+  min-height: 52px;
+  padding: 6px 40px;
+}
+
+.app-content-inner.app-content-inner--fill {
+  flex: 1 1 0%;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .app-content-inner {

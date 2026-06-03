@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
-from app.core.enterprise_space_context import CurrentSpace, RequireMembership
+from app.core.enterprise_space_context import CurrentSpace, CurrentUser, RequireMembership
+from app.core.platform_audit_helper import audit_action
 from app.core.errors import AppError
 from app.core.provider_adapter import test_provider_connection
 from app.core.provider_templates import MODEL_TYPE_SET, get_provider_template
@@ -79,7 +80,9 @@ def list_providers(
 @router.post("/providers")
 def create_provider(
     payload: ProviderCreateRequest,
+    request: Request,
     current_space: CurrentSpace,
+    current_user: CurrentUser,
     membership: RequireMembership,
     db: Session = Depends(get_db),
 ) -> JSONResponse:
@@ -115,6 +118,17 @@ def create_provider(
     if payload.auto_sync_models:
         sync_result = sync_provider_models(db, provider=provider, raise_on_error=False)
 
+    db.commit()
+    audit_action(
+        db,
+        request,
+        action="model.provider.create",
+        resource_type="ai_model_provider",
+        resource_id=provider.id,
+        enterprise_space_id=current_space.id,
+        user_id=current_user.id,
+        detail={"provider_name": provider.provider_name},
+    )
     db.commit()
     return ok_response(
         {
@@ -172,7 +186,9 @@ def get_provider_detail(
 def update_provider(
     provider_id: int,
     payload: ProviderUpdateRequest,
+    request: Request,
     current_space: CurrentSpace,
+    current_user: CurrentUser,
     membership: RequireMembership,
     db: Session = Depends(get_db),
 ) -> JSONResponse:
@@ -214,6 +230,17 @@ def update_provider(
         sync_provider_models(db, provider=provider, raise_on_error=False)
 
     db.commit()
+    audit_action(
+        db,
+        request,
+        action="model.provider.update",
+        resource_type="ai_model_provider",
+        resource_id=provider.id,
+        enterprise_space_id=current_space.id,
+        user_id=current_user.id,
+        detail={"provider_name": provider.provider_name},
+    )
+    db.commit()
     refreshed = get_provider_or_error(db, space_id=current_space.id, provider_id=provider.id)
     return ok_response(serialize_provider_detail(refreshed))
 
@@ -221,7 +248,9 @@ def update_provider(
 @router.delete("/providers/{provider_id}")
 def delete_provider(
     provider_id: int,
+    request: Request,
     current_space: CurrentSpace,
+    current_user: CurrentUser,
     membership: RequireMembership,
     db: Session = Depends(get_db),
 ) -> JSONResponse:
@@ -233,7 +262,18 @@ def delete_provider(
             code="PROVIDER_HAS_DEFAULT_MODEL",
             message="该厂商下仍有模型被设为默认模型，请先修改默认模型",
         )
+    provider_name = provider.provider_name
     db.delete(provider)
+    audit_action(
+        db,
+        request,
+        action="model.provider.delete",
+        resource_type="ai_model_provider",
+        resource_id=provider_id,
+        enterprise_space_id=current_space.id,
+        user_id=current_user.id,
+        detail={"provider_name": provider_name},
+    )
     db.commit()
     return ok_response(True, message="deleted")
 
@@ -316,11 +356,23 @@ def get_model(
 def update_model_enabled(
     model_id: int,
     payload: ModelEnabledUpdateRequest,
+    request: Request,
     current_space: CurrentSpace,
+    current_user: CurrentUser,
     membership: RequireMembership,
     db: Session = Depends(get_db),
 ) -> JSONResponse:
     result = set_model_enabled(db, space_id=current_space.id, model_id=model_id, is_enabled=payload.is_enabled)
+    audit_action(
+        db,
+        request,
+        action="model.enabled.update",
+        resource_type="ai_model",
+        resource_id=model_id,
+        enterprise_space_id=current_space.id,
+        user_id=current_user.id,
+        detail={"is_enabled": payload.is_enabled},
+    )
     db.commit()
     return ok_response(result)
 
@@ -337,11 +389,22 @@ def get_default_models(
 @router.put("/defaults")
 def update_defaults(
     payload: BatchDefaultsUpdateRequest,
+    request: Request,
     current_space: CurrentSpace,
+    current_user: CurrentUser,
     membership: RequireMembership,
     db: Session = Depends(get_db),
 ) -> JSONResponse:
     save_defaults(db, space_id=current_space.id, payload=payload.to_mapping())
+    audit_action(
+        db,
+        request,
+        action="model.defaults.update",
+        resource_type="ai_model_defaults",
+        enterprise_space_id=current_space.id,
+        user_id=current_user.id,
+        detail=payload.to_mapping(),
+    )
     db.commit()
     return ok_response(True, message="saved")
 

@@ -246,6 +246,80 @@ class BaseProvider(ABC):
                 model_name=model_name,
             )
 
+    def rerank(
+        self,
+        model_name: str,
+        query: str,
+        documents: list[str],
+        *,
+        top_n: int | None = None,
+        timeout: httpx.Timeout | float | None = None,
+    ) -> ProviderResponse:
+        start_time = time.time()
+        try:
+            scores = self._rerank(model_name, query, documents, top_n=top_n, timeout=timeout)
+            return ProviderResponse(
+                success=True,
+                message="重排序成功",
+                response_time_ms=(time.time() - start_time) * 1000,
+                model_name=model_name,
+                data=scores,
+            )
+        except NotImplementedError:
+            return ProviderResponse(
+                success=False,
+                message="当前 Provider 暂不支持 rerank 调用",
+                response_time_ms=(time.time() - start_time) * 1000,
+                model_name=model_name,
+            )
+        except httpx.HTTPStatusError as exc:
+            return ProviderResponse(
+                success=False,
+                message=_http_error_message(exc),
+                response_time_ms=(time.time() - start_time) * 1000,
+                model_name=model_name,
+            )
+        except httpx.RequestError as exc:
+            return ProviderResponse(
+                success=False,
+                message=f"请求失败：{exc}",
+                response_time_ms=(time.time() - start_time) * 1000,
+                model_name=model_name,
+            )
+        except Exception as exc:  # pragma: no cover
+            return ProviderResponse(
+                success=False,
+                message=f"重排序失败：{exc}",
+                response_time_ms=(time.time() - start_time) * 1000,
+                model_name=model_name,
+            )
+
+    def _rerank(
+        self,
+        model_name: str,
+        query: str,
+        documents: list[str],
+        *,
+        top_n: int | None = None,
+        timeout: httpx.Timeout | float | None = None,
+    ) -> list[dict[str, float | int]]:
+        payload: dict[str, Any] = {
+            "model": model_name,
+            "query": query,
+            "documents": documents,
+        }
+        if top_n is not None:
+            payload["top_n"] = top_n
+        response = self.client.post(
+            f"{self.config.base_url.rstrip('/')}/rerank",
+            headers={**self.request_headers(), "Content-Type": "application/json"},
+            json=payload,
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        body = response.json()
+        return _parse_cohere_rerank_response(body, len(documents))
+
     def _embed(
         self,
         model_name: str,
@@ -389,6 +463,35 @@ class DashscopeCodingProvider(OpenAICompatibleProvider):
             )
 
 
+def _parse_cohere_rerank_response(body: Any, doc_count: int) -> list[dict[str, float | int]]:
+    """解析 Cohere 兼容 rerank 响应。"""
+    results = None
+    if isinstance(body, dict):
+        results = body.get("results")
+        if results is None and isinstance(body.get("output"), dict):
+            results = body["output"].get("results")
+    if not isinstance(results, list):
+        raise ValueError("rerank 响应格式无效")
+    out: list[dict[str, float | int]] = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        idx = item.get("index")
+        score = item.get("relevance_score")
+        if score is None:
+            score = item.get("score")
+        try:
+            index = int(idx)
+            relevance = float(score)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= index < doc_count:
+            out.append({"index": index, "score": relevance})
+    if not out:
+        raise ValueError("rerank 响应无有效结果")
+    return out
+
+
 class QwenProvider(OpenAICompatibleProvider):
     EMBEDDING_CANDIDATES = (
         "text-embedding-v4",
@@ -470,6 +573,31 @@ class QwenProvider(OpenAICompatibleProvider):
                 )
             )
         return discovered
+
+    def _rerank(
+        self,
+        model_name: str,
+        query: str,
+        documents: list[str],
+        *,
+        top_n: int | None = None,
+        timeout: httpx.Timeout | float | None = None,
+    ) -> list[dict[str, float | int]]:
+        url = f"{self._native_api_base_url()}/api/v1/services/rerank/text-rerank/text-rerank"
+        payload: dict[str, Any] = {
+            "model": model_name,
+            "input": {"query": query, "documents": documents},
+        }
+        if top_n is not None:
+            payload["parameters"] = {"top_n": top_n}
+        response = self.client.post(
+            url,
+            headers={**self.request_headers(), "Content-Type": "application/json"},
+            json=payload,
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        return _parse_cohere_rerank_response(response.json(), len(documents))
 
     def _native_api_base_url(self) -> str:
         base_url = self.config.base_url.rstrip("/")
@@ -724,5 +852,34 @@ def embed_texts(
     provider = get_provider(config)
     try:
         return provider.embed(model_name, inputs, timeout=timeout)
+    finally:
+        provider.close()
+
+
+def rerank_documents(
+    config: AIModelProvider,
+    model_name: str,
+    query: str,
+    documents: list[str],
+    *,
+    top_n: int | None = None,
+    timeout: httpx.Timeout | float | None = None,
+) -> ProviderResponse:
+    provider = get_provider(config)
+    try:
+        if hasattr(provider, "rerank"):
+            return provider.rerank(
+                model_name,
+                query,
+                documents,
+                top_n=top_n,
+                timeout=timeout,
+            )
+        return ProviderResponse(
+            success=False,
+            message="当前 Provider 暂不支持 rerank 调用",
+            response_time_ms=0.0,
+            model_name=model_name,
+        )
     finally:
         provider.close()

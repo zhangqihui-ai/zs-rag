@@ -16,6 +16,7 @@ from app.core.errors import (
     handle_validation_error,
 )
 from app.core.initialization import initialize_admin_and_default_space
+from app.core.rate_limit import RateLimitMiddleware
 from app.core.request_context import RequestContextMiddleware
 from app.db.session import SessionLocal
 
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title=settings.app_name)
 app.add_middleware(RequestContextMiddleware)
+app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.normalized_cors_origins,

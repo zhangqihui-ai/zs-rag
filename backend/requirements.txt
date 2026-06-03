@@ -25,4 +25,5 @@ neo4j==5.27.0
 
 # LightRAG graph knowledge base
 lightrag-hku>=1.4.0,<1.5
-opendataloader-pdf>=1.0.0
+celery[redis]==5.4.0
+redis==5.2.1

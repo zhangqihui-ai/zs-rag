@@ -12,7 +12,7 @@
         <div class="section-heading retrieval-section-head">
           <div>
             <h3>检索测试</h3>
-            <p>跨库查询时，各库独立召回后按 Score 合并排序，再取 Top K。</p>
+            <p>跨库查询时，经典库与图知识库分别召回后按 Score 合并排序，再取 Top K。</p>
           </div>
           <div class="retrieval-head-actions">
             <button class="btn btn-ghost" type="button" @click="selectAllKbs">全选知识库</button>

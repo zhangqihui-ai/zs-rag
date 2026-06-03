@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.authentication import create_access_token, verify_password
+from app.core.platform_audit_helper import audit_action
 from app.core.enterprise_space_context import CurrentUser, is_bootstrap_admin
 from app.db.session import get_db
 from app.models.enterprise_space import Membership, User
@@ -14,6 +15,7 @@ router = APIRouter(tags=["authentication"])
 @router.post("/auth/login", response_model=Token)
 def login(
     login_data: UserLogin,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> Token:
     user = db.execute(select(User).where(User.username == login_data.username)).scalar_one_or_none()
@@ -33,6 +35,16 @@ def login(
         )
 
     access_token = create_access_token(data={"sub": str(user.id), "username": user.username})
+    audit_action(
+        db,
+        request,
+        action="auth.login",
+        resource_type="user",
+        resource_id=user.id,
+        user_id=user.id,
+        message=f"用户 {user.username} 登录成功",
+    )
+    db.commit()
     return Token(access_token=access_token)
 
 

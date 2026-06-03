@@ -4,12 +4,13 @@ import asyncio
 import json
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Path, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal, get_db
 from app.core.enterprise_space_context import CurrentSpace, CurrentUser, RequireMembership
+from app.core.platform_audit_helper import audit_action
 from app.schemas.chat import (
     ChatConfigurationUpdate,
     ChatConfigurationResponse,
@@ -111,6 +112,7 @@ def update_session(
 @router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_session(
     session_id: str,
+    request: Request,
     current_space: CurrentSpace,
     current_user: CurrentUser,
     _: RequireMembership,
@@ -122,6 +124,16 @@ def delete_session(
         user_id=current_user.id,
         enterprise_space_id=current_space.id,
     )
+    audit_action(
+        db,
+        request,
+        action="chat.session.delete",
+        resource_type="chat_session",
+        resource_id=session_id,
+        enterprise_space_id=current_space.id,
+        user_id=current_user.id,
+    )
+    db.commit()
 
 
 @router.get("/sessions/{session_id}/config", response_model=ChatConfigurationResponse)
@@ -537,6 +549,7 @@ def update_chat(
 @router.delete("/{chat_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_chat(
     chat_id: ChatId,
+    request: Request,
     current_space: CurrentSpace,
     current_user: CurrentUser,
     _: RequireMembership,
@@ -548,3 +561,13 @@ def delete_chat(
         user_id=current_user.id,
         enterprise_space_id=current_space.id,
     )
+    audit_action(
+        db,
+        request,
+        action="chat.conversation.delete",
+        resource_type="chat_conversation",
+        resource_id=chat_id,
+        enterprise_space_id=current_space.id,
+        user_id=current_user.id,
+    )
+    db.commit()

@@ -69,3 +69,7 @@ export function searchResultQuestions(result: KnowledgeSearchResult) {
   const raw = result.metadata?.enrichment_questions
   return Array.isArray(raw) ? raw.map(String).filter(Boolean) : []
 }
+
+export function isGraphSearchResult(result: KnowledgeSearchResult) {
+  return result.metadata?.source === 'lightrag' || result.chunk_uid.startsWith('lightrag:')
+}

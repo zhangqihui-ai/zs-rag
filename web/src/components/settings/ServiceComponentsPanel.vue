@@ -184,6 +184,8 @@ const serviceTypeLabels: Record<string, string> = {
   graph: '图数据库',
   parser: '解析器',
   coordination: '协调服务',
+  queue: '消息队列',
+  task_worker: '任务队列',
 }
 
 function serviceTypeLabel(type: string): string {

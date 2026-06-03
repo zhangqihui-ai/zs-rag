@@ -188,16 +188,95 @@ def test_disabled_components():
         odl_hybrid=False,
         neo4j_uri=None,
         opensearch_url=None,
+        celery_enabled=False,
     )
     mineru = next(defn for defn in svc.COMPONENT_DEFINITIONS if defn.id == "mineru")
     odl = next(defn for defn in svc.COMPONENT_DEFINITIONS if defn.id == "odl_hybrid")
     neo4j = next(defn for defn in svc.COMPONENT_DEFINITIONS if defn.id == "neo4j")
     opensearch = next(defn for defn in svc.COMPONENT_DEFINITIONS if defn.id == "opensearch")
+    celery = next(defn for defn in svc.COMPONENT_DEFINITIONS if defn.id == "celery_worker")
 
     assert svc._build_item(mineru, settings).status == ComponentStatus.disabled
     assert svc._build_item(odl, settings).status == ComponentStatus.disabled
     assert svc._build_item(neo4j, settings).status == ComponentStatus.disabled
     assert svc._build_item(opensearch, settings).status == ComponentStatus.disabled
+    assert svc._build_item(celery, settings).status == ComponentStatus.disabled
+
+
+def test_redis_component_host_port_and_exposed():
+    settings = Settings(
+        redis_url="redis://cache:6380/2",
+        redis_exposed_port=6379,
+        mineru_enabled=False,
+        odl_hybrid=False,
+        neo4j_uri=None,
+        opensearch_url=None,
+    )
+    redis_defn = next(defn for defn in svc.COMPONENT_DEFINITIONS if defn.id == "redis")
+    item = svc._build_item(redis_defn, settings)
+
+    host, port = svc._resolve_definition_host_port(redis_defn, settings)
+    assert host == "cache"
+    assert port == 6380
+    assert item.exposed is True
+    assert item.external_port == 6379
+
+
+def test_redis_credentials():
+    settings = Settings(
+        redis_url="redis://:secret@redis:6379/1",
+        mineru_enabled=False,
+        odl_hybrid=False,
+        neo4j_uri=None,
+        opensearch_url=None,
+    )
+    redis_defn = next(defn for defn in svc.COMPONENT_DEFINITIONS if defn.id == "redis")
+    item = svc._build_item(redis_defn, settings)
+    labels = {cred.label: cred.value for cred in item.credentials}
+    assert labels["连接地址"] == "redis://:secret@redis:6379/1"
+    assert labels["主机"] == "redis"
+    assert labels["端口"] == "6379"
+    assert labels["密码"] == "secret"
+    assert labels["DB 索引"] == "1"
+
+
+def test_redis_credentials_default_no_auth():
+    settings = Settings(
+        redis_url="redis://redis:6379/0",
+        mineru_enabled=False,
+        odl_hybrid=False,
+        neo4j_uri=None,
+        opensearch_url=None,
+    )
+    redis_defn = next(defn for defn in svc.COMPONENT_DEFINITIONS if defn.id == "redis")
+    item = svc._build_item(redis_defn, settings)
+    labels = {cred.label: cred.value for cred in item.credentials}
+    assert labels["DB 索引"] == "0"
+    assert labels["认证"] == "默认无需账号密码"
+
+
+def test_celery_worker_credentials_and_probe_mock():
+    settings = Settings(
+        celery_enabled=True,
+        redis_url="redis://redis:6379/0",
+        mineru_enabled=False,
+        odl_hybrid=False,
+        neo4j_uri=None,
+        opensearch_url=None,
+    )
+    celery_defn = next(defn for defn in svc.COMPONENT_DEFINITIONS if defn.id == "celery_worker")
+
+    original_probe = svc.PROBE_FUNCTIONS["celery_worker"]
+    svc.PROBE_FUNCTIONS["celery_worker"] = _alive_probe
+    try:
+        item = svc._build_item(celery_defn, settings)
+    finally:
+        svc.PROBE_FUNCTIONS["celery_worker"] = original_probe
+
+    assert item.status == ComponentStatus.alive
+    labels = {cred.label: cred.value for cred in item.credentials}
+    assert labels["Broker"] == "redis://redis:6379/0"
+    assert "Worker" in labels["说明"]
 
 
 def test_component_credentials():
@@ -255,6 +334,8 @@ def test_probe_alive_and_dead_with_mocks():
             "opensearch": _dead_probe,
             "neo4j": _alive_probe,
             "etcd": _alive_probe,
+            "redis": _alive_probe,
+            "celery_worker": _dead_probe,
             "mineru": _dead_probe,
             "odl_hybrid": _alive_probe,
             "backend": _alive_probe,

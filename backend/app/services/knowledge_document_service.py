@@ -5,6 +5,7 @@ import json
 import logging
 import queue
 import threading
+import time
 from collections.abc import Callable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,6 +55,8 @@ from app.services.knowledge_base_service import (
     get_embedding_model_for_knowledge_base,
     get_knowledge_base_or_error,
 )
+from app.models.document_background_task import DocumentBackgroundTask
+from app.services import document_background_task_service as bg_task_service
 from app.services import kb_process_audit_service, opensearch_chunk_service
 from app.services.document_process_tasks import (
     DocumentProcessCancelled,
@@ -85,6 +88,25 @@ _DOCUMENT_IN_PROGRESS_STATUSES = (
     KnowledgeDocumentStatus.CHUNKING.value,
     KnowledgeDocumentStatus.INDEXING.value,
 )
+
+
+def _get_active_document_background_task(
+    db: Session,
+    *,
+    kb_id: int,
+    document_id: int,
+) -> DocumentBackgroundTask | None:
+    return db.execute(
+        select(DocumentBackgroundTask)
+        .where(
+            DocumentBackgroundTask.knowledge_base_id == kb_id,
+            DocumentBackgroundTask.document_id == document_id,
+            DocumentBackgroundTask.status.in_(("pending", "running")),
+        )
+        .order_by(DocumentBackgroundTask.created_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
 
 _PHASE_PERCENT_RANGES: dict[str, tuple[float, float]] = {
     "parsing": (0.0, 15.0),
@@ -1839,6 +1861,8 @@ def upload_document(
     if resolved_chunk_overlap >= resolved_chunk_size:
         raise AppError(status_code=400, code="INVALID_CHUNK_CONFIG", message="chunk_overlap 必须小于 chunk_size")
 
+    from app.core.space_quota import assert_space_upload_quota
+
     content_sha256 = hashlib.sha256(file_bytes).hexdigest()
     duplicate = db.execute(
         select(KnowledgeDocument).where(
@@ -1854,6 +1878,14 @@ def upload_document(
                 skip_reason="duplicate_content",
             )
         raise AppError(status_code=409, code="DOCUMENT_ALREADY_EXISTS", message="同一知识库内已存在相同内容的文档")
+
+    is_new_document = duplicate is None or duplicate.status == KnowledgeDocumentStatus.DELETED.value
+    assert_space_upload_quota(
+        db,
+        space_id=space_id,
+        additional_bytes=len(file_bytes),
+        is_new_document=is_new_document,
+    )
 
     if duplicate is not None:
         document = duplicate
@@ -1954,18 +1986,33 @@ def process_document(
     document = get_document_or_error(db, space_id=space_id, kb_id=kb_id, document_id=document_id)
     if document.status == KnowledgeDocumentStatus.DELETED.value:
         raise AppError(status_code=404, code="DOCUMENT_NOT_FOUND", message="文档不存在")
+    has_bg_worker = _get_active_document_background_task(
+        db, kb_id=kb_id, document_id=document_id
+    ) is not None
     if not force and document.status in (
         KnowledgeDocumentStatus.PARSING.value,
         KnowledgeDocumentStatus.GRAPH_INDEXING.value,
     ):
-        raise AppError(
-            status_code=409,
-            code="DOCUMENT_PARSE_IN_PROGRESS",
-            message="文档正在解析或图谱入库中，请勿重复提交",
-        )
+        if not has_bg_worker:
+            raise AppError(
+                status_code=409,
+                code="DOCUMENT_PARSE_IN_PROGRESS",
+                message="文档正在解析或图谱入库中，请勿重复提交",
+            )
     if force and document.status in _DOCUMENT_IN_PROGRESS_STATUSES:
         if emit:
             emit("强制重跑：已重置进行中的任务状态")
+        document.status = KnowledgeDocumentStatus.UPLOADED.value
+        document.error_message = None
+        db.commit()
+        db.refresh(document)
+    elif (
+        has_bg_worker
+        and not force
+        and document.status == KnowledgeDocumentStatus.PARSING.value
+        and document.chunk_count == 0
+    ):
+        # 仅入队标记、尚未真正开始解析
         document.status = KnowledgeDocumentStatus.UPLOADED.value
         document.error_message = None
         db.commit()
@@ -2033,14 +2080,17 @@ def reindex_document(
     }
     if knowledge_base.kb_type == KnowledgeBaseType.LIGHTRAG.value:
         allowed_statuses.add(KnowledgeDocumentStatus.UPLOADED.value)
+    has_bg_worker = _get_active_document_background_task(
+        db, kb_id=kb_id, document_id=document_id
+    ) is not None
     if document.status in _DOCUMENT_IN_PROGRESS_STATUSES:
-        if not force:
+        if not force and not has_bg_worker:
             raise AppError(
                 status_code=409,
                 code="DOCUMENT_REINDEX_IN_PROGRESS",
                 message="文档正在处理中，请勿重复提交",
             )
-        if emit:
+        if force and emit:
             emit("强制重跑：已重置进行中的任务状态")
     elif document.status not in allowed_statuses:
         raise AppError(
@@ -2097,6 +2147,255 @@ def _reset_document_after_cancel(
     return serialize_document(document)
 
 
+def execute_document_process_job(
+    db: Session,
+    *,
+    space_id: int,
+    kb_id: int,
+    document_id: int,
+    embedding_model_id: int | None,
+    mode: Literal["parse", "reindex"],
+    force: bool,
+    user_id: int | None = None,
+    batch_uid: str | None = None,
+    emit: Callable[[str], None] | None = None,
+    emit_progress: Callable[..., None] | None = None,
+    cancel_event: threading.Event | None = None,
+) -> dict[str, Any]:
+    """解析/重建索引核心逻辑；供进程内线程与 Celery worker 共用。"""
+    document = get_document_or_error(db, space_id=space_id, kb_id=kb_id, document_id=document_id)
+    doc_file_name = document.file_name
+    kb_process_audit_service.begin_process_item(
+        db,
+        space_id=space_id,
+        kb_id=kb_id,
+        user_id=user_id,
+        document_id=document_id,
+        file_name=doc_file_name,
+        mode=mode,
+        batch_uid=batch_uid,
+        force=force,
+    )
+    audit_started = True
+    audit_completed = False
+    slot_acquired = False
+    try:
+        acquire_parse_slot(
+            cancel_event,
+            on_wait=(lambda: emit("当前解析任务较多，正在排队等待空闲名额…")) if emit else None,
+        )
+        slot_acquired = True
+        if mode == "parse":
+            result = process_document(
+                db,
+                space_id=space_id,
+                kb_id=kb_id,
+                document_id=document_id,
+                embedding_model_id=embedding_model_id,
+                emit=emit,
+                emit_progress=emit_progress,
+                cancel_event=cancel_event,
+                force=force,
+            )
+        else:
+            result = reindex_document(
+                db,
+                space_id=space_id,
+                kb_id=kb_id,
+                document_id=document_id,
+                embedding_model_id=embedding_model_id,
+                emit=emit,
+                emit_progress=emit_progress,
+                cancel_event=cancel_event,
+                force=force,
+            )
+        kb_process_audit_service.complete_process_item_in_new_session(
+            space_id=space_id,
+            kb_id=kb_id,
+            batch_uid=batch_uid,
+            document_id=document_id,
+            file_name=doc_file_name,
+            mode=mode,
+            outcome="success",
+            user_id=user_id,
+            force=force,
+        )
+        audit_completed = True
+        return result
+    except DocumentProcessCancelled:
+        knowledge_base = get_knowledge_base_or_error(db, space_id=space_id, kb_id=kb_id)
+        document = get_document_or_error(db, space_id=space_id, kb_id=kb_id, document_id=document_id)
+        result = _reset_document_after_cancel(
+            db,
+            knowledge_base=knowledge_base,
+            document=document,
+            log_kind=mode,
+        )
+        kb_process_audit_service.complete_process_item_in_new_session(
+            space_id=space_id,
+            kb_id=kb_id,
+            batch_uid=batch_uid,
+            document_id=document_id,
+            file_name=doc_file_name,
+            mode=mode,
+            outcome="cancelled",
+            user_id=user_id,
+            force=force,
+        )
+        audit_completed = True
+        raise
+    except AppError as exc:
+        kb_process_audit_service.complete_process_item_in_new_session(
+            space_id=space_id,
+            kb_id=kb_id,
+            batch_uid=batch_uid,
+            document_id=document_id,
+            file_name=doc_file_name,
+            mode=mode,
+            outcome="failed",
+            error_message=exc.message,
+            user_id=user_id,
+            force=force,
+        )
+        audit_completed = True
+        raise
+    except Exception as exc:
+        kb_process_audit_service.complete_process_item_in_new_session(
+            space_id=space_id,
+            kb_id=kb_id,
+            batch_uid=batch_uid,
+            document_id=document_id,
+            file_name=doc_file_name,
+            mode=mode,
+            outcome="failed",
+            error_message=str(exc),
+            user_id=user_id,
+            force=force,
+        )
+        audit_completed = True
+        raise
+    finally:
+        if audit_started and not audit_completed:
+            try:
+                kb_process_audit_service.finalize_process_audit_from_document(
+                    space_id=space_id,
+                    kb_id=kb_id,
+                    batch_uid=batch_uid,
+                    document_id=document_id,
+                    file_name=doc_file_name,
+                    mode=mode,
+                    user_id=user_id,
+                    force=force,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to finalize process audit (kb_id=%s document_id=%s batch_uid=%s)",
+                    kb_id,
+                    document_id,
+                    batch_uid,
+                )
+        if slot_acquired:
+            release_parse_slot()
+
+
+def _emit_new_parse_log_lines(
+    db: Session,
+    *,
+    space_id: int,
+    kb_id: int,
+    document_id: int,
+    last_line_count: int,
+    emit: Callable[[str], None],
+    emit_progress: Callable[..., None],
+) -> int:
+    log_payload = get_document_parse_log(
+        db,
+        space_id=space_id,
+        kb_id=kb_id,
+        document_id=document_id,
+    )
+    lines = log_payload.get("lines") or []
+    for item in lines[last_line_count:]:
+        if isinstance(item, dict):
+            text = str(item.get("text", "")).strip()
+            if text:
+                emit(text)
+    phase = log_payload.get("phase")
+    if isinstance(phase, str) and phase:
+        emit_progress(phase=phase, message=str(log_payload.get("updated_at") or ""))
+    return len(lines)
+
+
+def _poll_celery_document_process(
+    *,
+    background_task_id: int,
+    celery_task_id: str,
+    space_id: int,
+    kb_id: int,
+    document_id: int,
+    mode: Literal["parse", "reindex"],
+    batch_uid: str | None,
+    user_id: int | None,
+    force: bool,
+    cancel_event: threading.Event,
+    emit: Callable[[str], None],
+    emit_progress: Callable[..., None],
+) -> dict[str, Any]:
+    """轮询 Celery 任务与文档 parse_log，直至完成/失败/取消。"""
+    last_line_count = 0
+    doc_file_name = "未知文档"
+    while True:
+        if cancel_event.is_set():
+            bg_task_service.revoke_celery_task(celery_task_id)
+            with SessionLocal() as db:
+                row = bg_task_service.get_background_task_or_none(db, background_task_id)
+                if row is not None and row.status in {"pending", "running"}:
+                    bg_task_service.mark_task_failed(db, background_task_id, error_message="cancelled")
+                    db.commit()
+                document = get_document_or_error(db, space_id=space_id, kb_id=kb_id, document_id=document_id)
+                doc_file_name = document.file_name
+                knowledge_base = get_knowledge_base_or_error(db, space_id=space_id, kb_id=kb_id)
+                result = _reset_document_after_cancel(
+                    db,
+                    knowledge_base=knowledge_base,
+                    document=document,
+                    log_kind=mode,
+                )
+                kb_process_audit_service.record_cancel(
+                    db,
+                    space_id=space_id,
+                    kb_id=kb_id,
+                    user_id=user_id,
+                    document_id=document_id,
+                    file_name=doc_file_name,
+                )
+            raise DocumentProcessCancelled()
+
+        with SessionLocal() as db:
+            row = bg_task_service.get_background_task_or_none(db, background_task_id)
+            if row is None:
+                raise AppError(status_code=500, code="BACKGROUND_TASK_MISSING", message="后台任务记录不存在")
+            status = row.status
+            if status == "completed":
+                document = get_document_or_error(db, space_id=space_id, kb_id=kb_id, document_id=document_id)
+                return serialize_document(document)
+            if status == "failed":
+                message = (row.error_message or "文档处理失败").strip()
+                if message == "cancelled":
+                    raise DocumentProcessCancelled()
+                raise AppError(status_code=500, code="DOCUMENT_PROCESS_FAILED", message=message)
+            last_line_count = _emit_new_parse_log_lines(
+                db,
+                space_id=space_id,
+                kb_id=kb_id,
+                document_id=document_id,
+                last_line_count=last_line_count,
+                emit=emit,
+                emit_progress=emit_progress,
+            )
+        time.sleep(1.5)
+
+
 def cancel_document_process(
     db: Session,
     *,
@@ -2118,6 +2417,13 @@ def cancel_document_process(
     document = get_document_or_error(db, space_id=space_id, kb_id=kb_id, document_id=document_id)
     if document.status == KnowledgeDocumentStatus.DELETED.value:
         raise AppError(status_code=404, code="DOCUMENT_NOT_FOUND", message="文档不存在")
+
+    active_task = _get_active_document_background_task(db, kb_id=kb_id, document_id=document_id)
+    if active_task is not None:
+        bg_task_service.revoke_celery_task(active_task.celery_task_id)
+        bg_task_service.mark_task_failed(db, active_task.id, error_message="cancelled")
+        db.commit()
+
     if document.status in _DOCUMENT_IN_PROGRESS_STATUSES:
         knowledge_base = get_knowledge_base_or_error(db, space_id=space_id, kb_id=kb_id)
         result = _reset_document_after_cancel(db, knowledge_base=knowledge_base, document=document)
@@ -2172,6 +2478,209 @@ def get_document_parse_log(
     }
 
 
+_INDEXED_DOCUMENT_STATUSES = (
+    KnowledgeDocumentStatus.INDEXED.value,
+    KnowledgeDocumentStatus.GRAPH_INDEXED.value,
+)
+
+
+def _resolve_batch_process_mode_and_force(
+    *,
+    knowledge_base,
+    document,
+    force: bool,
+) -> tuple[Literal["parse", "reindex"], bool]:
+    in_progress = document.status in _DOCUMENT_IN_PROGRESS_STATUSES
+    indexed = document.status in _INDEXED_DOCUMENT_STATUSES
+    effective_force = force or in_progress
+    is_lightrag = knowledge_base.kb_type == KnowledgeBaseType.LIGHTRAG.value
+    if indexed or (
+        is_lightrag
+        and in_progress
+        and document.status == KnowledgeDocumentStatus.GRAPH_INDEXING.value
+    ):
+        return "reindex", effective_force
+    return "parse", effective_force
+
+
+def _document_eligible_for_batch_process(document) -> bool:
+    return document.status in (
+        KnowledgeDocumentStatus.UPLOADED.value,
+        KnowledgeDocumentStatus.FAILED.value,
+        KnowledgeDocumentStatus.GRAPH_FAILED.value,
+        *_DOCUMENT_IN_PROGRESS_STATUSES,
+        *_INDEXED_DOCUMENT_STATUSES,
+    )
+
+
+def enqueue_document_process(
+    db: Session,
+    *,
+    space_id: int,
+    kb_id: int,
+    document_id: int,
+    embedding_model_id: int | None,
+    force: bool,
+    user_id: int | None,
+    batch_uid: str | None,
+) -> dict[str, Any]:
+    """将单文档解析/重建任务提交至 Celery（或进程内线程 fallback），立即返回。"""
+    knowledge_base = get_knowledge_base_or_error(db, space_id=space_id, kb_id=kb_id)
+    document = get_document_or_error(db, space_id=space_id, kb_id=kb_id, document_id=document_id)
+
+    if document.status == KnowledgeDocumentStatus.DELETED.value:
+        return {
+            "document_id": document_id,
+            "queued": False,
+            "error": "文档不存在",
+        }
+
+    if not _document_eligible_for_batch_process(document):
+        return {
+            "document_id": document_id,
+            "queued": False,
+            "error": f"文档状态「{document.status}」不可批量处理",
+        }
+
+    mode, effective_force = _resolve_batch_process_mode_and_force(
+        knowledge_base=knowledge_base,
+        document=document,
+        force=force,
+    )
+
+    active_task = _get_active_document_background_task(db, kb_id=kb_id, document_id=document_id)
+    if active_task is not None:
+        if not effective_force:
+            return {
+                "document_id": document_id,
+                "queued": False,
+                "skipped": True,
+                "skip_reason": "任务已在队列中执行",
+                "mode": mode,
+            }
+        bg_task_service.revoke_celery_task(active_task.celery_task_id)
+        bg_task_service.mark_task_failed(db, active_task.id, error_message="被新的批量任务取代")
+        db.commit()
+
+    bg_row = bg_task_service.create_document_background_task(
+        db,
+        enterprise_space_id=space_id,
+        knowledge_base_id=kb_id,
+        document_id=document_id,
+        action=mode,
+    )
+    db.commit()
+    background_task_id = bg_row.id
+    task_uid = bg_row.task_uid
+
+    celery_task_id = bg_task_service.try_dispatch_celery_index_task(
+        task_uid=task_uid,
+        space_id=space_id,
+        kb_id=kb_id,
+        document_id=document_id,
+        mode=mode,
+        embedding_model_id=embedding_model_id,
+        user_id=user_id,
+        batch_uid=batch_uid,
+        force=effective_force,
+    )
+
+    if celery_task_id:
+        return {
+            "document_id": document_id,
+            "queued": True,
+            "mode": mode,
+            "celery_task_id": celery_task_id,
+            "background_task_id": background_task_id,
+            "force": effective_force,
+        }
+
+    def thread_worker() -> None:
+        with SessionLocal() as mark_db:
+            bg_task_service.mark_task_running(mark_db, background_task_id)
+            mark_db.commit()
+        with SessionLocal() as work_db:
+            try:
+                execute_document_process_job(
+                    work_db,
+                    space_id=space_id,
+                    kb_id=kb_id,
+                    document_id=document_id,
+                    embedding_model_id=embedding_model_id,
+                    mode=mode,
+                    force=effective_force,
+                    user_id=user_id,
+                    batch_uid=batch_uid,
+                )
+                bg_task_service.mark_task_completed(work_db, background_task_id)
+                work_db.commit()
+            except DocumentProcessCancelled:
+                bg_task_service.mark_task_failed(work_db, background_task_id, error_message="cancelled")
+                work_db.commit()
+            except Exception as exc:
+                bg_task_service.mark_task_failed(work_db, background_task_id, error_message=str(exc))
+                work_db.commit()
+
+    threading.Thread(target=thread_worker, daemon=True).start()
+    return {
+        "document_id": document_id,
+        "queued": True,
+        "mode": mode,
+        "background_task_id": background_task_id,
+        "force": effective_force,
+        "fallback": True,
+    }
+
+
+def enqueue_documents_process_batch(
+    db: Session,
+    *,
+    space_id: int,
+    kb_id: int,
+    document_ids: list[int],
+    embedding_model_id: int | None,
+    force: bool,
+    user_id: int | None,
+    batch_uid: str | None,
+) -> dict[str, Any]:
+    """批量将文档解析/重建任务一次性提交至队列，由 Celery worker 并发消费。"""
+    seen: set[int] = set()
+    items: list[dict[str, Any]] = []
+    queued_count = 0
+    failed_count = 0
+    skipped_count = 0
+
+    for document_id in document_ids:
+        if document_id in seen:
+            continue
+        seen.add(document_id)
+        item = enqueue_document_process(
+            db,
+            space_id=space_id,
+            kb_id=kb_id,
+            document_id=document_id,
+            embedding_model_id=embedding_model_id,
+            force=force,
+            user_id=user_id,
+            batch_uid=batch_uid,
+        )
+        items.append(item)
+        if item.get("queued"):
+            queued_count += 1
+        elif item.get("skipped"):
+            skipped_count += 1
+        else:
+            failed_count += 1
+
+    return {
+        "items": items,
+        "queued_count": queued_count,
+        "failed_count": failed_count,
+        "skipped_count": skipped_count,
+        "total": len(items),
+    }
+
+
 def iter_document_process_sse_events(
     *,
     space_id: int,
@@ -2191,6 +2700,18 @@ def iter_document_process_sse_events(
         cancel_force_and_wait(key)
 
     cancel_event = threading.Event()
+    background_task_id: int | None = None
+    with SessionLocal() as bg_db:
+        bg_row = bg_task_service.create_document_background_task(
+            bg_db,
+            enterprise_space_id=space_id,
+            knowledge_base_id=kb_id,
+            document_id=document_id,
+            action=mode,
+        )
+        bg_db.commit()
+        background_task_id = bg_row.id
+        background_task_uid = bg_row.task_uid
 
     def emit(msg: str) -> None:
         q.put(("log", msg))
@@ -2200,144 +2721,107 @@ def iter_document_process_sse_events(
         q.put(("progress", payload))
 
     def worker() -> None:
-        slot_acquired = False
-        doc_file_name = "未知文档"
-        audit_started = False
-        audit_completed = False
-        with SessionLocal() as db:
+        bg_success = False
+        bg_error: str | None = None
+        celery_handled = False
+
+        celery_task_id = bg_task_service.try_dispatch_celery_index_task(
+            task_uid=background_task_uid,
+            space_id=space_id,
+            kb_id=kb_id,
+            document_id=document_id,
+            mode=mode,
+            embedding_model_id=embedding_model_id,
+            user_id=user_id,
+            batch_uid=batch_uid,
+            force=force,
+        )
+        if celery_task_id:
+            celery_handled = True
+            emit("已提交至 Celery 后台队列，等待 worker 执行…")
+            emit_progress(phase="queued", message="任务已进入 Redis 队列")
             try:
-                document = get_document_or_error(db, space_id=space_id, kb_id=kb_id, document_id=document_id)
-                doc_file_name = document.file_name
-                kb_process_audit_service.begin_process_item(
-                    db,
+                result = _poll_celery_document_process(
+                    background_task_id=background_task_id,
+                    celery_task_id=celery_task_id,
                     space_id=space_id,
                     kb_id=kb_id,
-                    user_id=user_id,
                     document_id=document_id,
-                    file_name=doc_file_name,
                     mode=mode,
                     batch_uid=batch_uid,
-                    force=force,
-                )
-                audit_started = True
-                acquire_parse_slot(
-                    cancel_event,
-                    on_wait=lambda: emit("当前解析任务较多，正在排队等待空闲名额…"),
-                )
-                slot_acquired = True
-                if mode == "parse":
-                    result = process_document(
-                        db,
-                        space_id=space_id,
-                        kb_id=kb_id,
-                        document_id=document_id,
-                        embedding_model_id=embedding_model_id,
-                        emit=emit,
-                        emit_progress=emit_progress,
-                        cancel_event=cancel_event,
-                        force=force,
-                    )
-                else:
-                    result = reindex_document(
-                        db,
-                        space_id=space_id,
-                        kb_id=kb_id,
-                        document_id=document_id,
-                        embedding_model_id=embedding_model_id,
-                        emit=emit,
-                        emit_progress=emit_progress,
-                        cancel_event=cancel_event,
-                        force=force,
-                    )
-                kb_process_audit_service.complete_process_item_in_new_session(
-                    space_id=space_id,
-                    kb_id=kb_id,
-                    batch_uid=batch_uid,
-                    document_id=document_id,
-                    file_name=doc_file_name,
-                    mode=mode,
-                    outcome="success",
                     user_id=user_id,
                     force=force,
+                    cancel_event=cancel_event,
+                    emit=emit,
+                    emit_progress=emit_progress,
                 )
-                audit_completed = True
+                bg_success = True
                 q.put(("done", result))
             except DocumentProcessCancelled:
-                knowledge_base = get_knowledge_base_or_error(db, space_id=space_id, kb_id=kb_id)
-                document = get_document_or_error(db, space_id=space_id, kb_id=kb_id, document_id=document_id)
-                doc_file_name = document.file_name
-                result = _reset_document_after_cancel(
-                    db,
-                    knowledge_base=knowledge_base,
-                    document=document,
-                    log_kind=mode,
-                )
-                kb_process_audit_service.complete_process_item_in_new_session(
-                    space_id=space_id,
-                    kb_id=kb_id,
-                    batch_uid=batch_uid,
-                    document_id=document_id,
-                    file_name=doc_file_name,
-                    mode=mode,
-                    outcome="cancelled",
-                    user_id=user_id,
-                    force=force,
-                )
-                audit_completed = True
+                with SessionLocal() as db:
+                    document = get_document_or_error(
+                        db, space_id=space_id, kb_id=kb_id, document_id=document_id
+                    )
+                    result = serialize_document(document)
+                bg_error = "cancelled"
                 q.put(("cancelled", result))
             except AppError as exc:
-                kb_process_audit_service.complete_process_item_in_new_session(
-                    space_id=space_id,
-                    kb_id=kb_id,
-                    batch_uid=batch_uid,
-                    document_id=document_id,
-                    file_name=doc_file_name,
-                    mode=mode,
-                    outcome="failed",
-                    error_message=exc.message,
-                    user_id=user_id,
-                    force=force,
-                )
-                audit_completed = True
+                bg_error = exc.message
                 q.put(("app_error", exc))
             except Exception as exc:
-                kb_process_audit_service.complete_process_item_in_new_session(
-                    space_id=space_id,
-                    kb_id=kb_id,
-                    batch_uid=batch_uid,
-                    document_id=document_id,
-                    file_name=doc_file_name,
-                    mode=mode,
-                    outcome="failed",
-                    error_message=str(exc),
-                    user_id=user_id,
-                    force=force,
-                )
-                audit_completed = True
+                bg_error = str(exc)
                 q.put(("fatal", exc))
             finally:
-                if audit_started and not audit_completed:
-                    try:
-                        kb_process_audit_service.finalize_process_audit_from_document(
-                            space_id=space_id,
-                            kb_id=kb_id,
-                            batch_uid=batch_uid,
-                            document_id=document_id,
-                            file_name=doc_file_name,
-                            mode=mode,
-                            user_id=user_id,
-                            force=force,
-                        )
-                    except Exception:
-                        logger.exception(
-                            "Failed to finalize process audit (kb_id=%s document_id=%s batch_uid=%s)",
-                            kb_id,
-                            document_id,
-                            batch_uid,
-                        )
-                if slot_acquired:
-                    release_parse_slot()
                 unregister_task(key)
+            return
+
+        if background_task_id is not None:
+            with SessionLocal() as mark_db:
+                bg_task_service.mark_task_running(mark_db, background_task_id)
+                mark_db.commit()
+        with SessionLocal() as db:
+            try:
+                result = execute_document_process_job(
+                    db,
+                    space_id=space_id,
+                    kb_id=kb_id,
+                    document_id=document_id,
+                    embedding_model_id=embedding_model_id,
+                    mode=mode,
+                    force=force,
+                    user_id=user_id,
+                    batch_uid=batch_uid,
+                    emit=emit,
+                    emit_progress=emit_progress,
+                    cancel_event=cancel_event,
+                )
+                bg_success = True
+                q.put(("done", result))
+            except DocumentProcessCancelled:
+                with SessionLocal() as db2:
+                    document = get_document_or_error(
+                        db2, space_id=space_id, kb_id=kb_id, document_id=document_id
+                    )
+                    result = serialize_document(document)
+                bg_error = "cancelled"
+                q.put(("cancelled", result))
+            except AppError as exc:
+                bg_error = exc.message
+                q.put(("app_error", exc))
+            except Exception as exc:
+                bg_error = str(exc)
+                q.put(("fatal", exc))
+            finally:
+                unregister_task(key)
+                if background_task_id is not None and not celery_handled:
+                    with SessionLocal() as mark_db:
+                        if bg_success:
+                            bg_task_service.mark_task_completed(mark_db, background_task_id)
+                        elif bg_error:
+                            bg_task_service.mark_task_failed(
+                                mark_db, background_task_id, error_message=bg_error
+                            )
+                        mark_db.commit()
 
     thread = threading.Thread(target=worker, daemon=True)
     register_task(key, thread=thread, cancel_event=cancel_event)

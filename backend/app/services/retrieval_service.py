@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.embedding_gateway import generate_query_embedding
 from app.core.errors import AppError
+from app.core.milvus_client import search_vectors
 from app.core.knowledge_retrieval_defaults import (
     DEFAULT_AUTO_IMAGE_OCR_ON_UI_QUERY,
     DEFAULT_FUSION_METHOD,
@@ -20,13 +21,14 @@ from app.core.knowledge_retrieval_defaults import (
     DEFAULT_RRF_K,
     DEFAULT_VECTOR_WEIGHT,
 )
-from app.core.milvus_client import search_vectors
+from app.core.rerank_gateway import RERANK_RECALL_FACTOR, rerank_texts
 from app.models.knowledge_base import KnowledgeBase, KnowledgeChunk, KnowledgeDocument, KnowledgeDocumentStatus
 from app.schemas.retrieval import KnowledgeSearchRequest
 from app.services.knowledge_base_service import (
     ensure_knowledge_base_milvus_fields,
     get_embedding_model_for_knowledge_base,
     get_knowledge_base_or_error,
+    get_rerank_model_for_knowledge_base,
 )
 from app.services import opensearch_chunk_service
 
@@ -592,6 +594,61 @@ def _query_wants_image_ocr(query: str) -> bool:
     return bool(_UI_IMAGE_OCR_QUERY_RE.search((query or "").strip()))
 
 
+def _resolve_rerank_config(knowledge_base: KnowledgeBase, mode: str) -> tuple[bool, int | None]:
+    """与前端 retrieval-form 对齐：hybrid+rerank 策略，或 vector/keyword 下 rerank_enabled。"""
+    stored = _stored_retrieval_config(knowledge_base)
+    raw_id = stored.get("rerank_model_id")
+    model_id: int | None
+    try:
+        model_id = int(raw_id) if raw_id is not None else None
+    except (TypeError, ValueError):
+        model_id = None
+    if not model_id:
+        return False, None
+    if mode == "hybrid":
+        if stored.get("hybrid_strategy") == "rerank":
+            return True, model_id
+        return False, None
+    if bool(stored.get("rerank_enabled")):
+        return True, model_id
+    return False, None
+
+
+def _apply_rerank_to_results(
+    db: Session,
+    *,
+    knowledge_base: KnowledgeBase,
+    query: str,
+    results: list[dict[str, Any]],
+    rerank_model_id: int,
+    top_n: int,
+) -> list[dict[str, Any]]:
+    if not results:
+        return results
+    try:
+        model = get_rerank_model_for_knowledge_base(
+            db,
+            knowledge_base=knowledge_base,
+            override_model_id=rerank_model_id,
+        )
+        documents = [str(item.get("content") or "") for item in results]
+        scores = rerank_texts(
+            model,
+            query=query,
+            documents=documents,
+            top_n=min(top_n, len(documents)),
+        )
+        reranked: list[dict[str, Any]] = []
+        for row in scores:
+            item = dict(results[row.index])
+            item["score"] = float(row.score)
+            reranked.append(item)
+        return reranked
+    except AppError:
+        logger.exception("rerank 失败，回退原始排序 kb_id=%s", knowledge_base.id)
+        return results[:top_n]
+
+
 def _stored_retrieval_config(knowledge_base: KnowledgeBase) -> dict[str, Any]:
     cfg = knowledge_base.config if isinstance(knowledge_base.config, dict) else {}
     raw = cfg.get("retrieval")
@@ -1036,6 +1093,12 @@ def search_knowledge_base(
         query,
     )
 
+    use_rerank, rerank_model_id = _resolve_rerank_config(knowledge_base, mode)
+    stored_retrieval = _stored_retrieval_config(knowledge_base)
+    hybrid_strategy = str(stored_retrieval.get("hybrid_strategy") or "weight")
+    recall_limit = max(top_k * (RERANK_RECALL_FACTOR if use_rerank else 3), top_k)
+    hybrid_recall_limit = max(top_k * (RERANK_RECALL_FACTOR if use_rerank else 4), top_k)
+
     def _finalize_results(raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
         filtered = _apply_chunk_role_filters(
             raw,
@@ -1044,17 +1107,32 @@ def search_knowledge_base(
         )
         return _dedupe_search_results(filtered, limit=top_k)
 
+    def _post_process_results(raw: list[dict[str, Any]], *, apply_threshold: bool) -> list[dict[str, Any]]:
+        rows = list(raw)
+        if use_rerank and rerank_model_id and rows:
+            rows = _apply_rerank_to_results(
+                db,
+                knowledge_base=knowledge_base,
+                query=query,
+                results=rows,
+                rerank_model_id=rerank_model_id,
+                top_n=max(recall_limit, top_k),
+            )
+        if apply_threshold and score_threshold is not None:
+            rows = [item for item in rows if float(item.get("score") or 0) >= score_threshold]
+        return _finalize_results(rows)
+
     if mode == "keyword":
         keyword_candidates = _keyword_candidates(
             db,
             enterprise_space_id=knowledge_base.enterprise_space_id,
             knowledge_base_id=knowledge_base.id,
             query=query,
-            limit=max(top_k * 3, top_k),
+            limit=recall_limit,
             document_ids=document_ids,
             exclude_standalone_image_ocr=exclude_image_ocr,
         )
-        results = _finalize_results(
+        results = _post_process_results(
             [
                 _serialize_search_result(
                     chunk=item["chunk"],
@@ -1063,17 +1141,18 @@ def search_knowledge_base(
                     keyword_score=item["keyword_score"],
                 )
                 for item in keyword_candidates
-            ]
+            ],
+            apply_threshold=True,
         )
     elif mode == "vector":
         vector_candidates = _vector_candidates(
             db,
             knowledge_base=knowledge_base,
             query=query,
-            limit=max(top_k * 3, top_k),
+            limit=recall_limit,
             document_ids=document_ids,
         )
-        results = _finalize_results(
+        results = _post_process_results(
             [
                 _serialize_search_result(
                     chunk=item["chunk"],
@@ -1082,14 +1161,15 @@ def search_knowledge_base(
                     vector_score=item["vector_score"],
                 )
                 for item in vector_candidates
-            ]
+            ],
+            apply_threshold=True,
         )
-    else:
+    elif use_rerank and hybrid_strategy == "rerank":
         vector_candidates = _vector_candidates(
             db,
             knowledge_base=knowledge_base,
             query=query,
-            limit=top_k * 4,
+            limit=hybrid_recall_limit,
             document_ids=document_ids,
         )
         keyword_candidates = _keyword_candidates(
@@ -1097,7 +1177,55 @@ def search_knowledge_base(
             enterprise_space_id=knowledge_base.enterprise_space_id,
             knowledge_base_id=knowledge_base.id,
             query=query,
-            limit=top_k * 4,
+            limit=hybrid_recall_limit,
+            document_ids=document_ids,
+            exclude_standalone_image_ocr=exclude_image_ocr,
+        )
+        merged_hybrid: dict[str, dict[str, Any]] = {}
+        for item in vector_candidates:
+            uid = item["chunk"].chunk_uid
+            merged_hybrid[uid] = {
+                "chunk": item["chunk"],
+                "document_name": item["document_name"],
+                "vector_score": item["vector_score"],
+                "keyword_score": None,
+            }
+        for item in keyword_candidates:
+            uid = item["chunk"].chunk_uid
+            if uid in merged_hybrid:
+                merged_hybrid[uid]["keyword_score"] = item["keyword_score"]
+            else:
+                merged_hybrid[uid] = {
+                    "chunk": item["chunk"],
+                    "document_name": item["document_name"],
+                    "vector_score": None,
+                    "keyword_score": item["keyword_score"],
+                }
+        preliminary = [
+            _serialize_search_result(
+                chunk=entry["chunk"],
+                document_name=entry["document_name"],
+                score=float(entry.get("vector_score") or entry.get("keyword_score") or 0),
+                vector_score=entry.get("vector_score"),
+                keyword_score=entry.get("keyword_score"),
+            )
+            for entry in merged_hybrid.values()
+        ]
+        results = _post_process_results(preliminary, apply_threshold=True)
+    else:
+        vector_candidates = _vector_candidates(
+            db,
+            knowledge_base=knowledge_base,
+            query=query,
+            limit=hybrid_recall_limit,
+            document_ids=document_ids,
+        )
+        keyword_candidates = _keyword_candidates(
+            db,
+            enterprise_space_id=knowledge_base.enterprise_space_id,
+            knowledge_base_id=knowledge_base.id,
+            query=query,
+            limit=hybrid_recall_limit,
             document_ids=document_ids,
             exclude_standalone_image_ocr=exclude_image_ocr,
         )
@@ -1266,10 +1394,7 @@ def search_knowledge_base(
             ranked.sort(key=lambda item: item["score"], reverse=True)
             if score_threshold is not None:
                 ranked = [item for item in ranked if item["score"] >= score_threshold]
-            results = _finalize_results(ranked)
-
-    if score_threshold is not None and mode != "hybrid":
-        results = [item for item in results if item["score"] >= score_threshold]
+            results = _post_process_results(ranked, apply_threshold=False)
 
     return {
         "query": payload.query,
@@ -1277,6 +1402,135 @@ def search_knowledge_base(
         "total": len(results),
         "results": results,
     }
+
+
+def _lightrag_chunk_score_map(chunks: list[dict[str, Any]]) -> dict[str, float]:
+    scores: dict[str, float] = {}
+    for index, chunk in enumerate(chunks):
+        if not isinstance(chunk, dict):
+            continue
+        chunk_id = str(chunk.get("chunk_id") or "").strip()
+        if not chunk_id:
+            continue
+        raw_score = chunk.get("score")
+        if raw_score is None:
+            raw_score = chunk.get("similarity")
+        if raw_score is None:
+            raw_score = chunk.get("distance")
+        if raw_score is not None:
+            try:
+                scores[chunk_id] = float(raw_score)
+                continue
+            except (TypeError, ValueError):
+                pass
+        scores[chunk_id] = max(0.1, 1.0 - index * 0.05)
+    return scores
+
+
+def _serialize_lightrag_search_results(
+    *,
+    knowledge_base: KnowledgeBase,
+    graph_data: dict[str, Any],
+    limit: int,
+) -> list[dict[str, Any]]:
+    citations = graph_data.get("citations") or []
+    chunks = graph_data.get("chunks") or []
+    chunk_items = [item for item in chunks if isinstance(item, dict)]
+    score_by_chunk = _lightrag_chunk_score_map(chunk_items)
+
+    rows: list[dict[str, Any]] = []
+    for index, cite in enumerate(citations):
+        if not isinstance(cite, dict):
+            continue
+        content = str(cite.get("content") or "").strip()
+        if not content:
+            continue
+        document_name = str(cite.get("document_name") or "文献")
+        raw_document_id = cite.get("document_id")
+        document_id = int(raw_document_id) if raw_document_id is not None else 0
+        chunk_id_str = str(cite.get("chunk_id") or "").strip()
+        ref = int(cite.get("ref") or (index + 1))
+        score = score_by_chunk.get(chunk_id_str, max(0.5, 1.0 - index * 0.05))
+
+        rows.append(
+            {
+                "chunk_id": document_id if document_id > 0 else -ref,
+                "chunk_uid": f"lightrag:{knowledge_base.id}:{chunk_id_str or ref}",
+                "document_id": document_id,
+                "document_name": document_name,
+                "chunk_index": max(0, ref - 1),
+                "content": content,
+                "content_preview": _content_preview(content),
+                "char_count": len(content),
+                "start_offset": None,
+                "end_offset": None,
+                "heading_path": None,
+                "enrichment_keywords": [],
+                "enrichment_questions": [],
+                "score": float(score),
+                "vector_score": None,
+                "keyword_score": None,
+                "metadata": {"source": "lightrag", "lightrag_chunk_id": chunk_id_str or None},
+                "citation": {
+                    "document_name": document_name,
+                    "page_no": None,
+                    "chunk_index": max(0, ref - 1),
+                    "heading_path": None,
+                    "location_label": None,
+                    "block": None,
+                },
+                "knowledge_base_id": knowledge_base.id,
+                "knowledge_base_name": knowledge_base.name,
+            }
+        )
+        if len(rows) >= limit:
+            break
+
+    if rows or not chunk_items:
+        return rows
+
+    for index, chunk in enumerate(chunk_items):
+        content = str(chunk.get("content") or "").strip()
+        if not content:
+            continue
+        file_path = str(chunk.get("file_path") or "").split("|||")[0].strip()
+        chunk_id_str = str(chunk.get("chunk_id") or "").strip()
+        document_name = file_path.rsplit("/", 1)[-1] if file_path else "文献"
+        score = score_by_chunk.get(chunk_id_str, max(0.5, 1.0 - index * 0.05))
+        rows.append(
+            {
+                "chunk_id": -(index + 1),
+                "chunk_uid": f"lightrag:{knowledge_base.id}:{chunk_id_str or index + 1}",
+                "document_id": 0,
+                "document_name": document_name,
+                "chunk_index": index,
+                "content": content,
+                "content_preview": _content_preview(content),
+                "char_count": len(content),
+                "start_offset": None,
+                "end_offset": None,
+                "heading_path": None,
+                "enrichment_keywords": [],
+                "enrichment_questions": [],
+                "score": float(score),
+                "vector_score": None,
+                "keyword_score": None,
+                "metadata": {"source": "lightrag", "lightrag_chunk_id": chunk_id_str or None},
+                "citation": {
+                    "document_name": document_name,
+                    "page_no": None,
+                    "chunk_index": index,
+                    "heading_path": None,
+                    "location_label": None,
+                    "block": None,
+                },
+                "knowledge_base_id": knowledge_base.id,
+                "knowledge_base_name": knowledge_base.name,
+            }
+        )
+        if len(rows) >= limit:
+            break
+    return rows
 
 
 def search_knowledge_bases_multi(
@@ -1287,9 +1541,12 @@ def search_knowledge_bases_multi(
     payload: KnowledgeSearchRequest,
 ) -> dict[str, Any]:
     """
-    在多个知识库上执行相同检索策略，按 score 全局合并排序后截取 top_k。
-    某一库检索失败（如未开向量）时跳过该库并记录日志，其余库结果仍返回。
+    在多个知识库上执行检索，按 score 全局合并排序后截取 top_k。
+    经典库走向量/全文/混合；图知识库走 LightRAG。单库失败时跳过并记录日志。
     """
+    from app.core.kb_type import is_lightrag_kb
+    from app.services.lightrag_engine import get_default_query_mode, query_graph_kb
+
     ordered_unique: list[int] = []
     for kid in knowledge_base_ids:
         if kid not in ordered_unique:
@@ -1307,6 +1564,28 @@ def search_knowledge_bases_multi(
     merged_rows: list[dict[str, Any]] = []
     for kb_id in kb_ids:
         kb = get_knowledge_base_or_error(db, space_id=space_id, kb_id=kb_id)
+
+        if is_lightrag_kb(kb):
+            try:
+                graph_data = query_graph_kb(
+                    db,
+                    knowledge_base=kb,
+                    query=payload.query,
+                    mode=get_default_query_mode(kb),
+                    top_k=inner_top,
+                    include_references=True,
+                )
+                merged_rows.extend(
+                    _serialize_lightrag_search_results(
+                        knowledge_base=kb,
+                        graph_data=graph_data,
+                        limit=inner_top,
+                    )
+                )
+            except AppError as exc:
+                logger.warning("多库检索跳过图知识库 kb_id=%s：%s", kb_id, exc)
+            continue
+
         inner = KnowledgeSearchRequest(
             query=payload.query,
             mode=payload.mode,

@@ -59,6 +59,7 @@ export default defineConfig({
       '/enterprise-spaces': { ...spaAwareProxy(), timeout: 900_000, proxyTimeout: 900_000 },
       '/users': { ...spaAwareProxy(), timeout: 900_000, proxyTimeout: 900_000 },
       '/knowledge-bases': { ...spaAwareProxy(), timeout: 900_000, proxyTimeout: 900_000 },
+      '/platform-audit': { ...spaAwareProxy(), timeout: 900_000, proxyTimeout: 900_000 },
       '/api': { ...spaAwareProxy(), timeout: 900_000, proxyTimeout: 900_000 },
     },
   },

@@ -13,6 +13,10 @@
         <div class="search-result-titles">
           <strong>{{ result.document_name }}</strong>
           <span v-if="result.knowledge_base_name" class="chip chip-soft">{{ result.knowledge_base_name }}</span>
+          <span v-if="isGraphSearchResult(result)" class="search-result-graph-badge">
+            <AppIcon name="graph" :size="11" />
+            图检索
+          </span>
         </div>
         <span class="chip">Score {{ formatSearchScore(result.score) }}</span>
       </div>
@@ -50,11 +54,13 @@ import { ref } from 'vue'
 import type { KnowledgeSearchResult, RetrievalMode } from '../../api/knowledge-base'
 import {
   formatSearchScore,
+  isGraphSearchResult,
   searchResultBlockLabel,
   searchResultChunkLabel,
   searchResultLocationText,
   searchResultPreview,
 } from '../../lib/retrieval-result-display'
+import AppIcon from '../AppIcon.vue'
 import RetrievalResultDetailModal from './RetrievalResultDetailModal.vue'
 
 const props = defineProps<{
@@ -156,5 +162,19 @@ function closeDetail() {
 .chip-mini {
   font-size: 0.74rem;
   padding: 2px 8px;
+}
+
+.search-result-graph-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.5;
+  color: #7c3aed;
+  background: rgba(168, 85, 247, 0.12);
+  border: 1px solid rgba(168, 85, 247, 0.32);
 }
 </style>

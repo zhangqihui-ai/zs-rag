@@ -10,10 +10,14 @@
             <AppIcon name="plus" :size="16" />
             创建用户
           </button>
+          <button v-if="activeTab === 'audit'" class="btn btn-secondary" type="button" @click="auditPanelRef?.search()">
+            <AppIcon name="refresh" :size="16" />
+            刷新
+          </button>
         </template>
       </PageHeader>
 
-      <div v-if="canManageUsers && canManageSpaces" class="admin-tabs" role="tablist" aria-label="管理模块">
+      <div v-if="canManageUsers" class="admin-tabs" role="tablist" aria-label="管理模块">
         <button
           type="button"
           role="tab"
@@ -23,6 +27,7 @@
           用户
         </button>
         <button
+          v-if="canManageSpaces"
           type="button"
           role="tab"
           :class="['admin-tab', { active: activeTab === 'spaces' }]"
@@ -30,11 +35,25 @@
         >
           企业空间
         </button>
+        <button
+          type="button"
+          role="tab"
+          :class="['admin-tab', { active: activeTab === 'audit' }]"
+          @click="activeTab = 'audit'"
+        >
+          操作审计
+        </button>
       </div>
 
       <EnterpriseSpacesPanel v-if="activeTab === 'spaces'" />
 
-      <template v-else>
+      <PlatformAuditPanel
+        v-else-if="activeTab === 'audit'"
+        ref="auditPanelRef"
+        :initial-user-id="auditPrefillUserId"
+      />
+
+      <template v-else-if="activeTab === 'users'">
       <section class="surface-card toolbar-panel">
         <div class="search-row">
           <input v-model="searchQuery" type="search" placeholder="搜索用户名或邮箱..." @keyup.enter="loadUsers" />
@@ -90,6 +109,7 @@
               </td>
               <td class="table-actions">
                 <button class="btn btn-secondary btn-sm" type="button" @click="openEditModal(user)">编辑</button>
+                <button class="btn btn-secondary btn-sm" type="button" @click="viewUserAudit(user)">操作记录</button>
                 <button
                   class="btn btn-secondary btn-sm"
                   type="button"
@@ -180,6 +200,7 @@ import {
   type UserDetail,
 } from '../api/users'
 import EnterpriseSpacesPanel from '../components/admin/EnterpriseSpacesPanel.vue'
+import PlatformAuditPanel from '../components/admin/PlatformAuditPanel.vue'
 import AppIcon from '../components/AppIcon.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Layout from '../components/Layout.vue'
@@ -191,7 +212,9 @@ const authStore = useAuthStore()
 
 const canManageUsers = computed(() => authStore.canManageUsers)
 const canManageSpaces = computed(() => authStore.canManageSpaces)
-const activeTab = ref<'users' | 'spaces'>(authStore.canManageUsers ? 'users' : 'spaces')
+const activeTab = ref<'users' | 'spaces' | 'audit'>(authStore.canManageUsers ? 'users' : 'spaces')
+const auditPrefillUserId = ref<number | null>(null)
+const auditPanelRef = ref<InstanceType<typeof PlatformAuditPanel> | null>(null)
 
 const users = ref<UserDetail[]>([])
 const allSpaces = ref<EnterpriseSpace[]>([])
@@ -318,6 +341,11 @@ const submitUserForm = async () => {
   } finally {
     submitting.value = false
   }
+}
+
+const viewUserAudit = (user: UserDetail) => {
+  auditPrefillUserId.value = user.id
+  activeTab.value = 'audit'
 }
 
 const confirmDelete = async (user: UserDetail) => {

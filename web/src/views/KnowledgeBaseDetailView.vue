@@ -52,7 +52,7 @@
               class="surface-card content-card documents-card"
               :class="{ 'documents-card--fresh-empty': documentsListIsFreshEmpty }"
             >
-              <div class="section-heading">
+              <div v-if="documentsListIsFreshEmpty" class="section-heading">
                 <div>
                   <h3>文件列表</h3>
                   <p>查看当前知识库中的文档、处理状态与分块情况。</p>
@@ -69,7 +69,7 @@
                 </div>
               </div>
 
-              <div v-if="!documentsListIsFreshEmpty" class="toolbar-row documents-toolbar">
+              <div v-if="!documentsListIsFreshEmpty" class="toolbar-row documents-toolbar documents-toolbar--compact">
                 <label class="field toolbar-field toolbar-field-search">
                   <span class="field-label">搜索</span>
                   <div class="input-wrap">
@@ -98,20 +98,39 @@
                   <AppSelect v-model="sortOrder" label="排序" :options="documentSortOptions" />
                 </div>
 
+                <div class="documents-toolbar-actions">
+                  <button class="btn btn-secondary" type="button" @click="refreshDocuments">
+                    <AppIcon name="refresh" :size="16" />
+                    刷新
+                  </button>
+                  <button class="btn btn-primary" type="button" @click="openUploadModal">
+                    <AppIcon name="plus" :size="16" />
+                    新增文件
+                  </button>
+                </div>
+
                 <div v-if="selectedDocumentIds.length > 0" class="documents-batch-actions">
                   <span class="documents-batch-count">已选 {{ selectedDocumentIds.length }} 项</span>
                   <button
                     class="btn btn-primary"
                     type="button"
-                    :disabled="batchParsing || batchDeleting || documentsLoading || !canBatchParseSelection"
+                    :disabled="batchParsing || batchStopping || batchDeleting || documentsLoading || !canBatchParseSelection"
                     @click="batchParseSelectedDocuments"
                   >
                     {{ batchParsing ? '批量解析中…' : '批量解析' }}
                   </button>
                   <button
+                    class="btn btn-secondary"
+                    type="button"
+                    :disabled="batchStopping || batchDeleting || documentsLoading || !canBatchStopSelection"
+                    @click="batchStopSelectedDocuments"
+                  >
+                    {{ batchStopping ? '批量停止中…' : '批量停止' }}
+                  </button>
+                  <button
                     class="btn btn-danger"
                     type="button"
-                    :disabled="batchParsing || batchDeleting || documentsLoading"
+                    :disabled="batchParsing || batchStopping || batchDeleting || documentsLoading"
                     @click="batchDeleteSelectedDocuments"
                   >
                     {{ batchDeleting ? '批量删除中…' : '批量删除' }}
@@ -119,7 +138,7 @@
                   <button
                     class="btn btn-ghost"
                     type="button"
-                    :disabled="batchParsing || batchDeleting"
+                    :disabled="batchParsing || batchStopping || batchDeleting"
                     @click="clearDocumentSelection"
                   >
                     清除选择
@@ -147,6 +166,7 @@
               </div>
 
               <template v-else>
+                <div class="documents-list-shell">
                 <div class="document-table-wrap" :style="documentTableStyle">
                 <div class="document-table document-table-head">
                   <span class="document-col-check">
@@ -155,7 +175,7 @@
                       class="doc-checkbox"
                       type="checkbox"
                       :checked="allDocumentsOnPageSelected"
-                      :disabled="documents.length === 0 || documentsLoading || batchParsing || batchDeleting"
+                      :disabled="documents.length === 0 || documentsLoading || batchParsing || batchStopping || batchDeleting"
                       aria-label="全选本页"
                       @change="toggleSelectAllOnPage"
                     />
@@ -187,7 +207,7 @@
                         class="doc-checkbox"
                         type="checkbox"
                         :checked="selectedDocumentIds.includes(document.id)"
-                        :disabled="documentsLoading || batchParsing || batchDeleting"
+                        :disabled="documentsLoading || batchParsing || batchStopping || batchDeleting"
                         :aria-label="`选择 ${document.document_name}`"
                         @change="onDocumentRowCheckboxChange(document, $event)"
                       />
@@ -228,7 +248,7 @@
                           v-if="documentCanStartParse(document)"
                           class="btn btn-primary btn-row btn-row-compact"
                           type="button"
-                          :disabled="batchParsing || batchDeleting"
+                          :disabled="batchParsing || batchStopping || batchDeleting"
                           @click="parseDocumentAction(document.id)"
                         >
                           {{
@@ -241,7 +261,7 @@
                           v-if="documentCanReindex(document)"
                           class="btn btn-ghost btn-row btn-row-compact"
                           type="button"
-                          :disabled="batchParsing || batchDeleting"
+                          :disabled="batchParsing || batchStopping || batchDeleting"
                           @click="reindexDocumentAction(document.id)"
                         >
                           {{ isLightragKb ? '重建图谱' : '重建索引' }}
@@ -336,7 +356,7 @@
                         v-if="documentCanStartParse(document) && !isDocumentRowBusy(document)"
                         class="btn btn-primary btn-row btn-row-compact document-row-error-action"
                         type="button"
-                        :disabled="isDocumentProcessingLocally(document) || batchParsing || batchDeleting"
+                        :disabled="isDocumentProcessingLocally(document) || batchParsing || batchStopping || batchDeleting"
                         @click="parseDocumentAction(document.id)"
                       >
                         {{ isDocumentProcessingLocally(document) ? '解析中…' : '重新解析' }}
@@ -351,7 +371,8 @@
                   <label class="field documents-pagination-size">
                     <span class="field-label">每页</span>
                     <select v-model.number="documentsPageSize" class="select">
-                      <option :value="10">10</option>
+                      <option :value="12">12</option>
+                      <option :value="15">15</option>
                       <option :value="20">20</option>
                       <option :value="50">50</option>
                       <option :value="100">100</option>
@@ -376,6 +397,7 @@
                       下一页
                     </button>
                   </div>
+                </div>
                 </div>
               </template>
             </section>
@@ -1181,6 +1203,7 @@ import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import {
+  cancelDocumentProcess,
   getKnowledgeBaseErrorMessage,
   knowledgeBaseApi,
   type DocumentFileExtOption,
@@ -1547,7 +1570,7 @@ const showDocumentFileTypeFilter = computed(() => documentFileExtOptions.value.l
 const sortOrder = ref<'newest' | 'oldest' | 'name'>('newest')
 const documentsTotal = ref(0)
 const documentsPage = ref(1)
-const documentsPageSize = ref(10)
+const documentsPageSize = ref(12)
 const processLogSummary = ref<KbProcessLogSummary | null>(null)
 const processLogEvents = ref<KbProcessLogEvent[]>([])
 const processLogLoading = ref(false)
@@ -1576,6 +1599,7 @@ let documentKeywordDebounceTimer: number | null = null
 let suppressDocumentFileTypeFilterWatch = false
 const selectedDocumentIds = ref<number[]>([])
 const batchParsing = ref(false)
+const batchStopping = ref(false)
 const batchDeleting = ref(false)
 const headerSelectAllRef = ref<HTMLInputElement | null>(null)
 const showParseLogModal = ref(false)
@@ -2027,6 +2051,38 @@ function documentCanBatchParse(document: KnowledgeDocument) {
 
 const DOCUMENT_PROCESSING_STATUSES = ['parsing', 'chunking', 'indexing', 'graph_indexing'] as const
 
+const TERMINAL_DOCUMENT_STATUSES = new Set([
+  'indexed',
+  'graph_indexed',
+  'failed',
+  'graph_failed',
+  'deleted',
+])
+
+function isTerminalDocumentStatus(status: string) {
+  return TERMINAL_DOCUMENT_STATUSES.has(status)
+}
+
+function mergeDocumentFromListApi(
+  fresh: KnowledgeDocument,
+  existing?: KnowledgeDocument,
+): KnowledgeDocument {
+  if (!existing) {
+    return applyLocalProcessingOverlay(fresh)
+  }
+  const freshProcessing = isDocumentProcessingOnServer(fresh)
+  const existingTerminal = isTerminalDocumentStatus(existing.status)
+  if (existingTerminal && freshProcessing) {
+    return applyLocalProcessingOverlay({
+      ...fresh,
+      status: existing.status,
+      chunk_count: Math.max(existing.chunk_count ?? 0, fresh.chunk_count ?? 0),
+      error_message: existing.error_message ?? fresh.error_message,
+    })
+  }
+  return applyLocalProcessingOverlay(fresh)
+}
+
 function isDocumentProcessingOnServer(document: KnowledgeDocument) {
   return DOCUMENT_PROCESSING_STATUSES.includes(document.status as (typeof DOCUMENT_PROCESSING_STATUSES)[number])
 }
@@ -2082,11 +2138,10 @@ function endDocumentStreamProcessing(documentId: number, snapshot?: KnowledgeDoc
 
 /** 列表状态列：本地任务进行中时对 uploaded / 图谱就绪 等态做乐观展示。 */
 function getDocumentDisplayStatus(document: KnowledgeDocument): string {
-  const overlaid = applyLocalProcessingOverlay(document)
   if (documentIsStuckProcessing(document)) {
-    return 'uploaded'
+    return document.status
   }
-  return overlaid.status
+  return applyLocalProcessingOverlay(document).status
 }
 
 function patchDocumentInList(documentId: number, patch: Partial<KnowledgeDocument>) {
@@ -2200,6 +2255,37 @@ const canBatchParseSelection = computed(() => {
     return onPage.some(documentCanBatchParse)
   }
   return true
+})
+
+function documentCanStopProcessing(document: KnowledgeDocument) {
+  if (documentIsStuckProcessing(document)) {
+    return true
+  }
+  if (isDocumentProcessingOnServer(document)) {
+    return true
+  }
+  if (parseTasks.isRunning(document.id)) {
+    return true
+  }
+  if (isDocumentProcessingLocally(document)) {
+    return true
+  }
+  const displayStatus = getDocumentDisplayStatus(document)
+  return DOCUMENT_PROCESSING_STATUSES.includes(
+    displayStatus as (typeof DOCUMENT_PROCESSING_STATUSES)[number],
+  )
+}
+
+const canBatchStopSelection = computed(() => {
+  const sel = new Set(selectedDocumentIds.value)
+  if (sel.size === 0) {
+    return false
+  }
+  const onPage = documents.value.filter((d) => sel.has(d.id))
+  if (onPage.some(documentCanStopProcessing)) {
+    return true
+  }
+  return [...sel].some((id) => parseTasks.isRunning(id))
 })
 
 const showNotice = (text: string, type: 'success' | 'error' | 'info' = 'success', durationMs = 3000) => {
@@ -2463,7 +2549,8 @@ async function fetchDocumentPage(options?: { withLoading?: boolean }) {
       data = await knowledgeBaseApi.listDocuments(kbId.value, { ...params, page: lastPage })
     }
     documentsTotal.value = data.total
-    documents.value = data.items.map(applyLocalProcessingOverlay)
+    const previous = new Map(documents.value.map((item) => [item.id, item]))
+    documents.value = data.items.map((item) => mergeDocumentFromListApi(item, previous.get(item.id)))
     const filterReset = syncDocumentFileExtOptions(data.file_ext_options)
     pruneProcessingDocumentIds()
     await reconcileProcessingTasks()
@@ -3167,27 +3254,115 @@ async function runDocumentParseSilent(documentId: number, batchId?: string): Pro
   }
 }
 
-async function runWithConcurrencyLimit<T>(
-  items: number[],
-  limit: number,
-  fn: (documentId: number) => Promise<T>,
-): Promise<T[]> {
-  const results = new Array<T>(items.length)
-  let cursor = 0
-  async function worker() {
-    while (cursor < items.length) {
-      const index = cursor
-      cursor += 1
-      results[index] = await fn(items[index])
+async function waitForBatchDocumentsCompletion(documentIds: number[]) {
+  if (!kbId.value || Number.isNaN(kbId.value) || documentIds.length === 0) {
+    return
+  }
+  const pending = new Set(documentIds)
+  while (pending.size > 0) {
+    await new Promise((resolve) => window.setTimeout(resolve, 3000))
+    for (const documentId of [...pending]) {
+      try {
+        const doc = await knowledgeBaseApi.getDocument(kbId.value, documentId)
+        patchDocumentInList(documentId, doc)
+        parseTasks.reconcileTaskTerminalState(documentId, doc.status)
+        if (!isDocumentProcessingOnServer(doc)) {
+          pending.delete(documentId)
+          parseTasks.finishTask(documentId)
+        }
+      } catch {
+        /* 网络抖动时继续轮询 */
+      }
     }
   }
-  const workers = Math.min(Math.max(limit, 1), items.length)
-  await Promise.all(Array.from({ length: workers }, () => worker()))
-  return results
+}
+
+async function batchParseSelectedDocuments() {
+  const ids = [...new Set(selectedDocumentIds.value)]
+  if (!kbId.value || Number.isNaN(kbId.value) || ids.length === 0) {
+    return
+  }
+  batchParsing.value = true
+  let ok = 0
+  let fail = 0
+  let skipped = 0
+  const batchId = createBatchId()
+  const queuedIds: number[] = []
+  try {
+    await knowledgeBaseApi.startProcessBatch(kbId.value, { batch_uid: batchId, action: 'parse' })
+    const batchResult = await knowledgeBaseApi.batchEnqueueProcess(kbId.value, {
+      document_ids: ids,
+      batch_uid: batchId,
+    })
+    for (const item of batchResult.items) {
+      if (item.queued) {
+        ok += 1
+        queuedIds.push(item.document_id)
+        const mode = item.mode ?? 'parse'
+        const optimisticStatus =
+          mode === 'reindex' ? (isLightragKb.value ? 'graph_indexing' : 'indexing') : 'parsing'
+        patchDocumentInList(item.document_id, { status: optimisticStatus })
+        startDocumentStatusPoll(item.document_id)
+        void parseTasks.resumeWatch(item.document_id, {
+          status: optimisticStatus,
+          mode,
+          onTerminal: (doc) => {
+            patchDocumentInList(item.document_id, doc)
+            stopDocumentStatusPoll(item.document_id)
+            persistParseLogSnapshot(item.document_id)
+          },
+        })
+      } else if (item.skipped) {
+        skipped += 1
+      } else {
+        fail += 1
+      }
+    }
+    void fetchDocumentPage({ withLoading: false })
+    if (queuedIds.length > 0) {
+      await waitForBatchDocumentsCompletion(queuedIds)
+    }
+    for (const documentId of queuedIds) {
+      stopDocumentStatusPoll(documentId)
+      parseTasks.finishTask(documentId)
+      persistParseLogSnapshot(documentId)
+    }
+    await fetchDocumentPage({ withLoading: false })
+    try {
+      await knowledgeBaseApi.reconcileProcessBatch(kbId.value, { batch_uid: batchId })
+    } catch {
+      /* 对账失败不阻断批量解析结果提示 */
+    }
+    if (activeTab.value === 'logs') {
+      await fetchProcessLogData()
+    }
+    clearDocumentSelection()
+    const parts: string[] = []
+    if (ok > 0) {
+      parts.push(`成功 ${ok} 个`)
+    }
+    if (skipped > 0) {
+      parts.push(`跳过 ${skipped} 个`)
+    }
+    if (fail > 0) {
+      parts.push(`失败 ${fail} 个`)
+    }
+    if (fail === 0 && skipped === 0) {
+      showNotice(`已批量解析完成，共 ${ok} 个文件。`, 'success', 4000)
+    } else {
+      showNotice(
+        `批量解析结束：${parts.join('，')}。`,
+        fail === ids.length ? 'error' : 'info',
+        6000,
+      )
+    }
+  } finally {
+    batchParsing.value = false
+  }
 }
 
 function onDocumentRowCheckboxChange(document: KnowledgeDocument, event: Event) {
-  if (documentsLoading.value || batchParsing.value || batchDeleting.value) {
+  if (documentsLoading.value || batchParsing.value || batchStopping.value || batchDeleting.value) {
     return
   }
   const checked = (event.target as HTMLInputElement).checked
@@ -3215,50 +3390,109 @@ function clearDocumentSelection() {
   selectedDocumentIds.value = []
 }
 
-async function batchParseSelectedDocuments() {
+async function stopDocumentProcessingSafely(documentId: number): Promise<boolean> {
+  if (!kbId.value || Number.isNaN(kbId.value)) {
+    return false
+  }
+  stopDocumentStatusPoll(documentId)
+  const wasRunningLocally = parseTasks.isRunning(documentId)
+  try {
+    const snapshot = await parseTasks.cancelTask(documentId)
+    if (snapshot) {
+      patchDocumentInList(documentId, snapshot)
+    } else {
+      patchDocumentInList(documentId, {
+        status: 'uploaded',
+        error_message: null,
+        chunk_count: 0,
+      })
+    }
+    return true
+  } catch {
+    if (wasRunningLocally && !parseTasks.isRunning(documentId)) {
+      await refreshDocuments()
+      return true
+    }
+    try {
+      const snapshot = await cancelDocumentProcess(kbId.value, documentId)
+      patchDocumentInList(documentId, snapshot)
+      return true
+    } catch {
+      return false
+    }
+  }
+}
+
+async function resolveStoppableDocumentIds(ids: number[]): Promise<number[]> {
+  if (!kbId.value || Number.isNaN(kbId.value)) {
+    return []
+  }
+  const stoppable: number[] = []
+  for (const documentId of ids) {
+    if (parseTasks.isRunning(documentId)) {
+      stoppable.push(documentId)
+      continue
+    }
+    const onPage = documents.value.find((d) => d.id === documentId)
+    if (onPage) {
+      if (documentCanStopProcessing(onPage)) {
+        stoppable.push(documentId)
+      }
+      continue
+    }
+    try {
+      const doc = await knowledgeBaseApi.getDocument(kbId.value, documentId)
+      if (documentCanStopProcessing(doc)) {
+        stoppable.push(documentId)
+      }
+    } catch {
+      /* 跳过无法读取的文档 */
+    }
+  }
+  return stoppable
+}
+
+async function batchStopSelectedDocuments() {
   const ids = [...new Set(selectedDocumentIds.value)]
   if (!kbId.value || Number.isNaN(kbId.value) || ids.length === 0) {
     return
   }
-  batchParsing.value = true
+  const stoppable = await resolveStoppableDocumentIds(ids)
+  if (stoppable.length === 0) {
+    showNotice('所选文档中没有进行中的解析任务。', 'info', 4000)
+    return
+  }
+  if (
+    !window.confirm(
+      `确定停止已选的 ${stoppable.length} 个进行中的解析任务吗？已写入的部分将被清理。`,
+    )
+  ) {
+    return
+  }
+  batchStopping.value = true
   let ok = 0
   let fail = 0
-  const concurrency = isLightragKb.value ? 2 : 4
-  const batchId = createBatchId()
   try {
-    await knowledgeBaseApi.startProcessBatch(kbId.value, { batch_uid: batchId, action: 'parse' })
-    const results = await runWithConcurrencyLimit(ids, concurrency, async (documentId) => {
-      const result = await runDocumentParseSilent(documentId, batchId)
-      await fetchDocumentPage({ withLoading: false })
-      return result
-    })
-    for (const result of results) {
-      if (result.ok) {
+    for (const documentId of stoppable) {
+      const stopped = await stopDocumentProcessingSafely(documentId)
+      if (stopped) {
         ok += 1
       } else {
         fail += 1
       }
     }
-    try {
-      await knowledgeBaseApi.reconcileProcessBatch(kbId.value, { batch_uid: batchId })
-    } catch {
-      /* 对账失败不阻断批量解析结果提示 */
-    }
-    if (activeTab.value === 'logs') {
-      await fetchProcessLogData()
-    }
-    clearDocumentSelection()
+    await refreshDocuments()
     if (fail === 0) {
-      showNotice(`已批量解析完成，共 ${ok} 个文件。`, 'success', 4000)
+      showNotice(`已停止 ${ok} 个解析任务。`, 'success', 4000)
     } else {
       showNotice(
-        `批量解析结束：成功 ${ok} 个，失败 ${fail} 个。`,
-        fail === ids.length ? 'error' : 'info',
+        `批量停止结束：成功 ${ok} 个，失败 ${fail} 个。`,
+        fail === stoppable.length ? 'error' : 'info',
         6000,
       )
     }
   } finally {
-    batchParsing.value = false
+    batchStopping.value = false
   }
 }
 
@@ -5357,7 +5591,17 @@ watch(openChunkingMenuForId, (value) => {
   overflow: hidden;
 }
 
-/* 文件列表：一屏铺满，表格区内部滚动，避免浏览器右侧滚动条 */
+/* 文件列表：一屏铺满，无页面级滚动条，15 行完整可见 */
+.knowledge-detail-view--documents-tab.page-shell {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  margin-top: -20px;
+  margin-left: -16px;
+  gap: 0;
+}
+
 .knowledge-detail-view--documents-tab {
   flex: 1;
   min-height: 0;
@@ -5365,12 +5609,13 @@ watch(openChunkingMenuForId, (value) => {
   flex-direction: column;
   overflow: hidden;
   margin-top: 0;
-  gap: 8px;
+  gap: 0;
 }
 
 .knowledge-detail-view--documents-tab .knowledge-detail-layout {
   flex: 1;
   min-height: 0;
+  height: 100%;
   gap: 12px;
   align-items: stretch;
   grid-template-rows: minmax(0, 1fr);
@@ -5397,10 +5642,10 @@ watch(openChunkingMenuForId, (value) => {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 8px;
   overflow: hidden;
-  padding: 10px 18px 8px;
+  padding: 8px 18px 8px;
 }
 
 .knowledge-detail-view--documents-tab .documents-card .section-heading {
@@ -5423,9 +5668,40 @@ watch(openChunkingMenuForId, (value) => {
   gap: 10px;
 }
 
+.knowledge-detail-view--documents-tab .documents-toolbar--compact {
+  align-items: flex-end;
+}
+
+.knowledge-detail-view--documents-tab .documents-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
 .knowledge-detail-view--documents-tab .documents-card .toolbar-field .field-label {
   margin-bottom: 4px;
   font-size: 0.8rem;
+}
+
+.knowledge-detail-view--documents-tab .documents-list-shell {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.knowledge-detail-view--documents-tab .documents-list-shell .document-table-wrap {
+  flex: 1;
+  min-height: 0;
+}
+
+.knowledge-detail-view--documents-tab .documents-list-shell .documents-pagination {
+  margin-top: auto;
+  flex-shrink: 0;
+  border-top: none;
+  padding-top: 6px;
 }
 
 .knowledge-detail-view--documents-tab .document-table-wrap {
@@ -5441,8 +5717,11 @@ watch(openChunkingMenuForId, (value) => {
 }
 
 .knowledge-detail-view--documents-tab .document-table-body {
+  flex: 1 1 auto;
   min-height: 0;
+  max-height: 100%;
   overflow-y: auto;
+  align-content: start;
 }
 
 .knowledge-detail-view--documents-tab .document-row {
@@ -5454,6 +5733,12 @@ watch(openChunkingMenuForId, (value) => {
   margin-top: 0;
   padding-top: 6px;
   gap: 10px 16px;
+}
+
+.knowledge-detail-view--documents-tab .documents-batch-actions {
+  flex-basis: 100%;
+  margin-left: 0;
+  justify-content: flex-end;
 }
 
 .documents-card--fresh-empty {

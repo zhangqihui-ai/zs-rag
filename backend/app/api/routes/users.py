@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, joinedload
 
@@ -11,6 +11,7 @@ from app.core.enterprise_space_context import (
     is_bootstrap_admin,
 )
 from app.core.membership_roles import DEFAULT_MEMBER_ROLE, SPACE_ADMIN
+from app.core.platform_audit_helper import audit_action
 from app.core.user_permissions import (
     assert_can_delete_user,
     assert_can_manage_user,
@@ -109,6 +110,7 @@ def list_users(
 @router.post("", response_model=UserDetailResponse, status_code=status.HTTP_201_CREATED)
 def create_user(
     body: UserCreateRequest,
+    request: Request,
     current_user: CurrentUser,
     current_space: CurrentSpace,
     db: Session = Depends(get_db),
@@ -165,6 +167,17 @@ def create_user(
         )
 
     db.commit()
+    audit_action(
+        db,
+        request,
+        action="admin.user.create",
+        resource_type="user",
+        resource_id=user.id,
+        enterprise_space_id=current_space.id,
+        user_id=current_user.id,
+        detail={"username": user.username},
+    )
+    db.commit()
     return _build_user_detail(_get_user_or_404(db, user.id))
 
 
@@ -191,6 +204,7 @@ def get_user(
 def update_user(
     user_id: int,
     body: UserUpdate,
+    request: Request,
     current_user: CurrentUser,
     current_space: CurrentSpace,
     db: Session = Depends(get_db),
@@ -237,12 +251,24 @@ def update_user(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="用户名已存在")
 
     db.commit()
+    audit_action(
+        db,
+        request,
+        action="admin.user.update",
+        resource_type="user",
+        resource_id=target.id,
+        enterprise_space_id=current_space.id,
+        user_id=current_user.id,
+        detail={"username": target.username},
+    )
+    db.commit()
     return _build_user_detail(_get_user_or_404(db, target.id))
 
 
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_user(
     user_id: int,
+    request: Request,
     current_user: CurrentUser,
     current_space: CurrentSpace,
     db: Session = Depends(get_db),
@@ -257,7 +283,18 @@ def delete_user(
         actor_membership=actor_membership,
     )
     assert_can_delete_user(current_user, target)
+    username = target.username
     db.delete(target)
+    audit_action(
+        db,
+        request,
+        action="admin.user.delete",
+        resource_type="user",
+        resource_id=user_id,
+        enterprise_space_id=current_space.id,
+        user_id=current_user.id,
+        detail={"username": username},
+    )
     db.commit()
 
 
@@ -280,6 +317,7 @@ def get_user_memberships(
 def set_user_memberships(
     user_id: int,
     body: UserMembershipAssign,
+    request: Request,
     current_user: RequireSystemAdmin,
     db: Session = Depends(get_db),
 ) -> UserDetailResponse:
@@ -317,5 +355,15 @@ def set_user_memberships(
             )
         )
 
+    db.commit()
+    audit_action(
+        db,
+        request,
+        action="admin.user.memberships.update",
+        resource_type="user",
+        resource_id=user_id,
+        user_id=current_user.id,
+        detail={"assignments": [a.model_dump() for a in body.assignments]},
+    )
     db.commit()
     return _build_user_detail(_get_user_or_404(db, user_id))

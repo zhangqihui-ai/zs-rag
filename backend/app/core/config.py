@@ -102,6 +102,18 @@ class Settings(BaseSettings):
         description="知识库切片全文索引名称（接入同步时使用）",
     )
 
+    redis_url: str | None = Field(default=None, description="Redis URL，供 Celery 与分布式限流")
+    celery_enabled: bool = Field(default=False, description="是否启用 Celery 文档任务队列")
+    rate_limit_enabled: bool = Field(default=True, description="是否启用 API 限流")
+    chat_api_rate_limit_per_minute: int = Field(default=120, description="Chat/Embed API 每分钟请求上限")
+    auth_login_rate_limit_per_minute: int = Field(default=30, description="登录接口每分钟请求上限")
+    embed_api_key_daily_quota: int = Field(default=5000, description="单个 Embed Key 日调用配额（0=不限制）")
+    space_max_documents: int = Field(default=0, description="企业空间最大文档数（0=不限制）")
+    space_max_storage_bytes: int = Field(
+        default=0,
+        description="企业空间最大存储字节数（0=不限制）",
+    )
+
     # MinIO（Milvus 对象存储依赖；Console 登录凭据）
     minio_root_user: str = Field(default="minioadmin", description="MinIO 管理员用户名")
     minio_root_password: str = Field(default="minioadmin", description="MinIO 管理员密码")
@@ -149,6 +161,7 @@ class Settings(BaseSettings):
     frontend_exposed_port: int | None = Field(default=None, description="前端 Web 宿主机映射端口")
     mineru_exposed_port: int | None = Field(default=None, description="MinerU 宿主机映射端口")
     odl_hybrid_exposed_port: int | None = Field(default=None, description="ODL Hybrid 宿主机映射端口")
+    redis_exposed_port: int | None = Field(default=None, description="Redis 宿主机映射端口")
 
     @property
     def normalized_cors_origins(self) -> list[str]:
