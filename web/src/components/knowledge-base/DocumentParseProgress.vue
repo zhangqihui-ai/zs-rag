@@ -1,5 +1,7 @@
 <script setup lang="ts">
-defineProps<{
+import { computed } from 'vue'
+
+const props = defineProps<{
   percent: number
   title?: string
 }>()
@@ -8,15 +10,26 @@ const emit = defineEmits<{
   openLog: []
   cancel: []
 }>()
+
+const displayPercent = computed(() => {
+  const value = Number(props.percent)
+  if (!Number.isFinite(value)) {
+    return 0
+  }
+  if (value >= 99.5) {
+    return 99
+  }
+  return Math.max(0, Math.round(value))
+})
 </script>
 
 <template>
   <div class="doc-parse-progress" :title="title || '点击查看解析日志'">
     <button class="doc-parse-progress-main" type="button" @click="emit('openLog')">
       <span class="doc-parse-progress-track" aria-hidden="true">
-        <span class="doc-parse-progress-fill" :style="{ width: `${Math.min(Math.max(percent, 0), 100)}%` }" />
+        <span class="doc-parse-progress-fill" :style="{ width: `${displayPercent}%` }" />
       </span>
-      <span class="doc-parse-progress-pct">{{ Math.round(percent) }}%</span>
+      <span class="doc-parse-progress-pct">{{ displayPercent }}%</span>
     </button>
     <button
       class="doc-parse-progress-cancel"

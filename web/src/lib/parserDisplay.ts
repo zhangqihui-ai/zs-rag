@@ -77,9 +77,18 @@ export function documentParserDisplay(
     return document.parser_engine_label
   }
   const meta = document.metadata
-  const backend = typeof meta?.parser_backend === 'string' ? meta.parser_backend : null
+  const backend =
+    (typeof meta?.parser_backend === 'string' ? meta.parser_backend : null) ||
+    (typeof meta?.excel_engine === 'string' ? meta.excel_engine : null)
   if (backend) {
-    return parserEngineLabel(backend, meta?.parser_fallback === true)
+    const configured = configuredEngineForExt(kb, uploadExtension(document) || null)
+    const fallback =
+      meta?.parser_fallback === true ||
+      (configured === 'mineru' &&
+        (backend === 'html_table' || backend === 'tsv') &&
+        document.status !== 'uploaded' &&
+        document.chunk_count > 0)
+    return parserEngineLabel(backend, fallback)
   }
   const configured = configuredEngineForExt(kb, uploadExtension(document) || null)
   if (configured) {

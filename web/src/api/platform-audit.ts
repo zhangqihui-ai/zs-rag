@@ -54,6 +54,11 @@ export const PLATFORM_AUDIT_ACTION_LABELS: Record<string, string> = {
   'model.defaults.update': '更新默认模型',
   'chat.session.delete': '删除对话会话',
   'chat.conversation.delete': '删除对话记录',
+  'knowledge_document.batch.upload': '批量上传文档',
+  'knowledge_document.batch.parse': '批量解析文档',
+  'knowledge_document.batch.reindex': '批量重建索引',
+  'knowledge_document.batch.delete': '批量删除文档',
+  'knowledge_document.batch.cancel': '取消文档解析',
   'audit.test': '审计测试',
 }
 
@@ -62,6 +67,7 @@ export const PLATFORM_AUDIT_RESOURCE_TYPE_LABELS: Record<string, string> = {
   knowledge_base: '知识库',
   model: '模型',
   chat: '对话',
+  knowledge_document: '知识库文档',
   system: '系统',
 }
 

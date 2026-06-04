@@ -1,3 +1,18 @@
+# Celery worker 须与 backend 保持一致的文档解析环境（MinerU / OpenDataLoader），否则 PDF 会跳过 MinerU 降级到 pypdf。
+x-document-parse-env: &document-parse-env
+  DOC_PARSE_MAX_CONCURRENCY: ${DOC_PARSE_MAX_CONCURRENCY:-3}
+  MINERU_ENABLED: ${MINERU_ENABLED:-false}
+  MINERU_BASE_URL: ${MINERU_BASE_URL:-http://mineru-cpu:8000}
+  MINERU_BACKEND: ${MINERU_BACKEND:-pipeline}
+  MINERU_LANG: ${MINERU_LANG:-ch}
+  MINERU_TIMEOUT: ${MINERU_TIMEOUT:-300}
+  MINERU_FORMATS: ${MINERU_FORMATS:-pdf,png,jpg,jpeg,bmp,tif,tiff,webp,docx,xlsx,xlsm,csv,md,txt}
+  ODL_ENABLED: ${ODL_ENABLED:-true}
+  ODL_DEFAULT_PARSER: ${ODL_DEFAULT_PARSER:-opendataloader}
+  ODL_HYBRID: ${ODL_HYBRID:-false}
+  ODL_HYBRID_URL: ${ODL_HYBRID_URL:-http://opendataloader-hybrid:5002}
+  ODL_TIMEOUT: ${ODL_TIMEOUT:-120}
+
 services:
   # ============== Database Services ==============
   postgres:
@@ -185,7 +200,7 @@ services:
       MINERU_BACKEND: ${MINERU_BACKEND:-pipeline}
       MINERU_LANG: ${MINERU_LANG:-ch}
       MINERU_TIMEOUT: ${MINERU_TIMEOUT:-300}
-      MINERU_FORMATS: ${MINERU_FORMATS:-pdf,png,jpg,jpeg,bmp,tif,tiff,webp,docx,xlsx,xlsm,xls,csv,md,txt}
+      MINERU_FORMATS: ${MINERU_FORMATS:-pdf,png,jpg,jpeg,bmp,tif,tiff,webp,docx,xlsx,xlsm,csv,md,txt}
       # OpenDataLoader PDF（默认 PDF 引擎；进程内 Python SDK + JVM，无需 HTTP sidecar）
       ODL_ENABLED: ${ODL_ENABLED:-true}
       ODL_DEFAULT_PARSER: ${ODL_DEFAULT_PARSER:-opendataloader}
@@ -204,7 +219,6 @@ services:
       FRONTEND_CONTAINER_PORT: 5173
       MINERU_EXPOSED_PORT: ${MINERU_PORT:-8001}
       ODL_HYBRID_EXPOSED_PORT: ${ODL_HYBRID_PORT:-5002}
-      REDIS_EXPOSED_PORT: ${REDIS_PORT:-6379}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       CELERY_ENABLED: ${CELERY_ENABLED:-false}
       RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
@@ -246,10 +260,13 @@ services:
       CELERY_ENABLED: ${CELERY_ENABLED:-true}
       MILVUS_HOST: milvus
       MILVUS_PORT: 19530
+      MILVUS_DB_NAME: ${MILVUS_DB_NAME:-default}
       OPENSEARCH_URL: ${OPENSEARCH_URL:-http://opensearch:9200}
+      OPENSEARCH_INDEX_CHUNKS: ${OPENSEARCH_INDEX_CHUNKS:-zs_rag_chunks}
       NEO4J_URI: bolt://neo4j:7687
       NEO4J_USERNAME: neo4j
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:-neo4jpassword}
+      <<: *document-parse-env
     volumes:
       - ./backend:/app
       - /app/__pycache__
@@ -384,8 +401,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: zs-rag-redis
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
+    # 仅容器网络内访问；本地调试需暴露时在 .env 设 REDIS_PORT 并取消 ports 注释
     volumes:
       - redis_data:/data
     networks:

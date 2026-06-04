@@ -814,13 +814,14 @@
                       <th>动作</th>
                       <th>数量</th>
                       <th>状态</th>
+                      <th>共计耗时</th>
                       <th>操作</th>
                     </tr>
                   </thead>
                   <tbody>
                     <template v-for="event in processLogEvents" :key="event.id">
                       <tr>
-                        <td>{{ formatDate(event.started_at) }}</td>
+                        <td>{{ formatApiDateTime(event.started_at) }}</td>
                         <td>{{ event.username }}</td>
                         <td>
                           <div class="kb-log-action-cell">
@@ -838,6 +839,7 @@
                             {{ processLogStatusLabel(event.status) }}
                           </span>
                         </td>
+                        <td class="kb-log-duration">{{ event.duration_label || '—' }}</td>
                         <td>
                           <button
                             class="btn btn-ghost btn-sm"
@@ -849,7 +851,7 @@
                         </td>
                       </tr>
                       <tr v-if="expandedProcessLogBatchId === event.id" class="kb-log-expand-row">
-                        <td colspan="6">
+                        <td colspan="7">
                           <div v-if="processLogBatchItemsLoading" class="kb-log-expand-loading">加载明细…</div>
                           <ul v-else-if="processLogBatchItems.length > 0" class="kb-log-item-list">
                             <li v-for="item in processLogBatchItems" :key="item.id" class="kb-log-item-row">
@@ -1114,7 +1116,7 @@
             >
               {{
                 uploading
-                  ? `上传中 (${Math.max(uploadCompletedCount, uploadProgress)}/${uploadFiles.length})${
+                  ? `上传中 (${uploadCompletedCount}/${uploadFiles.length})${
                       uploadCurrentFileName ? ` · ${uploadCurrentFileName}` : ''
                     }…`
                   : '保存并上传'
@@ -2017,17 +2019,33 @@ function documentIsStuckProcessing(document: KnowledgeDocument) {
   return isDocumentProcessingOnServer(document) && !parseTasks.isRunning(document.id)
 }
 
+function capRunningPercent(percent: number): number {
+  if (!Number.isFinite(percent)) {
+    return 0
+  }
+  return Math.min(Math.max(percent, 0), 99)
+}
+
 function documentProcessingPercent(document: KnowledgeDocument): number {
   const task = parseTasks.getTask(document.id)
   if (task && task.status === 'running') {
-    return task.percent
+    if (task.percent > 0) {
+      return capRunningPercent(task.percent)
+    }
+    return statusToPercent(document.status)
   }
-  const status = document.status
+  if (documentIsStuckProcessing(document)) {
+    return statusToPercent(document.status)
+  }
+  return 0
+}
+
+function statusToPercent(status: string): number {
   if (status === 'graph_indexing') return 55
-  if (status === 'indexing') return 78
+  if (status === 'indexing') return 72
   if (status === 'chunking') return 20
   if (status === 'parsing') return 8
-  return 0
+  return 5
 }
 
 function documentCanStartParse(document: KnowledgeDocument) {
@@ -2111,6 +2129,34 @@ function applyLocalProcessingOverlay(document: KnowledgeDocument): KnowledgeDocu
     return document
   }
   const task = parseTasks.getTask(document.id)
+  // 用户主动发起的 SSE 任务：始终展示乐观处理态（服务端可能尚未切到 indexing）
+  if (task && !task.watchOnly) {
+    if (task.mode === 'reindex') {
+      return {
+        ...document,
+        status: isLightragKb.value ? 'graph_indexing' : 'indexing',
+      }
+    }
+    if (document.status === 'graph_indexed' || document.status === 'indexed') {
+      return document
+    }
+    if (
+      document.status === 'graph_indexing' ||
+      document.status === 'parsing' ||
+      document.status === 'indexing' ||
+      document.status === 'chunking'
+    ) {
+      return document
+    }
+    if (document.status === 'uploaded' || document.status === 'failed' || document.status === 'graph_failed') {
+      return { ...document, status: 'parsing' }
+    }
+    return document
+  }
+  // 仅轮询恢复的任务：服务端已到终态时不再覆盖
+  if (isTerminalDocumentStatus(document.status)) {
+    return document
+  }
   if (task?.mode === 'reindex') {
     return {
       ...document,
@@ -2295,10 +2341,6 @@ const showNotice = (text: string, type: 'success' | 'error' | 'info' = 'success'
       notice.value = { text: '', type: 'success' }
     }
   }, durationMs)
-}
-
-function formatDate(value: string) {
-  return new Date(value).toLocaleString('zh-CN')
 }
 
 function formatFileSize(value: number | null) {
@@ -2784,6 +2826,8 @@ async function loadPage() {
   }
 }
 
+const UPLOAD_CONCURRENCY = 3
+
 async function submitUpload() {
   if (!kbId.value || Number.isNaN(kbId.value) || uploadFiles.value.length === 0) {
     uploadError.value = '请选择要上传的文件'
@@ -2799,31 +2843,55 @@ async function submitUpload() {
   const failures: string[] = []
   const queue = [...uploadFiles.value]
   const total = queue.length
-  try {
-    const batchId = createBatchId()
-    const batchAuditItems: Array<{ document_id: number; file_name: string }> = []
-    for (let index = 0; index < total; index += 1) {
-      const file = queue[index]
-      uploadProgress.value = index + 1
-      uploadCurrentFileName.value = file.name
-      await nextTick()
-      try {
-        const res = await knowledgeBaseApi.uploadDocument(kbId.value, {
-          file,
-          skip_if_duplicate: true,
+  const batchAuditItems: Array<{ document_id: number; file_name: string }> = []
+  const batchId = createBatchId()
+  let nextIndex = 0
+
+  const uploadOne = async (index: number) => {
+    const file = queue[index]
+    uploadCurrentFileName.value = file.name
+    try {
+      const res = await knowledgeBaseApi.uploadDocument(kbId.value!, {
+        file,
+        skip_if_duplicate: true,
+      })
+      return { index, ok: true as const, res, file }
+    } catch (value) {
+      return { index, ok: false as const, error: value, file }
+    } finally {
+      uploadCompletedCount.value += 1
+      uploadProgress.value = uploadCompletedCount.value
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(UPLOAD_CONCURRENCY, total) }, async () => {
+    while (true) {
+      const index = nextIndex
+      nextIndex += 1
+      if (index >= total) {
+        break
+      }
+      const outcome = await uploadOne(index)
+      if (outcome.ok) {
+        batchAuditItems.push({
+          document_id: outcome.res.id,
+          file_name: outcome.res.file_name || outcome.file.name,
         })
-        batchAuditItems.push({ document_id: res.id, file_name: res.file_name || file.name })
-        if (res.upload_skipped) {
-          skippedNames.push(file.name)
+        if (outcome.res.upload_skipped) {
+          skippedNames.push(outcome.file.name)
         } else {
-          okNames.push(file.name)
+          okNames.push(outcome.file.name)
         }
-        uploadCompletedCount.value = index + 1
-      } catch (value) {
-        failures.push(`${file.name}：${getKnowledgeBaseErrorMessage(value, '上传失败')}`)
-        uploadCompletedCount.value = index + 1
+      } else {
+        failures.push(
+          `${outcome.file.name}：${getKnowledgeBaseErrorMessage(outcome.error, '上传失败')}`,
+        )
       }
     }
+  })
+
+  try {
+    await Promise.all(workers)
     if (batchAuditItems.length > 0) {
       try {
         await knowledgeBaseApi.recordUploadBatch(kbId.value, {
@@ -3541,11 +3609,14 @@ async function parseDocumentAction(documentId: number, options?: { force?: boole
   }
   const meta = documents.value.find((d) => d.id === documentId)
   const needsForce = Boolean(options?.force || (meta && documentIsStuckProcessing(meta)))
-  if (parseTasks.isRunning(documentId) && !needsForce) {
-    return
-  }
-  if (needsForce && parseTasks.isRunning(documentId)) {
-    await parseTasks.cancelTask(documentId)
+  if (parseTasks.isRunning(documentId)) {
+    if (needsForce) {
+      await parseTasks.cancelTask(documentId)
+    } else if (meta && documentIsStuckProcessing(meta)) {
+      parseTasks.finishTask(documentId)
+    } else {
+      return
+    }
   }
   parseLogDocumentId.value = documentId
   parseLogKind.value = 'parse'
@@ -3554,9 +3625,14 @@ async function parseDocumentAction(documentId: number, options?: { force?: boole
   parseLogPhase.value = 'running'
   patchDocumentInList(documentId, { status: 'parsing' })
   startDocumentStatusPoll(documentId)
-  void fetchDocumentPage({ withLoading: false })
+  const batchId = createBatchId()
   try {
-    const result = await parseTasks.startTask(documentId, 'parse', { force: needsForce })
+    await knowledgeBaseApi.startProcessBatch(kbId.value, {
+      batch_uid: batchId,
+      action: 'parse',
+      force: needsForce,
+    })
+    const result = await parseTasks.startTask(documentId, 'parse', { force: needsForce, batchId })
     if (result) {
       endDocumentStreamProcessing(documentId, result)
       parseLogPhase.value = 'success'
@@ -3586,13 +3662,16 @@ async function reindexDocumentAction(documentId: number, options?: { force?: boo
   if (!kbId.value || Number.isNaN(kbId.value)) {
     return
   }
-  if (parseTasks.isRunning(documentId) && !options?.force) {
-    return
-  }
-  if (options?.force && parseTasks.isRunning(documentId)) {
-    await parseTasks.cancelTask(documentId)
-  }
   const meta = documents.value.find((d) => d.id === documentId)
+  if (parseTasks.isRunning(documentId)) {
+    if (options?.force) {
+      await parseTasks.cancelTask(documentId)
+    } else if (meta && documentIsIndexed(meta)) {
+      parseTasks.finishTask(documentId)
+    } else {
+      return
+    }
+  }
   parseLogDocumentId.value = documentId
   parseLogKind.value = 'reindex'
   parseLogTitle.value = meta?.file_name || `文档 #${documentId}`
@@ -3602,11 +3681,17 @@ async function reindexDocumentAction(documentId: number, options?: { force?: boo
     status: isLightragKb.value ? 'graph_indexing' : 'indexing',
   })
   startDocumentStatusPoll(documentId)
-  void fetchDocumentPage({ withLoading: false })
+  const batchId = createBatchId()
   try {
+    await knowledgeBaseApi.startProcessBatch(kbId.value, {
+      batch_uid: batchId,
+      action: 'reindex',
+      force: options?.force,
+    })
     const result = await parseTasks.startTask(documentId, 'reindex', {
       force: options?.force,
       graphKb: isLightragKb.value,
+      batchId,
     })
     if (result) {
       endDocumentStreamProcessing(documentId, result)
@@ -3642,35 +3727,37 @@ async function batchDeleteSelectedDocuments() {
     return
   }
   batchDeleting.value = true
-  let ok = 0
-  let fail = 0
+  deletingDocumentIds.value = [...ids]
   const batchId = createBatchId()
   try {
     await knowledgeBaseApi.startProcessBatch(kbId.value, { batch_uid: batchId, action: 'delete' })
+    const result = await knowledgeBaseApi.batchDeleteDocuments(kbId.value, {
+      document_ids: ids,
+      batch_uid: batchId,
+    })
     for (const documentId of ids) {
-      deletingDocumentIds.value = [...deletingDocumentIds.value, documentId]
       try {
-        await knowledgeBaseApi.deleteDocument(kbId.value, documentId, batchId)
-        try {
-          sessionStorage.removeItem(parseLogStorageKey(documentId))
-        } catch {
-          /* ignore */
-        }
-        ok += 1
+        sessionStorage.removeItem(parseLogStorageKey(documentId))
       } catch {
-        fail += 1
-      } finally {
-        deletingDocumentIds.value = deletingDocumentIds.value.filter((item) => item !== documentId)
+        /* ignore */
       }
+      parseTasks.finishTask(documentId)
     }
     clearDocumentSelection()
     await refreshDocuments()
-    if (fail === 0) {
-      showNotice(`已删除 ${ok} 个文档。`, 'success', 4000)
+    if (result.failed_count === 0) {
+      showNotice(`已删除 ${result.deleted_count} 个文档。`, 'success', 4000)
     } else {
-      showNotice(`删除结束：成功 ${ok} 个，失败 ${fail} 个。`, fail === ids.length ? 'error' : 'info', 6000)
+      showNotice(
+        `删除结束：成功 ${result.deleted_count} 个，失败 ${result.failed_count} 个。`,
+        result.deleted_count === 0 ? 'error' : 'info',
+        6000,
+      )
     }
+  } catch (value) {
+    showNotice(getKnowledgeBaseErrorMessage(value, '批量删除失败'), 'error')
   } finally {
+    deletingDocumentIds.value = []
     batchDeleting.value = false
   }
 }

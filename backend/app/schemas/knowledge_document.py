@@ -205,3 +205,23 @@ class BatchDocumentProcessResponse(BaseModel):
     failed_count: int
     skipped_count: int
     total: int
+
+
+class BatchDocumentDeleteRequest(BaseModel):
+    document_ids: list[int] = Field(..., min_length=1, max_length=500)
+    batch_uid: str | None = None
+
+
+class BatchDocumentDeleteItemResult(BaseModel):
+    document_id: int
+    deleted: bool = False
+    skipped: bool = False
+    error: str | None = None
+
+
+class BatchDocumentDeleteResponse(BaseModel):
+    items: list[BatchDocumentDeleteItemResult]
+    deleted_count: int
+    failed_count: int
+    skipped_count: int
+    total: int

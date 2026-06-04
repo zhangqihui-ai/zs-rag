@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # backend/.env（与 app 包同级），避免在容器内用 ../.env 误指向根目录 /.env
@@ -89,6 +89,12 @@ class Settings(BaseSettings):
         default=3,
         description="Embedding 超时/网络错误最大重试次数",
     )
+    embedding_batch_size: int = Field(
+        default=16,
+        ge=1,
+        le=128,
+        description="单次调用 Embedding API 的文本条数（大批量文档索引时可适当增大）",
+    )
     tiktoken_cache_dir: str | None = Field(
         default=None,
         description="tiktoken 离线缓存目录（对应环境变量 TIKTOKEN_CACHE_DIR）",
@@ -128,7 +134,7 @@ class Settings(BaseSettings):
     mineru_lang: str = Field(default="ch", description="MinerU OCR 语言：ch/en/korean/japan...")
     mineru_timeout: int = Field(default=300, description="单文件解析超时（秒），扫描件建议更大")
     mineru_formats: str = Field(
-        default="pdf,png,jpg,jpeg,bmp,tif,tiff,webp,docx,xlsx,xlsm,xls,csv,md,txt",
+        default="pdf,png,jpg,jpeg,bmp,tif,tiff,webp,docx,xlsx,xlsm,csv,md,txt",
         description="MinerU 可解析后缀白名单（逗号分隔）；图片等自动路径使用；知识库显式选 mineru 引擎时不强制在此列表",
     )
 
@@ -162,6 +168,26 @@ class Settings(BaseSettings):
     mineru_exposed_port: int | None = Field(default=None, description="MinerU 宿主机映射端口")
     odl_hybrid_exposed_port: int | None = Field(default=None, description="ODL Hybrid 宿主机映射端口")
     redis_exposed_port: int | None = Field(default=None, description="Redis 宿主机映射端口")
+
+    @field_validator(
+        "postgres_exposed_port",
+        "milvus_exposed_port",
+        "milvus_web_exposed_port",
+        "minio_console_exposed_port",
+        "opensearch_exposed_port",
+        "neo4j_http_exposed_port",
+        "backend_exposed_port",
+        "frontend_exposed_port",
+        "mineru_exposed_port",
+        "odl_hybrid_exposed_port",
+        "redis_exposed_port",
+        mode="before",
+    )
+    @classmethod
+    def _optional_exposed_port(cls, value: object) -> object:
+        if value == "" or value is None:
+            return None
+        return value
 
     @property
     def normalized_cors_origins(self) -> list[str]:

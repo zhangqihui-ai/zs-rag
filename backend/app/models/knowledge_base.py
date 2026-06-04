@@ -25,6 +25,7 @@ from app.db.base import Base
 class KnowledgeBaseStatus(enum.Enum):
     ACTIVE = "active"
     INACTIVE = "inactive"
+    EMBEDDING_UNAVAILABLE = "embedding_unavailable"
     DELETED = "deleted"
 
 

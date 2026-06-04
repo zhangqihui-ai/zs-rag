@@ -163,6 +163,7 @@ import {
 } from '../../api/platform-audit'
 import { listUsers, type UserDetail } from '../../api/users'
 import { getApiErrorMessage } from '../../lib/apiError'
+import { formatApiDateTime } from '../../lib/formatDateTime'
 import AppIcon from '../AppIcon.vue'
 import EmptyState from '../EmptyState.vue'
 import type { EnterpriseSpace } from '../../stores/auth'
@@ -217,9 +218,7 @@ const detailColspan = computed(() => {
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize.value)))
 
 function formatTime(value: string) {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString('zh-CN', { hour12: false })
+  return formatApiDateTime(value, value)
 }
 
 function formatDetail(detail: Record<string, unknown>) {

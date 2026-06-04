@@ -39,6 +39,9 @@ logger = logging.getLogger(__name__)
 MIN_KEYWORD_RELEVANCE_SCORE = 1.5
 # 混合检索全文路：低于此加权分视为跨库/跨主题弱命中（如「正当」+「需要」凑分），不进入融合
 MIN_KEYWORD_HYBRID_SCORE = 3.0
+# 事项编码等长字母数字串：全文精确命中权重须能过混合门槛
+MIN_KEYWORD_HYBRID_SCORE_IDENTIFIER = 1.0
+IDENTIFIER_QUERY_MIN_LEN = 6
 # 全文无有效命中时，向量路 Top1 分数低于此值则不强行向量兜底
 MIN_VECTOR_FALLBACK_SCORE = 0.45
 # RRF 平滑常数（加权倒数排名融合）
@@ -161,6 +164,26 @@ class QueryTermLayers:
     auxiliaries: tuple[str, ...]
 
 
+def _dominant_identifier_in_query(query: str) -> str | None:
+    """问句主体为事项编码/业务单号等字母数字串时返回该 token。"""
+    q = query.strip()
+    if not q:
+        return None
+    for tok in re.split(r"[\s\u3000]+", q):
+        t = tok.strip()
+        if len(t) >= IDENTIFIER_QUERY_MIN_LEN and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", t):
+            return t
+    if len(q) >= IDENTIFIER_QUERY_MIN_LEN and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", q):
+        return q
+    return None
+
+
+def _min_keyword_hybrid_score_for_query(query: str) -> float:
+    if _dominant_identifier_in_query(query):
+        return MIN_KEYWORD_HYBRID_SCORE_IDENTIFIER
+    return MIN_KEYWORD_HYBRID_SCORE
+
+
 def _dedupe_terms(terms: list[str]) -> tuple[str, ...]:
     seen: set[str] = set()
     out: list[str] = []
@@ -278,6 +301,8 @@ def _anchor_term_weight(term: str) -> float:
     if len(term) == 2 and re.fullmatch(r"[\u4e00-\u9fff]+", term):
         return 1.5
     if re.search(r"[A-Za-z0-9]", term):
+        if len(term) >= IDENTIFIER_QUERY_MIN_LEN:
+            return 4.0
         return 1.2
     return 1.0
 
@@ -378,8 +403,13 @@ def _vector_boost_eligible(
     vector_total: int,
     raw_score: float,
     top_score: float,
+    chunk_text: str = "",
+    query: str = "",
 ) -> bool:
     """仅对向量路头部且分数接近最优的命中参与混合加权，避免弱向量误抬升关键词噪声。"""
+    ident = _dominant_identifier_in_query(query)
+    if ident and ident in chunk_text:
+        return raw_score > 0
     if vector_total <= 0 or raw_score <= 0 or top_score <= 0:
         return False
     if vector_rank > max(3, vector_total // 4):
@@ -393,6 +423,7 @@ def _filter_hybrid_channel_candidates(
     score_key: str,
     score_threshold: float | None,
     channel: str,
+    query: str = "",
 ) -> list[dict[str, Any]]:
     """
     混合检索融合前，按单路分数过滤候选。
@@ -402,10 +433,12 @@ def _filter_hybrid_channel_candidates(
     if not candidates:
         return []
 
-    if channel == "keyword" and _max_channel_score(candidates, score_key) < MIN_KEYWORD_HYBRID_SCORE:
+    min_hybrid = _min_keyword_hybrid_score_for_query(query)
+
+    if channel == "keyword" and _max_channel_score(candidates, score_key) < min_hybrid:
         return []
 
-    flat_below = MIN_KEYWORD_HYBRID_SCORE if channel == "keyword" else None
+    flat_below = min_hybrid if channel == "keyword" else None
 
     if score_threshold is not None:
         keyed = {item["chunk"].chunk_uid: float(item.get(score_key) or 0) for item in candidates}
@@ -421,18 +454,21 @@ def _filter_hybrid_channel_candidates(
         max_score = _max_channel_score(candidates, score_key)
         if max_score <= 0:
             return []
-        floor = max(max_score * 0.45, MIN_KEYWORD_HYBRID_SCORE)
+        floor = max(max_score * 0.45, min_hybrid)
         return [item for item in candidates if float(item.get(score_key) or 0) >= floor]
 
     top_score = _max_channel_score(candidates, score_key)
     kept = []
     for rank, item in enumerate(candidates, start=1):
         raw = float(item.get(score_key) or 0)
+        text = item["chunk"].keyword_text or item["chunk"].content or ""
         if _vector_boost_eligible(
             vector_rank=rank,
             vector_total=len(candidates),
             raw_score=raw,
             top_score=top_score,
+            chunk_text=text,
+            query=query,
         ):
             kept.append(item)
     return kept
@@ -870,6 +906,7 @@ def _hybrid_cross_domain_guard(
     keyword_candidates: list[dict[str, Any]],
     vector_candidates: list[dict[str, Any]],
     merged: dict[str, dict[str, Any]],
+    query: str = "",
 ) -> bool:
     """
     混合检索：向量路整体置信不足且全文仅弱命中时，视为跨库/跨主题误召回，应返回空。
@@ -883,8 +920,9 @@ def _hybrid_cross_domain_guard(
     if not keyword_candidates:
         return True
 
+    min_hybrid = _min_keyword_hybrid_score_for_query(query)
     max_keyword = _max_channel_score(keyword_candidates, "keyword_score")
-    if max_keyword >= MIN_KEYWORD_HYBRID_SCORE:
+    if max_keyword >= min_hybrid:
         return True
 
     has_vector_boost = any(item.get("vector_score") is not None for item in merged.values())
@@ -1234,12 +1272,14 @@ def search_knowledge_base(
             score_key="vector_score",
             score_threshold=score_threshold,
             channel="vector",
+            query=query,
         )
         keyword_candidates = _filter_hybrid_channel_candidates(
             keyword_candidates,
             score_key="keyword_score",
             score_threshold=score_threshold,
             channel="keyword",
+            query=query,
         )
         keyword_scores = {
             item["chunk"].chunk_uid: item["keyword_score"]
@@ -1316,6 +1356,8 @@ def search_knowledge_base(
                     vector_total=len(vector_candidates),
                     raw_score=raw,
                     top_score=top_vector_score,
+                    chunk_text=item["chunk"].keyword_text or item["chunk"].content or "",
+                    query=query,
                 ):
                     merged[uid]["vector_score"] = raw
 
@@ -1340,12 +1382,16 @@ def search_knowledge_base(
             )
         else:
             normalized_vector = _normalize_scores_relative(eligible_vector_scores)
-        normalized_keyword = _normalize_scores_relative(keyword_scores, zero_if_flat_below=MIN_KEYWORD_HYBRID_SCORE)
+        normalized_keyword = _normalize_scores_relative(
+            keyword_scores,
+            zero_if_flat_below=_min_keyword_hybrid_score_for_query(query),
+        )
 
         if not _hybrid_cross_domain_guard(
             keyword_candidates=keyword_candidates,
             vector_candidates=vector_candidates,
             merged=merged,
+            query=query,
         ):
             results = []
         else:

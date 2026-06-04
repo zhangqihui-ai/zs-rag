@@ -41,6 +41,10 @@
 #   docker compose -f docker-compose.prod.yml -f docker-compose.prod.registry.yml pull
 #   docker compose -f docker-compose.prod.yml -f docker-compose.prod.registry.yml up -d --no-build
 #
+#  启用 Celery 文档队列（.env：CELERY_ENABLED=true）：
+#   docker compose -f docker-compose.prod.yml -f docker-compose.prod.registry.yml --profile celery up -d --no-build
+#   docker compose -f docker-compose.prod.yml -f docker-compose.prod.registry.yml up -d --no-build --force-recreate backend celery-worker
+#
 #  若只更新了 前端 镜像，可只重建 frontend
 #   docker compose -f docker-compose.prod.yml -f docker-compose.prod.registry.yml pull frontend
 #   docker compose -f docker-compose.prod.yml -f docker-compose.prod.registry.yml up -d --no-build --force-recreate frontend
@@ -287,6 +291,7 @@ if [[ "$MODE" == "prod" ]]; then
       "milvusdb/milvus:v2.4.15|milvus:v2.4.15"
       "neo4j:5.26-community|neo4j:5.26-community"
       "opensearchproject/opensearch:3.6.0|opensearch:3.6.0"
+      "redis:7-alpine|redis:7-alpine"
     )
   fi
   # 仅在本机构建 backend/frontend 时需要
@@ -309,6 +314,7 @@ else
     "milvusdb/milvus:v2.5.6|milvus:v2.5.6"
     "neo4j:5.26|neo4j:5.26"
     "opensearchproject/opensearch:3.6.0|opensearch:3.6.0"
+    "redis:7-alpine|redis:7-alpine"
     "node:20-alpine|node:20-alpine"
     "python:3.12-slim|python:3.12-slim"
   )
@@ -486,6 +492,8 @@ if [[ "$MODE" == "prod" ]]; then
     DEPLOY_HINT="  # 全量更新或首次部署
   docker compose ${COMPOSE_FILES} pull
   docker compose ${COMPOSE_FILES} up -d --no-build
+  # 若 .env 中 CELERY_ENABLED=true，须额外启用 celery profile：
+  docker compose ${COMPOSE_FILES} --profile celery up -d --no-build
   # 首次部署或有新数据库迁移时执行：
   docker compose ${COMPOSE_FILES} exec backend python -m alembic upgrade head"
   fi

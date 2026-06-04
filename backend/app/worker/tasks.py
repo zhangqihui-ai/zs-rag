@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
+
 from celery import Celery
+from celery.signals import worker_ready
 from sqlalchemy import select
 
 from app.core.config import get_settings
@@ -12,6 +15,8 @@ from app.models.document_background_task import DocumentBackgroundTask
 from app.services import document_background_task_service as bg
 from app.services.document_process_tasks import DocumentProcessCancelled
 from app.services.knowledge_document_service import execute_document_process_job
+
+logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
@@ -28,6 +33,22 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     broker_connection_retry_on_startup=True,
 )
+
+
+@worker_ready.connect
+def _log_worker_document_parse_config(**_kwargs) -> None:
+    s = get_settings()
+    logger.info(
+        "Celery worker document parse config: mineru_enabled=%s mineru_base_url=%s odl_enabled=%s",
+        s.mineru_enabled,
+        s.mineru_base_url,
+        s.odl_enabled,
+    )
+    if not s.mineru_enabled:
+        logger.warning(
+            "MINERU_ENABLED=false：Celery worker 将跳过 MinerU，复杂 PDF 可能降级到 pypdf 并失败。"
+            "请确保 celery-worker 与 backend 使用相同的 MinerU/ODL 环境变量。"
+        )
 
 
 @celery_app.task(name="index_document_background", bind=True, max_retries=0)

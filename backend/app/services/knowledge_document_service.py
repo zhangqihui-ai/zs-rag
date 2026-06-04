@@ -290,10 +290,20 @@ def _compute_phase_percent(
     if current is not None and total is not None and total > 0:
         ratio = min(max(current / total, 0.0), 1.0)
         return round(start + (end - start) * ratio, 2)
+    if phase == "done":
+        return 100.0
     if phase == "parsing":
-        return round(start + (end - start) * 0.3, 2)
-    if phase in ("chunking", "indexing", "done"):
-        return end
+        return round(start + (end - start) * 0.12, 2)
+    if phase == "chunking":
+        return round(start + (end - start) * 0.15, 2)
+    if phase == "embedding":
+        return start
+    if phase == "indexing":
+        return start
+    if phase == "graph_indexing":
+        return start
+    if phase == "queued":
+        return start
     return start
 
 
@@ -318,13 +328,89 @@ def _build_parse_log_payload(
     kind: Literal["parse", "reindex"],
     phase: Literal["running", "success", "error"],
     lines: list[dict[str, str]],
+    *,
+    progress: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "kind": kind,
         "phase": phase,
         "lines": lines[-MAX_PARSE_LOG_LINES:],
         "updated_at": _utc_now_iso(),
     }
+    if progress is not None:
+        payload["progress"] = progress
+    return payload
+
+
+def _merge_parse_log_progress(
+    document: KnowledgeDocument,
+    *,
+    kind: Literal["parse", "reindex"],
+    log_lines: list[dict[str, str]],
+    progress: dict[str, Any],
+) -> None:
+    existing = document.parse_log_json if isinstance(document.parse_log_json, dict) else {}
+    phase = existing.get("phase") if existing.get("phase") in {"running", "success", "error"} else "running"
+    document.parse_log_json = _build_parse_log_payload(kind, phase, log_lines, progress=progress)
+
+
+def _should_flush_embedding_progress(
+    flush_state: dict[str, Any],
+    *,
+    current: int,
+    total: int,
+) -> bool:
+    if current >= total:
+        return True
+    now = time.monotonic()
+    last_done = int(flush_state.get("last_done", -1))
+    last_ts = float(flush_state.get("last_ts", 0.0))
+    if last_done < 0:
+        return True
+    if current - last_done >= 32:
+        return True
+    if now - last_ts >= 2.0:
+        return True
+    return False
+
+
+def _flush_parse_log_progress(
+    db: Session,
+    document: KnowledgeDocument,
+    *,
+    kind: Literal["parse", "reindex"],
+    log_lines: list[dict[str, str]],
+    flush_state: dict[str, Any],
+    phase: str,
+    current: int | None = None,
+    total: int | None = None,
+    message: str = "",
+    force: bool = False,
+) -> None:
+    progress_payload = _build_progress_payload(
+        phase=phase,
+        current=current,
+        total=total,
+        message=message,
+    )
+    should_commit = force
+    if not should_commit and phase == "embedding" and current is not None and total is not None and total > 0:
+        should_commit = _should_flush_embedding_progress(flush_state, current=current, total=total)
+    elif not should_commit and phase != "embedding":
+        should_commit = True
+    if not should_commit:
+        return
+    if phase == "embedding" and current is not None:
+        flush_state["last_done"] = current
+        flush_state["last_ts"] = time.monotonic()
+    _merge_parse_log_progress(
+        document,
+        kind=kind,
+        log_lines=log_lines,
+        progress=progress_payload,
+    )
+    db.commit()
+    ensure_db_connection(db)
 
 
 def _maybe_flush_running_parse_log(
@@ -342,7 +428,9 @@ def _maybe_flush_running_parse_log(
     if not force and n - last < PARSE_LOG_FLUSH_EVERY_LINES:
         return
     flush_state["last_flush"] = n
-    document.parse_log_json = _build_parse_log_payload(kind, "running", log_lines)
+    existing = document.parse_log_json if isinstance(document.parse_log_json, dict) else {}
+    progress = existing.get("progress") if isinstance(existing.get("progress"), dict) else None
+    document.parse_log_json = _build_parse_log_payload(kind, "running", log_lines, progress=progress)
     db.commit()
     ensure_db_connection(db)
 
@@ -431,6 +519,10 @@ def serialize_document(
 
     meta = document.metadata_json if isinstance(document.metadata_json, dict) else {}
     backend = str(meta.get("parser_backend") or "").strip() or None
+    if not backend:
+        excel_engine = meta.get("excel_engine")
+        if isinstance(excel_engine, str) and excel_engine.strip():
+            backend = excel_engine.strip().lower()
     if not backend:
         file_ext = (document.file_ext or "").strip().lower().lstrip(".")
         if file_ext == "doc":
@@ -1382,7 +1474,6 @@ def _persist_parse_chunks_to_db(
         emit(f"分块 flush 进度 {flushed}/{len(chunk_candidates)}…")
 
     if index_vectors:
-        document.status = KnowledgeDocumentStatus.INDEXING.value
         document.chunk_count = len(chunk_records)
     db.commit()
     ensure_db_connection(db)
@@ -1404,26 +1495,75 @@ def _persist_parse_chunks_to_db(
         )
         emit(format_ai_model_for_log(embedding_model, role="Embedding 模型"))
         total_embed = len(chunk_records)
-        emit(f"正在生成向量，文本段数 {total_embed}（可能较慢）…")
+        batch_size = max(1, int(get_settings().embedding_batch_size))
+        total_batches = (total_embed + batch_size - 1) // batch_size
+        emit(
+            f"正在生成向量，文本段数 {total_embed}，每批 {batch_size} 条"
+            f"（共 {total_batches} 批，首批请求发出后需等待 GPU 响应，可能 1–2 分钟）…"
+        )
 
-        def _embedding_progress(done: int, total: int) -> None:
+        def _embedding_batch_start(
+            batch_index: int,
+            batch_total: int,
+            batch_len: int,
+            done_before: int,
+        ) -> None:
             check_cancelled(cancel_event)
+            msg = f"向量生成批次 {batch_index}/{batch_total} 请求中（本批 {batch_len} 条）…"
             if _progress:
-                _progress("embedding", current=done, total=total, message=f"向量生成进度 {done}/{total}")
-            if done <= 8 or done == total or done % 500 == 0:
-                emit(f"向量生成进度 {done}/{total}…")
+                _progress(
+                    "embedding",
+                    current=done_before,
+                    total=total_embed,
+                    message=msg,
+                    force_flush=True,
+                )
+            else:
+                emit(msg)
+
+        def _embedding_progress(done: int, total: int, batch_elapsed_sec: float | None = None) -> None:
+            check_cancelled(cancel_event)
+            log_step = max(batch_size * 4, total // 25, 32)
+            should_log = done <= batch_size or done == total or done % log_step == 0
+            if not should_log:
+                return
+            elapsed_hint = (
+                f"（本批耗时 {batch_elapsed_sec:.1f}s）"
+                if batch_elapsed_sec is not None and batch_elapsed_sec >= 0.05
+                else ""
+            )
+            msg = f"向量生成进度 {done}/{total}{elapsed_hint}…"
+            if _progress:
+                _progress(
+                    "embedding",
+                    current=done,
+                    total=total,
+                    message=msg,
+                    force_flush=True,
+                )
+            else:
+                emit(msg)
 
         vectors = generate_embeddings(
             embedding_model,
             [(c.keyword_text or c.content) for c in chunk_records],
+            batch_size=batch_size,
+            on_batch_start=_embedding_batch_start,
             on_progress=_embedding_progress,
         )
+        if _progress:
+            _progress("embedding", current=total_embed, total=total_embed, message=f"向量生成进度 {total_embed}/{total_embed}…")
         ensure_db_connection(db)
         db.refresh(document)
         vector_dimension = len(vectors[0]) if vectors else 0
         if vector_dimension <= 0:
             raise AppError(status_code=502, code="EMBEDDING_RESPONSE_INVALID", message="未返回有效向量")
         emit(f"向量生成完成，维度={vector_dimension}")
+        document.status = KnowledgeDocumentStatus.INDEXING.value
+        document.chunk_count = len(chunk_records)
+        db.commit()
+        ensure_db_connection(db)
+        db.refresh(document)
         settings = get_settings()
         if knowledge_base.milvus_dimension != vector_dimension:
             indexed_document_count = db.execute(
@@ -1642,28 +1782,42 @@ def _index_document(
 ) -> dict[str, Any]:
     log_lines: list[dict[str, str]] = []
     log_flush_state: dict[str, int] = {"last_flush": 0}
+    progress_flush_state: dict[str, Any] = {"last_done": -1, "last_ts": 0.0}
     document.parse_log_json = _build_parse_log_payload(log_kind, "running", log_lines)
     db.commit()
     ensure_db_connection(db)
     db.refresh(document)
 
-    def _progress(phase: str, *, current: int | None = None, total: int | None = None, message: str = "") -> None:
+    def _progress(
+        phase: str,
+        *,
+        current: int | None = None,
+        total: int | None = None,
+        message: str = "",
+        force_flush: bool = False,
+    ) -> None:
         check_cancelled(cancel_event)
+        progress_message = message
+        if not progress_message and phase == "embedding" and current is not None and total is not None:
+            progress_message = f"向量生成进度 {current}/{total}"
         if emit_progress:
-            emit_progress(phase=phase, current=current, total=total, message=message)
+            emit_progress(phase=phase, current=current, total=total, message=progress_message)
+        _flush_parse_log_progress(
+            db,
+            document,
+            kind=log_kind,
+            log_lines=log_lines,
+            flush_state=progress_flush_state,
+            phase=phase,
+            current=current,
+            total=total,
+            message=progress_message,
+            force=force_flush or phase != "embedding",
+        )
         if message:
-            _emit(message)
-        else:
-            _maybe_flush_running_parse_log(
-                db,
-                document,
-                kind=log_kind,
-                log_lines=log_lines,
-                flush_state=log_flush_state,
-                force=True,
-            )
+            _emit(message, force=force_flush)
 
-    def _emit(msg: str) -> None:
+    def _emit(msg: str, *, force: bool = False) -> None:
         if len(log_lines) < MAX_PARSE_LOG_LINES:
             log_lines.append({"t": _utc_now_iso(), "text": msg})
         if emit:
@@ -1674,6 +1828,7 @@ def _index_document(
             kind=log_kind,
             log_lines=log_lines,
             flush_state=log_flush_state,
+            force=force,
         )
 
     try:
@@ -1836,6 +1991,13 @@ def _index_document(
         raise AppError(status_code=500, code="DOCUMENT_PROCESS_FAILED", message="文档处理失败") from exc
 
 
+def _normalize_upload_file_name(file_name: str) -> str:
+    normalized = _sanitize_pg_text(file_name.replace("\\", "/").strip(), max_len=255)
+    if not normalized:
+        raise AppError(status_code=400, code="INVALID_FILE_NAME", message="文件名无效")
+    return normalized
+
+
 def upload_document(
     db: Session,
     *,
@@ -1852,6 +2014,7 @@ def upload_document(
     record_audit: bool = False,
 ) -> dict[str, Any]:
     knowledge_base = get_knowledge_base_or_error(db, space_id=space_id, kb_id=kb_id)
+    file_name = _normalize_upload_file_name(file_name)
     extension = _document_file_ext(file_name)
     if not file_bytes:
         raise AppError(status_code=400, code="EMPTY_FILE", message="上传文件不能为空")
@@ -1910,7 +2073,8 @@ def upload_document(
         document.error_message = None
         document.metadata_json = None
         document.parse_log_json = None
-        opensearch_chunk_service.delete_by_document_id(document.id)
+        # 上传路径不阻塞等待 OpenSearch（集群异常时会拖慢整批文件夹上传）
+        opensearch_chunk_service.delete_by_document_id(document.id, timeout=3.0)
         db.execute(delete(KnowledgeChunk).where(KnowledgeChunk.document_id == document.id))
     else:
         document = KnowledgeDocument(
@@ -1983,6 +2147,9 @@ def process_document(
 ) -> dict[str, Any]:
     """对已上传（或解析失败）的文档执行解析、分块与索引。"""
     knowledge_base = get_knowledge_base_or_error(db, space_id=space_id, kb_id=kb_id)
+    from app.services.knowledge_base_service import ensure_knowledge_base_embedding_available
+
+    ensure_knowledge_base_embedding_available(knowledge_base)
     document = get_document_or_error(db, space_id=space_id, kb_id=kb_id, document_id=document_id)
     if document.status == KnowledgeDocumentStatus.DELETED.value:
         raise AppError(status_code=404, code="DOCUMENT_NOT_FOUND", message="文档不存在")
@@ -2070,6 +2237,9 @@ def reindex_document(
     force: bool = False,
 ) -> dict[str, Any]:
     knowledge_base = get_knowledge_base_or_error(db, space_id=space_id, kb_id=kb_id)
+    from app.services.knowledge_base_service import ensure_knowledge_base_embedding_available
+
+    ensure_knowledge_base_embedding_available(knowledge_base)
     document = get_document_or_error(db, space_id=space_id, kb_id=kb_id, document_id=document_id)
     if document.status == KnowledgeDocumentStatus.DELETED.value:
         raise AppError(status_code=404, code="DOCUMENT_NOT_FOUND", message="文档不存在")
@@ -2298,6 +2468,67 @@ def execute_document_process_job(
             release_parse_slot()
 
 
+def _infer_progress_phase_from_log_lines(lines: list[dict[str, str]]) -> str | None:
+    recent = " ".join(str(item.get("text") or "") for item in lines[-24:])
+    if "Milvus 写入完成" in recent or "Milvus 插入成功" in recent:
+        return "indexing"
+    if "正在写入 Milvus" in recent or "Milvus 集合就绪" in recent:
+        return "indexing"
+    if "向量生成" in recent or "正在生成向量" in recent or "准备生成向量" in recent:
+        return "embedding"
+    if "分块" in recent or "CHUNKING" in recent or "chunk" in recent.lower():
+        return "chunking"
+    if "解析" in recent or "PARSING" in recent:
+        return "parsing"
+    if "Celery" in recent or "队列" in recent:
+        return "queued"
+    return None
+
+
+def _progress_from_parse_log(
+    db: Session,
+    *,
+    space_id: int,
+    kb_id: int,
+    document_id: int,
+    log_payload: dict[str, Any],
+) -> dict[str, Any]:
+    phase = str(log_payload.get("phase") or "").strip()
+    if phase == "success":
+        return _build_progress_payload(phase="done", message="完成")
+    if phase == "error":
+        return _build_progress_payload(phase="done", message="失败")
+
+    stored = log_payload.get("progress")
+    if isinstance(stored, dict) and isinstance(stored.get("phase"), str):
+        return {
+            "type": "progress",
+            "phase": stored.get("phase"),
+            "percent": stored.get("percent"),
+            "current": stored.get("current"),
+            "total": stored.get("total"),
+            "message": stored.get("message") or "",
+        }
+
+    lines = log_payload.get("lines")
+    normalized_lines = lines if isinstance(lines, list) else []
+    inferred = _infer_progress_phase_from_log_lines(normalized_lines)
+    if inferred:
+        return _build_progress_payload(phase=inferred, message="处理中…")
+
+    document = get_document_or_error(db, space_id=space_id, kb_id=kb_id, document_id=document_id)
+    status_to_phase = {
+        KnowledgeDocumentStatus.PARSING.value: "parsing",
+        KnowledgeDocumentStatus.CHUNKING.value: "chunking",
+        KnowledgeDocumentStatus.INDEXING.value: "embedding",
+        KnowledgeDocumentStatus.GRAPH_INDEXING.value: "graph_indexing",
+        KnowledgeDocumentStatus.INDEXED.value: "done",
+        KnowledgeDocumentStatus.GRAPH_INDEXED.value: "done",
+    }
+    progress_phase = status_to_phase.get(document.status, "parsing")
+    return _build_progress_payload(phase=progress_phase, message=str(log_payload.get("updated_at") or ""))
+
+
 def _emit_new_parse_log_lines(
     db: Session,
     *,
@@ -2320,9 +2551,19 @@ def _emit_new_parse_log_lines(
             text = str(item.get("text", "")).strip()
             if text:
                 emit(text)
-    phase = log_payload.get("phase")
-    if isinstance(phase, str) and phase:
-        emit_progress(phase=phase, message=str(log_payload.get("updated_at") or ""))
+    progress_payload = _progress_from_parse_log(
+        db,
+        space_id=space_id,
+        kb_id=kb_id,
+        document_id=document_id,
+        log_payload=log_payload,
+    )
+    emit_progress(
+        phase=progress_payload["phase"],
+        current=progress_payload.get("current"),
+        total=progress_payload.get("total"),
+        message=str(progress_payload.get("message") or ""),
+    )
     return len(lines)
 
 
@@ -2377,6 +2618,16 @@ def _poll_celery_document_process(
                 raise AppError(status_code=500, code="BACKGROUND_TASK_MISSING", message="后台任务记录不存在")
             status = row.status
             if status == "completed":
+                last_line_count = _emit_new_parse_log_lines(
+                    db,
+                    space_id=space_id,
+                    kb_id=kb_id,
+                    document_id=document_id,
+                    last_line_count=last_line_count,
+                    emit=emit,
+                    emit_progress=emit_progress,
+                )
+                emit_progress(phase="done", message="完成")
                 document = get_document_or_error(db, space_id=space_id, kb_id=kb_id, document_id=document_id)
                 return serialize_document(document)
             if status == "failed":
@@ -2475,6 +2726,7 @@ def get_document_parse_log(
         "phase": raw.get("phase") if isinstance(raw.get("phase"), str) else None,
         "lines": normalized,
         "updated_at": raw.get("updated_at") if isinstance(raw.get("updated_at"), str) else None,
+        "progress": raw.get("progress") if isinstance(raw.get("progress"), dict) else None,
     }
 
 
@@ -2869,36 +3121,133 @@ def delete_document_asset(
     user_id: int | None = None,
     batch_uid: str | None = None,
 ) -> None:
-    knowledge_base = get_knowledge_base_or_error(db, space_id=space_id, kb_id=kb_id, include_deleted=True)
-    document = get_document_or_error(db, space_id=space_id, kb_id=kb_id, document_id=document_id)
-    if document.status == KnowledgeDocumentStatus.DELETED.value:
-        return
-
-    file_name = document.file_name
-    _clear_document_chunks_and_vectors(db, knowledge_base=knowledge_base, document=document)
-
-    if knowledge_base.kb_type == KnowledgeBaseType.LIGHTRAG.value:
-        from app.services.lightrag_engine import delete_document as lightrag_delete_document
-
-        try:
-            lightrag_delete_document(db, knowledge_base=knowledge_base, document=document)
-        except AppError as exc:
-            if exc.code not in ("LIGHTRAG_QUERY_FAILED",):
-                raise
-
-    _clear_document_storage_dir(document.storage_path)
-
-    document.status = KnowledgeDocumentStatus.DELETED.value
-    document.error_message = None
-    document.chunk_count = 0
-    db.commit()
-
-    kb_process_audit_service.record_delete(
+    delete_documents_batch(
         db,
         space_id=space_id,
         kb_id=kb_id,
+        document_ids=[document_id],
         user_id=user_id,
-        document_id=document_id,
-        file_name=file_name,
         batch_uid=batch_uid,
+        record_audit=True,
     )
+
+
+def delete_documents_batch(
+    db: Session,
+    *,
+    space_id: int,
+    kb_id: int,
+    document_ids: list[int],
+    user_id: int | None = None,
+    batch_uid: str | None = None,
+    record_audit: bool = True,
+) -> dict[str, Any]:
+    """批量删除文档：合并 OpenSearch / Milvus / DB 操作，减少往返次数。"""
+    seen: set[int] = set()
+    ordered_ids: list[int] = []
+    for raw_id in document_ids:
+        if raw_id in seen:
+            continue
+        seen.add(raw_id)
+        ordered_ids.append(raw_id)
+
+    knowledge_base = get_knowledge_base_or_error(db, space_id=space_id, kb_id=kb_id, include_deleted=True)
+    items: list[dict[str, Any]] = []
+    to_delete: list[KnowledgeDocument] = []
+    skipped_count = 0
+    failed_count = 0
+
+    for document_id in ordered_ids:
+        try:
+            document = get_document_or_error(db, space_id=space_id, kb_id=kb_id, document_id=document_id)
+        except AppError as exc:
+            failed_count += 1
+            items.append({"document_id": document_id, "deleted": False, "error": exc.message})
+            continue
+        if document.status == KnowledgeDocumentStatus.DELETED.value:
+            skipped_count += 1
+            items.append({"document_id": document_id, "deleted": True, "skipped": True})
+            continue
+        to_delete.append(document)
+
+    if not to_delete:
+        return {
+            "items": items,
+            "deleted_count": 0,
+            "failed_count": failed_count,
+            "skipped_count": skipped_count,
+            "total": len(ordered_ids),
+        }
+
+    delete_ids = [document.id for document in to_delete]
+    audit_items: list[dict[str, Any]] = []
+    is_lightrag = knowledge_base.kb_type == KnowledgeBaseType.LIGHTRAG.value
+    if is_lightrag:
+        from app.services.lightrag_engine import delete_document as lightrag_delete_document
+
+    ready: list[KnowledgeDocument] = []
+    for document in to_delete:
+        file_name = document.file_name
+        try:
+            if is_lightrag:
+                try:
+                    lightrag_delete_document(db, knowledge_base=knowledge_base, document=document)
+                except AppError as exc:
+                    if exc.code not in ("LIGHTRAG_QUERY_FAILED",):
+                        raise
+            _clear_document_storage_dir(document.storage_path)
+            ready.append(document)
+        except AppError as exc:
+            failed_count += 1
+            items.append({"document_id": document.id, "deleted": False, "error": exc.message})
+        except Exception as exc:
+            failed_count += 1
+            items.append({"document_id": document.id, "deleted": False, "error": str(exc)})
+
+    if ready:
+        ready_ids = [document.id for document in ready]
+        opensearch_chunk_service.delete_by_document_ids(ready_ids)
+        chunks = db.execute(
+            select(KnowledgeChunk).where(KnowledgeChunk.document_id.in_(ready_ids))
+        ).scalars().all()
+        chunk_uids = [chunk.chunk_uid for chunk in chunks if chunk.chunk_uid]
+        _milvus_delete_vectors_best_effort(db, knowledge_base=knowledge_base, chunk_uids=chunk_uids)
+        db.execute(delete(KnowledgeChunk).where(KnowledgeChunk.document_id.in_(ready_ids)))
+        for document in ready:
+            document.status = KnowledgeDocumentStatus.DELETED.value
+            document.error_message = None
+            document.chunk_count = 0
+            audit_items.append({"document_id": document.id, "file_name": document.file_name})
+            if not any(item.get("document_id") == document.id for item in items):
+                items.append({"document_id": document.id, "deleted": True})
+
+    db.commit()
+
+    deleted_count = len(audit_items)
+    if record_audit and batch_uid and audit_items:
+        kb_process_audit_service.record_delete_batch(
+            db,
+            space_id=space_id,
+            kb_id=kb_id,
+            user_id=user_id,
+            batch_uid=batch_uid,
+            items=audit_items,
+        )
+    elif record_audit and not batch_uid:
+        for audit_item in audit_items:
+            kb_process_audit_service.record_delete(
+                db,
+                space_id=space_id,
+                kb_id=kb_id,
+                user_id=user_id,
+                document_id=int(audit_item["document_id"]),
+                file_name=str(audit_item["file_name"]),
+            )
+
+    return {
+        "items": items,
+        "deleted_count": deleted_count,
+        "failed_count": failed_count,
+        "skipped_count": skipped_count,
+        "total": len(ordered_ids),
+    }

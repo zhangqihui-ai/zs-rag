@@ -2,7 +2,13 @@
 
 from unittest.mock import MagicMock, patch
 
-from app.core.document_parser import ParsedDocument, ParsedSegment, _pdf_parse_usable, parse_document
+from app.core.document_parser import (
+    ParsedDocument,
+    ParsedSegment,
+    _pdf_parse_usable,
+    _pypdf_parse_suspicious,
+    parse_document,
+)
 from app.core.parser_config import ParserOptions, resolve_pdf_fallback_chain
 
 
@@ -73,6 +79,19 @@ def test_pdf_parse_usable_accepts_mineru_text():
         metadata={"parser_backend": "mineru"},
     )
     assert _pdf_parse_usable(doc) is True
+
+
+def test_pypdf_parse_suspicious_rejects_huge_garbage():
+    garbage = "x" * 100_000
+    doc = ParsedDocument(
+        parser_type="pdf",
+        text=garbage,
+        char_count=len(garbage),
+        segments=[ParsedSegment(text=garbage, start_offset=0, end_offset=len(garbage))],
+        metadata={"parser_backend": "pypdf_fallback", "fallback": True},
+    )
+    assert _pypdf_parse_suspicious(doc) is True
+    assert _pdf_parse_usable(doc) is False
 
 
 def test_odl_unusable_falls_back_to_mineru():

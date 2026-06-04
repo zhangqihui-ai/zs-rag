@@ -7,6 +7,7 @@ import {
   type DocumentProcessStreamMode,
   type DocumentProgressPayload,
   type KnowledgeDocument,
+  type KnowledgeDocumentParseLog,
 } from '../api/knowledge-base'
 
 export type DocumentParseTaskStatus = 'running' | 'success' | 'error' | 'cancelled'
@@ -39,11 +40,19 @@ export interface DocumentParseTaskStartOptions {
 const PROCESSING_STATUSES = new Set(['parsing', 'chunking', 'indexing', 'graph_indexing'])
 
 const STATUS_PERCENT: Record<string, number> = {
+  queued: 3,
   parsing: 8,
   chunking: 20,
-  embedding: 45,
-  indexing: 78,
+  embedding: 28,
+  indexing: 72,
   graph_indexing: 55,
+}
+
+function capRunningPercent(percent: number): number {
+  if (!Number.isFinite(percent)) {
+    return 0
+  }
+  return Math.min(Math.max(percent, 0), 99)
 }
 
 const globalTasks = reactive(new Map<string, DocumentParseTask>())
@@ -129,6 +138,14 @@ function snapshotStorageKey(kbId: number, documentId: number) {
   return `zs-rag-parse-task:${kbId}:${documentId}`
 }
 
+function clearTaskSnapshot(kbId: number, documentId: number) {
+  try {
+    sessionStorage.removeItem(snapshotStorageKey(kbId, documentId))
+  } catch {
+    /* quota */
+  }
+}
+
 function persistTaskSnapshot(task: DocumentParseTask) {
   try {
     sessionStorage.setItem(
@@ -161,6 +178,19 @@ function loadTaskSnapshot(kbId: number, documentId: number): Partial<DocumentPar
 
 function statusToPercent(status: string): number {
   return STATUS_PERCENT[status] ?? 5
+}
+
+function normalizeProgressPayload(payload: DocumentProgressPayload): DocumentProgressPayload {
+  if (payload.phase === 'success' || payload.phase === 'done') {
+    return { ...payload, phase: 'done', percent: 100, message: payload.message || '完成' }
+  }
+  if (payload.phase === 'error') {
+    return { ...payload, percent: payload.percent || 0, message: payload.message || '失败' }
+  }
+  if (payload.phase === 'running' && payload.percent <= 0) {
+    return { ...payload, percent: 5 }
+  }
+  return payload
 }
 
 function formatParseLogTime(t: string): string {
@@ -236,10 +266,14 @@ export function useDocumentParseTasks(kbId: () => number | undefined) {
     if (!task) {
       return
     }
-    task.phase = payload.phase
-    task.percent = payload.percent
-    if (payload.message) {
-      task.progressMessage = payload.message
+    const normalized = normalizeProgressPayload(payload)
+    task.phase = normalized.phase
+    task.percent =
+      normalized.phase === 'done' || normalized.phase === 'success'
+        ? 100
+        : capRunningPercent(Math.max(task.percent, normalized.percent))
+    if (normalized.message) {
+      task.progressMessage = normalized.message
     }
     persistTaskSnapshot(task)
   }
@@ -252,6 +286,20 @@ export function useDocumentParseTasks(kbId: () => number | undefined) {
     }
   }
 
+  function applyRemoteProgress(documentId: number, remote: KnowledgeDocumentParseLog) {
+    const progress = remote.progress
+    if (!progress || typeof progress.phase !== 'string') {
+      return
+    }
+    updateProgress(documentId, {
+      phase: progress.phase,
+      percent: typeof progress.percent === 'number' ? progress.percent : 5,
+      current: progress.current ?? null,
+      total: progress.total ?? null,
+      message: progress.message ?? '',
+    })
+  }
+
   async function syncLogsFromServer(documentId: number): Promise<boolean> {
     const id = resolveKbId()
     if (id == null) {
@@ -260,10 +308,11 @@ export function useDocumentParseTasks(kbId: () => number | undefined) {
     try {
       const remote = await knowledgeBaseApi.getDocumentParseLog(id, documentId)
       const task = getTask(documentId)
-      if (!task || !remote.lines?.length) {
+      if (!task) {
         return false
       }
-      const next = remote.lines.map((line) => ({
+      let changed = false
+      const next = (remote.lines || []).map((line) => ({
         t: formatParseLogTime(line.t),
         text: line.text,
       }))
@@ -275,9 +324,22 @@ export function useDocumentParseTasks(kbId: () => number | undefined) {
         if (remote.phase === 'success') {
           task.status = 'success'
           task.percent = 100
+          task.progressMessage = '完成'
         } else if (remote.phase === 'error') {
           task.status = 'error'
+          task.progressMessage = '解析失败'
+        } else if (remote.phase === 'running') {
+          applyRemoteProgress(documentId, remote)
+          if (task.percent < 5) {
+            task.percent = 5
+          }
         }
+        changed = true
+      } else if (remote.phase === 'running' && remote.progress) {
+        applyRemoteProgress(documentId, remote)
+        changed = true
+      }
+      if (changed) {
         persistTaskSnapshot(task)
         return true
       }
@@ -313,21 +375,40 @@ export function useDocumentParseTasks(kbId: () => number | undefined) {
           await syncLogsFromServer(documentId)
           const doc = await knowledgeBaseApi.getDocument(task.kbId, documentId)
           const current = globalTasks.get(key)
-          if (!current || current.status !== 'running') {
+          if (!current) {
             stopWatchPoll(key)
             resolve(null)
             return
           }
+          if (current.status !== 'running') {
+            stopWatchPoll(key)
+            if (current.status === 'success') {
+              current.percent = 100
+              options?.onTerminal?.(doc)
+              globalTasks.delete(key)
+              resolve(doc)
+            } else {
+              globalTasks.delete(key)
+              resolve(null)
+            }
+            return
+          }
           if (PROCESSING_STATUSES.has(doc.status)) {
             current.phase = doc.status
-            current.percent = Math.max(current.percent, statusToPercent(doc.status))
-            current.progressMessage = `状态：${doc.status}`
+            await syncLogsFromServer(documentId)
+            if (current.percent <= 0) {
+              current.percent = statusToPercent(doc.status)
+            }
+            if (!current.progressMessage) {
+              current.progressMessage = `状态：${doc.status}`
+            }
             persistTaskSnapshot(current)
             return
           }
           stopWatchPoll(key)
           current.status = doc.status === 'failed' || doc.status === 'graph_failed' ? 'error' : 'success'
           current.percent = 100
+          current.progressMessage = current.status === 'error' ? '解析失败' : '完成'
           persistTaskSnapshot(current)
           options?.onTerminal?.(doc)
           globalTasks.delete(key)
@@ -340,7 +421,7 @@ export function useDocumentParseTasks(kbId: () => number | undefined) {
       void poll()
       const timer = window.setInterval(() => {
         void poll()
-      }, 4000)
+      }, 2000)
       watchPollers.set(key, timer)
     })
   }
@@ -364,13 +445,14 @@ export function useDocumentParseTasks(kbId: () => number | undefined) {
     const stored = loadTaskSnapshot(id, documentId)
     const mode = options.mode ?? stored?.mode ?? 'parse'
     const abortController = new AbortController()
+    clearTaskSnapshot(id, documentId)
     const task: DocumentParseTask = {
       documentId,
       kbId: id,
       mode,
       phase: stored?.phase ?? options.status,
-      percent: stored?.percent ?? statusToPercent(options.status),
-      progressMessage: stored?.progressMessage ?? '解析进行中…',
+      percent: statusToPercent(options.status),
+      progressMessage: '解析进行中…',
       status: 'running',
       logs: stored?.logs ? [...stored.logs] : [],
       abortController,
@@ -420,6 +502,7 @@ export function useDocumentParseTasks(kbId: () => number | undefined) {
     }
 
     const abortController = new AbortController()
+    clearTaskSnapshot(id, documentId)
     const task: DocumentParseTask = {
       documentId,
       kbId: id,
@@ -476,6 +559,7 @@ export function useDocumentParseTasks(kbId: () => number | undefined) {
       task.percent = 100
       persistTaskSnapshot(task)
       options?.onTerminal?.(result)
+      finishTask(documentId)
       return result
     } catch (error) {
       if (isAbortError(error) || abortController.signal.aborted || task.status === 'cancelled') {
@@ -491,6 +575,7 @@ export function useDocumentParseTasks(kbId: () => number | undefined) {
       }
 
       task.status = 'error'
+      task.progressMessage = '解析失败'
       persistTaskSnapshot(task)
       throw error
     } finally {
@@ -536,6 +621,10 @@ export function useDocumentParseTasks(kbId: () => number | undefined) {
     if (!task || task.status !== 'running') {
       return
     }
+    // 用户主动发起的 SSE 任务由 startTask 自己收尾，列表刷新不应提前 finish
+    if (!task.watchOnly) {
+      return
+    }
     if (PROCESSING_STATUSES.has(status)) {
       return
     }
@@ -553,6 +642,11 @@ export function useDocumentParseTasks(kbId: () => number | undefined) {
     }
     const key = taskKey(id, documentId)
     stopWatchPoll(key)
+    try {
+      sessionStorage.removeItem(snapshotStorageKey(id, documentId))
+    } catch {
+      /* ignore */
+    }
     globalTasks.delete(key)
   }
 

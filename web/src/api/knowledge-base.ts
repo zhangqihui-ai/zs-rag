@@ -13,7 +13,7 @@ export interface KnowledgeBase {
   enterprise_space_id: number
   name: string
   description: string | null
-  status: 'active' | 'inactive' | 'deleted'
+  status: 'active' | 'inactive' | 'embedding_unavailable' | 'deleted'
   /** 后端 Phase 1+ 返回；未返回时前端以 graph_db_enabled 作为图 Tab 回退 */
   kb_type?: KnowledgeBaseType | null
   vector_db_enabled: boolean
@@ -97,6 +97,8 @@ export interface KbProcessLogEvent {
   failed_count: number
   started_at: string
   finished_at: string | null
+  duration_seconds: number | null
+  duration_label: string
   summary: string
 }
 
@@ -176,6 +178,7 @@ export interface KnowledgeDocumentParseLog {
   phase: 'running' | 'success' | 'error' | null
   lines: { t: string; text: string }[]
   updated_at: string | null
+  progress?: DocumentProgressPayload | null
 }
 
 export interface BatchDocumentProcessItemResult {
@@ -194,6 +197,21 @@ export interface BatchDocumentProcessItemResult {
 export interface BatchDocumentProcessResponse {
   items: BatchDocumentProcessItemResult[]
   queued_count: number
+  failed_count: number
+  skipped_count: number
+  total: number
+}
+
+export interface BatchDocumentDeleteItemResult {
+  document_id: number
+  deleted: boolean
+  skipped?: boolean
+  error?: string | null
+}
+
+export interface BatchDocumentDeleteResponse {
+  items: BatchDocumentDeleteItemResult[]
+  deleted_count: number
   failed_count: number
   skipped_count: number
   total: number
@@ -394,8 +412,13 @@ export const knowledgeBaseApi = {
   get(kbId: number) {
     return unwrap<KnowledgeBase>(http.get(`/knowledge-bases/${kbId}`, { timeout: documentRequestTimeoutMs }))
   },
-  create(payload: KnowledgeBasePayload) {
-    return unwrap<KnowledgeBase>(http.post('/knowledge-bases', payload))
+  create(payload: KnowledgeBasePayload, options?: { signal?: AbortSignal }) {
+    return unwrap<KnowledgeBase>(
+      http.post('/knowledge-bases', payload, {
+        timeout: longRequestTimeoutMs,
+        signal: options?.signal,
+      }),
+    )
   },
   update(kbId: number, payload: Partial<KnowledgeBasePayload & { status: KnowledgeBase['status'] }>) {
     return unwrap<KnowledgeBase>(http.patch(`/knowledge-bases/${kbId}`, payload))
@@ -623,6 +646,16 @@ export const knowledgeBaseApi = {
       }),
     )
   },
+  batchDeleteDocuments(
+    kbId: number,
+    payload: { document_ids: number[]; batch_uid?: string | null },
+  ) {
+    return unwrap<BatchDocumentDeleteResponse>(
+      http.post(`/knowledge-bases/${kbId}/documents/batch-delete`, payload, {
+        timeout: longRequestTimeoutMs,
+      }),
+    )
+  },
   getProcessLogSummary(kbId: number) {
     return unwrap<KbProcessLogSummary>(http.get(`/knowledge-bases/${kbId}/process-log/summary`))
   },
@@ -802,10 +835,17 @@ export async function streamDocumentProcess(
       options.onLog(obj.message)
       return
     }
-    if (obj.type === 'progress' && typeof obj.percent === 'number') {
+    if (obj.type === 'progress') {
+      const phase = typeof obj.phase === 'string' ? obj.phase : 'parsing'
+      const percent =
+        typeof obj.percent === 'number'
+          ? obj.percent
+          : phase === 'done' || phase === 'success'
+            ? 100
+            : 5
       options.onProgress?.({
-        phase: typeof obj.phase === 'string' ? obj.phase : 'parsing',
-        percent: obj.percent,
+        phase,
+        percent,
         current: obj.current ?? null,
         total: obj.total ?? null,
         message: typeof obj.message === 'string' ? obj.message : '',

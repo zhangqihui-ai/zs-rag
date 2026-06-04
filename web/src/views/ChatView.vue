@@ -1148,19 +1148,14 @@
       <div v-if="deleteModalOpen && deleteTarget" class="modal-overlay" @click.self="closeDeleteModal">
         <div class="modal-content" style="max-width: 460px;">
           <div class="modal-header">
-            <h3>{{ deleteTarget.kind === 'conversation' ? '删除对话' : '删除会话' }}</h3>
+            <h3>删除对话</h3>
             <button class="btn btn-text" @click="closeDeleteModal">
               <AppIcon name="close" :size="20" />
             </button>
           </div>
           <div class="modal-body">
             <p style="margin: 0 0 16px 0; color: var(--text-secondary); line-height: 1.5;">
-              <template v-if="deleteTarget.kind === 'conversation'">
-                将删除对话 <strong>「{{ deleteTarget.title }}」</strong> 及其下全部会话，且不可恢复。
-              </template>
-              <template v-else>
-                将删除会话 <strong>「{{ deleteTarget.title }}」</strong> 及其消息记录，且不可恢复。
-              </template>
+              将删除对话 <strong>「{{ deleteTarget.title }}」</strong> 及其下全部会话，且不可恢复。
             </p>
             <div class="field">
               <label class="field-label">请输入名称以确认删除</label>
@@ -2352,12 +2347,6 @@ const openDeleteConversation = (chat: { id: string; title: string }) => {
   deleteModalOpen.value = true
 }
 
-const openDeleteSession = (session: { id: string; title: string }) => {
-  deleteTarget.value = { kind: 'session', id: session.id, title: session.title }
-  deleteConfirmName.value = ''
-  deleteModalOpen.value = true
-}
-
 const closeDeleteModal = (force = false) => {
   if (!force && isDeleting.value) return
   deleteModalOpen.value = false
@@ -2373,14 +2362,10 @@ const canSubmitDelete = computed(() => {
 })
 
 const confirmDelete = async () => {
-  if (!canSubmitDelete.value || !deleteTarget.value) return
+  if (!canSubmitDelete.value || !deleteTarget.value || deleteTarget.value.kind !== 'conversation') return
   isDeleting.value = true
   try {
-    if (deleteTarget.value.kind === 'conversation') {
-      await chatStore.deleteConversation(deleteTarget.value.id)
-    } else {
-      await chatStore.deleteSession(deleteTarget.value.id)
-    }
+    await chatStore.deleteConversation(deleteTarget.value.id)
     closeDeleteModal(true)
   } catch (e) {
     console.error('Delete failed', e)
@@ -3656,9 +3641,17 @@ function cancelRenameSession() {
   renamingSessionId.value = null
 }
 
-function onDeleteSessionFromMenu(session: ChatSession) {
+async function onDeleteSessionFromMenu(session: ChatSession) {
   sessionMenuOpenId.value = null
-  openDeleteSession(session)
+  if (isDeleting.value) return
+  isDeleting.value = true
+  try {
+    await chatStore.deleteSession(session.id)
+  } catch (e) {
+    console.error('Delete session failed', e)
+  } finally {
+    isDeleting.value = false
+  }
 }
 
 function onGlobalClick() {

@@ -237,19 +237,34 @@ def ensure_chunk_index(*, client: httpx.Client | None = None) -> None:
             c.close()
 
 
-def delete_by_document_id(document_id: int, *, client: httpx.Client | None = None) -> None:
-    if not is_enabled():
+def delete_by_document_id(
+    document_id: int,
+    *,
+    client: httpx.Client | None = None,
+    timeout: float = 60.0,
+) -> None:
+    delete_by_document_ids([document_id], client=client, timeout=timeout)
+
+
+def delete_by_document_ids(
+    document_ids: list[int],
+    *,
+    client: httpx.Client | None = None,
+    timeout: float = 60.0,
+) -> None:
+    ids = sorted({int(i) for i in document_ids if i is not None})
+    if not ids or not is_enabled():
         return
     idx = _index_name()
     own = client is None
-    c = client or _client()
+    c = client or _client(timeout=timeout)
     try:
         ensure_chunk_index(client=c)
-        body = {"query": {"term": {"document_id": document_id}}}
-        r = c.post(f"/{idx}/_delete_by_query?conflicts=proceed&refresh=true", json=body)
+        body = {"query": {"terms": {"document_id": ids}}}
+        r = c.post(f"/{idx}/_delete_by_query?conflicts=proceed&refresh=false", json=body)
         r.raise_for_status()
     except httpx.HTTPError as e:
-        logger.warning("OpenSearch delete_by_document_id failed doc_id=%s: %s", document_id, e)
+        logger.warning("OpenSearch delete_by_document_ids failed doc_ids=%s: %s", ids, e)
     finally:
         if own:
             c.close()

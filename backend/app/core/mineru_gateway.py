@@ -45,6 +45,14 @@ class MineruUnavailableError(Exception):
     """MinerU 服务不可达 / 超时 / 返回异常。上层据此决定降级或报错。"""
 
 
+# MinerU /file_parse 支持的 Excel 后缀（旧版 .xls 须用本地 xlrd）
+MINERU_EXCEL_SUFFIXES = frozenset({"xlsx", "xlsm"})
+
+
+def mineru_supports_excel_suffix(suffix: str) -> bool:
+    return suffix.lower().lstrip(".") in MINERU_EXCEL_SUFFIXES
+
+
 # MinerU 写临时目录时对文件名敏感：括号、中文冒号等会导致 pipeline 快速失败（HTTP 409）
 _MINERU_UNSAFE_UPLOAD_CHARS = re.compile(
     r'[\\/:*?"<>|()\uFF08\uFF09\uFF1A\uFF1B]|[\x00-\x1f]'
@@ -672,7 +680,10 @@ class MineruGateway:
     def should_handle(self, suffix: str) -> bool:
         if not self.is_enabled():
             return False
-        return suffix.lower().lstrip(".") in self.format_whitelist
+        norm = suffix.lower().lstrip(".")
+        if norm == "xls":
+            return False
+        return norm in self.format_whitelist
 
     def parse(
         self,

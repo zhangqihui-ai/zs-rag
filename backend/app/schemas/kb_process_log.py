@@ -26,6 +26,8 @@ class KbProcessLogEventResponse(BaseModel):
     failed_count: int
     started_at: datetime
     finished_at: datetime | None
+    duration_seconds: float | None = None
+    duration_label: str = "—"
     summary: str
 
 

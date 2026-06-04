@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 RetrievalMode = Literal["hybrid", "vector", "keyword"]
-KnowledgeBaseStatus = Literal["active", "inactive", "deleted"]
+KnowledgeBaseStatus = Literal["active", "inactive", "embedding_unavailable", "deleted"]
 KnowledgeBaseType = Literal["classic", "lightrag"]
 
 

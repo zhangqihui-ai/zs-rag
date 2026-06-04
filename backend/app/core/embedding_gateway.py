@@ -215,19 +215,37 @@ def generate_embeddings(
     model: AIModel,
     texts: list[str],
     *,
-    on_progress: Callable[[int, int], None] | None = None,
+    batch_size: int | None = None,
+    on_batch_start: Callable[[int, int, int, int], None] | None = None,
+    on_progress: Callable[[int, int, float | None], None] | None = None,
 ) -> list[list[float]]:
     _ensure_embedding_model(model)
     if not texts:
         return []
 
     total = len(texts)
+    chunk_size = batch_size if batch_size is not None else get_settings().embedding_batch_size
+    chunk_size = max(1, min(int(chunk_size), 128))
+    total_batches = (total + chunk_size - 1) // chunk_size
     vectors: list[list[float]] = []
-    for start in range(0, total, EMBEDDING_BATCH_SIZE):
-        batch = texts[start : start + EMBEDDING_BATCH_SIZE]
+    for batch_index, start in enumerate(range(0, total, chunk_size), start=1):
+        batch = texts[start : start + chunk_size]
+        if on_batch_start is not None:
+            on_batch_start(batch_index, total_batches, len(batch), start)
+        batch_started = time.monotonic()
         vectors.extend(_generate_embeddings_for_batch(model, batch))
+        batch_elapsed = time.monotonic() - batch_started
+        done = min(start + len(batch), total)
         if on_progress is not None:
-            on_progress(min(start + len(batch), total), total)
+            on_progress(done, total, batch_elapsed)
+        logger.info(
+            "embedding batch %s/%s done (%s/%s texts, %.1fs)",
+            batch_index,
+            total_batches,
+            done,
+            total,
+            batch_elapsed,
+        )
 
     return vectors
 

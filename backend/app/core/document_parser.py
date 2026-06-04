@@ -4,6 +4,7 @@ import csv
 import html as html_module
 import json
 import re
+import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from io import BytesIO, StringIO
@@ -68,7 +69,11 @@ class ParsedDocument:
 
 # 索引前安全阈值：兜底解析易把 PDF 流里的字面量拼成超长乱码
 MAX_INDEXABLE_DOCUMENT_CHARS = 3_000_000
+# 结构化 Excel（html_table/tsv）按行切分后索引，总字符可远大于 PDF 阈值
+MAX_INDEXABLE_EXCEL_CHARS = 100_000_000
 PDF_FALLBACK_SUSPICIOUS_CHARS = 80_000
+_STRUCTURED_EXCEL_PARSER_TYPES = frozenset({"xls", "xlsx", "xlsm"})
+_STRUCTURED_EXCEL_ENGINES = frozenset({"html_table", "tsv"})
 
 
 def _cjk_ratio(sample: str) -> float:
@@ -76,6 +81,40 @@ def _cjk_ratio(sample: str) -> float:
         return 0.0
     cjk = sum(1 for ch in sample if "\u4e00" <= ch <= "\u9fff")
     return cjk / len(sample)
+
+
+def _pypdf_parse_suspicious(doc: ParsedDocument) -> bool:
+    """pypdf / 字节流兜底提取是否像乱码，不应视为解析成功。"""
+    text = (doc.text or "").strip()
+    if not text:
+        return True
+    meta = doc.metadata or {}
+    backend = str(meta.get("parser_backend") or "")
+    if backend not in {"pypdf", "pypdf_fallback"}:
+        return False
+
+    length = len(text)
+    if length > MAX_INDEXABLE_DOCUMENT_CHARS:
+        return True
+
+    sample = text[: min(length, 80_000)]
+    cjk_ratio = _cjk_ratio(sample)
+    segments = doc.segments or []
+    if length > PDF_FALLBACK_SUSPICIOUS_CHARS and cjk_ratio < 0.08:
+        return True
+    if length > 30_000 and len(segments) <= 1 and cjk_ratio < 0.12:
+        return True
+    if length > 20_000 and cjk_ratio < 0.02:
+        return True
+    return False
+
+
+def _is_structured_excel_parse(parsed: ParsedDocument) -> bool:
+    if parsed.parser_type in _STRUCTURED_EXCEL_PARSER_TYPES:
+        meta = parsed.metadata or {}
+        engine = str(meta.get("excel_engine") or "html_table")
+        return engine in _STRUCTURED_EXCEL_ENGINES
+    return False
 
 
 def validate_parsed_document_for_indexing(parsed: ParsedDocument) -> None:
@@ -88,11 +127,20 @@ def validate_parsed_document_for_indexing(parsed: ParsedDocument) -> None:
     meta = parsed.metadata or {}
     backend = str(meta.get("parser_backend") or "")
 
+    if _is_structured_excel_parse(parsed):
+        if length > MAX_INDEXABLE_EXCEL_CHARS:
+            raise UnsupportedDocumentError(
+                f"Excel 解析文本过长（约 {length:,} 字符），超过系统上限 "
+                f"{MAX_INDEXABLE_EXCEL_CHARS:,} 字符。请拆分工作簿或删除无关 sheet 后重试。"
+            )
+        return
+
     if length > MAX_INDEXABLE_DOCUMENT_CHARS:
         raise UnsupportedDocumentError(
             f"解析文本过长（约 {length:,} 字符），疑似误提取了 PDF 内部数据而非正文。"
-            "请在 .env 中设置 MINERU_ENABLED=true 并启动 mineru 服务后重新解析，"
-            "或提供可选中文本的 PDF。"
+            "请确认 backend 已安装 opendataloader-pdf 并重建镜像后重试；"
+            "或设置 MINERU_ENABLED=true 并启动 MinerU 服务；"
+            "扫描件/复杂版式 PDF 不建议使用 pypdf 兜底。"
         )
 
     sample = text[: min(length, 80_000)]
@@ -274,6 +322,10 @@ def _pdf_parse_usable(doc: ParsedDocument) -> bool:
         if backend == "opendataloader" and int(meta.get("content_list_length") or 0) == 0:
             return False
 
+    if backend in {"pypdf", "pypdf_fallback"}:
+        if _pypdf_parse_suspicious(doc):
+            return False
+
     if not segments:
         if _pdf_text_mostly_image_markdown(text):
             return False
@@ -282,10 +334,10 @@ def _pdf_parse_usable(doc: ParsedDocument) -> bool:
     substantive = sum(1 for seg in segments if _pdf_segment_substantive(seg))
     if substantive > 0:
         return True
-    if backend in {"pypdf", "pypdf_fallback"} and len(text) >= 64:
-        return True
     if _pdf_text_mostly_image_markdown(text):
         return False
+    if backend in {"pypdf", "pypdf_fallback"}:
+        return len(text) >= 64
     return False
 
 
@@ -448,6 +500,32 @@ def _try_parse_pdf_pypdf(file_bytes: bytes, *, log: Callable[[str], None] | None
     )
 
 
+def _build_pdf_parse_unavailable_message(*, chain: list[str]) -> str:
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    hints: list[str] = []
+    if "opendataloader" in chain:
+        try:
+            import opendataloader_pdf  # noqa: F401
+        except ImportError:
+            hints.append("backend 未安装 opendataloader-pdf（请重建 backend 镜像）")
+        else:
+            hints.append("OpenDataLoader 未能提取有效正文")
+    if "mineru" in chain:
+        if not settings.mineru_enabled:
+            hints.append("MinerU 未启用（MINERU_ENABLED=true）")
+        else:
+            hints.append("MinerU 未能提取有效正文")
+    if "pypdf" in chain:
+        hints.append("pypdf 兜底结果不可用（可能为扫描件或复杂版式）")
+    detail = "；".join(hints) if hints else "所有 PDF 解析器均未得到有效正文"
+    return (
+        f"PDF 解析失败：{detail}。"
+        "建议：重建 backend 镜像以安装 opendataloader-pdf，或启用 MinerU 后重新解析。"
+    )
+
+
 def _parse_pdf(
     file_bytes: bytes,
     *,
@@ -500,20 +578,21 @@ def _parse_pdf(
             return doc
 
         if log:
+            reason = "结果不可用"
+            if engine in {"pypdf", "pypdf_fallback"} and doc is not None and _pypdf_parse_suspicious(doc):
+                reason = "疑似乱码或 PDF 内部流数据"
             log(
-                f"{engine} 解析结果不可用（字符 {doc.char_count}，分段 {len(doc.segments)}），"
-                "尝试下一解析器…"
+                f"{engine} 解析未通过质量检查（字符 {doc.char_count if doc else 0}，"
+                f"分段 {len(doc.segments) if doc else 0}，{reason}），尝试下一解析器…"
             )
 
-    if last_doc is not None:
+    if last_doc is not None and _pdf_parse_usable(last_doc):
         return last_doc
-    return ParsedDocument(
-        parser_type="pdf",
-        text="",
-        char_count=0,
-        segments=[],
-        metadata={"parser_backend": "pypdf_fallback", "fallback": True},
-    )
+
+    message = _build_pdf_parse_unavailable_message(chain=chain)
+    if log:
+        log(message)
+    raise UnsupportedDocumentError(message)
 
 
 # MinerU 接管的图片后缀；没有本地降级路径（没有轻量级 OCR 备份），未启用 MinerU 时拒收
@@ -1261,6 +1340,103 @@ def _cell_str(value: Any) -> str:
     return str(value).strip()
 
 
+def _is_shared_strings_archive_error(exc: BaseException) -> bool:
+    msg = str(exc).lower().replace("_", "")
+    return "sharedstrings.xml" in msg or "sharedstrings" in msg
+
+
+def _is_mineru_excel_local_fallback_error(exc: BaseException) -> bool:
+    """MinerU 解析 xlsx/xlsm 失败且可改由本地 openpyxl/xlrd 兜底的情况。"""
+    if _is_shared_strings_archive_error(exc):
+        return True
+    msg = str(exc).lower()
+    return "409" in msg and "archive" in msg
+
+
+def _should_use_local_excel_parser_for_bytes(suffix: str, file_bytes: bytes) -> bool:
+    """WPS/Windows 生成的 xlsx 在 zip 内用反斜杠路径，MinerU 与 openpyxl 只读模式均会失败。"""
+    return suffix in {"xlsx", "xlsm"} and _xlsx_zip_has_backslash_paths(file_bytes)
+
+
+def _xlsx_zip_has_backslash_paths(file_bytes: bytes) -> bool:
+    try:
+        with zipfile.ZipFile(BytesIO(file_bytes), "r") as archive:
+            return any("\\" in name for name in archive.namelist())
+    except zipfile.BadZipFile:
+        return False
+
+
+def _normalize_xlsx_zip_paths(file_bytes: bytes) -> bytes:
+    """WPS/部分 Windows 工具生成的 xlsx 在 zip 内使用反斜杠路径，openpyxl 无法识别。"""
+    source = BytesIO(file_bytes)
+    target = BytesIO()
+    with zipfile.ZipFile(source, "r") as zin, zipfile.ZipFile(target, "w") as zout:
+        for item in zin.infolist():
+            payload = zin.read(item.filename)
+            item.filename = item.filename.replace("\\", "/")
+            zout.writestr(item, payload)
+    return target.getvalue()
+
+
+def _prepare_xlsx_zip_bytes(
+    file_bytes: bytes,
+    log: Callable[[str], None] | None = None,
+) -> bytes:
+    if not _xlsx_zip_has_backslash_paths(file_bytes):
+        return file_bytes
+    if log:
+        log("检测到 xlsx 压缩包内为 Windows 反斜杠路径，正在规范化为 openpyxl 可读格式…")
+    return _normalize_xlsx_zip_paths(file_bytes)
+
+
+def _parse_xlsx_workbook_sheets(
+    file_bytes: bytes,
+    suffix: str,
+    log: Callable[[str], None] | None,
+    *,
+    engine_label: str,
+    on_sheet: Callable[[str, list[list[str]]], None],
+) -> None:
+    """解析 xlsx/xlsm 各 sheet；只读失败时自动回退标准 openpyxl。"""
+    if load_workbook is None:
+        raise UnsupportedDocumentError("未安装 openpyxl，无法解析 Excel 文档")
+
+    work_bytes = _prepare_xlsx_zip_bytes(file_bytes, log=log)
+    last_exc: BaseException | None = None
+    for read_only in (True, False):
+        wb = None
+        try:
+            if log:
+                if read_only:
+                    log(f"Excel（{suffix}，{engine_label}）：openpyxl 只读，约 {len(file_bytes)} 字节")
+                else:
+                    log(
+                        f"Excel（{suffix}，{engine_label}）：openpyxl 标准模式"
+                        f"（无 sharedStrings.xml），约 {len(file_bytes)} 字节"
+                    )
+            wb = load_workbook(BytesIO(work_bytes), read_only=read_only, data_only=True)
+            for sheet in wb:
+                row_matrix = _read_xlsx_sheet_rows(sheet, log=log)
+                if not row_matrix:
+                    if log:
+                        log(f"工作表「{sheet.title}」无有效内容，跳过")
+                    continue
+                on_sheet(sheet.title, row_matrix)
+            return
+        except Exception as exc:
+            last_exc = exc
+            if read_only and _is_shared_strings_archive_error(exc):
+                if log:
+                    log("openpyxl 只读模式不可用（sharedStrings 异常），改用标准模式…")
+                continue
+            raise
+        finally:
+            if wb is not None:
+                wb.close()
+    if last_exc is not None:
+        raise last_exc
+
+
 def _rows_to_html_table(rows: list[list[str]], *, caption: str | None = None) -> str:
     if not rows:
         return ""
@@ -1378,55 +1554,47 @@ def _table_data_row_count(row_matrix: list[list[str]]) -> int:
 
 def _parse_excel_tsv(file_bytes: bytes, suffix: str, log: Callable[[str], None] | None = None) -> ParsedDocument:
     if suffix in {"xlsx", "xlsm"}:
-        if load_workbook is None:
-            raise UnsupportedDocumentError("未安装 openpyxl，无法解析 Excel 文档")
+        segments: list[ParsedSegment] = []
+        parts: list[str] = []
+        offset_ref = [0]
 
-        def _log(msg: str) -> None:
-            if log:
-                log(msg)
-
-        _log(f"Excel（{suffix}，TSV）：openpyxl 只读，约 {len(file_bytes)} 字节")
-        wb = load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
-        try:
-            segments: list[ParsedSegment] = []
-            parts: list[str] = []
-            offset = 0
-            for sheet in wb:
-                rows_text: list[str] = []
-                for row in sheet.iter_rows(values_only=True):
-                    cells = [_cell_str(c) for c in row]
-                    if not any(cells):
-                        continue
-                    rows_text.append("\t".join(cells))
-                sheet_body = "\n".join(rows_text).strip()
-                if not sheet_body:
-                    continue
-                block = f"## {sheet.title}\n{sheet_body}"
-                start = offset
-                end = offset + len(block)
-                segments.append(
-                    ParsedSegment(
-                        text=block,
-                        start_offset=start,
-                        end_offset=end,
-                        heading_path=sheet.title,
-                        metadata={"sheet": sheet.title, "excel_engine": "tsv"},
-                    )
+        def on_sheet(title: str, row_matrix: list[list[str]]) -> None:
+            rows_text = ["\t".join(r) for r in row_matrix]
+            sheet_body = "\n".join(rows_text).strip()
+            if not sheet_body:
+                return
+            block = f"## {title}\n{sheet_body}"
+            start = offset_ref[0]
+            end = start + len(block)
+            segments.append(
+                ParsedSegment(
+                    text=block,
+                    start_offset=start,
+                    end_offset=end,
+                    heading_path=title,
+                    metadata={"sheet": title, "excel_engine": "tsv"},
                 )
-                parts.append(block)
-                offset = end + 2
-            full_text = "\n\n".join(parts).strip()
-            label = "xlsx" if suffix == "xlsx" else "xlsm"
-            return ParsedDocument(
-                parser_type=label,
-                text=full_text,
-                char_count=len(full_text),
-                segments=segments
-                or [ParsedSegment(text=full_text, start_offset=0, end_offset=len(full_text), metadata={})],
-                metadata={"sheet_count": len(segments), "excel_engine": "tsv"},
             )
-        finally:
-            wb.close()
+            parts.append(block)
+            offset_ref[0] = end + 2
+
+        _parse_xlsx_workbook_sheets(
+            file_bytes,
+            suffix,
+            log,
+            engine_label="TSV",
+            on_sheet=on_sheet,
+        )
+        full_text = "\n\n".join(parts).strip()
+        label = "xlsx" if suffix == "xlsx" else "xlsm"
+        return ParsedDocument(
+            parser_type=label,
+            text=full_text,
+            char_count=len(full_text),
+            segments=segments
+            or [ParsedSegment(text=full_text, start_offset=0, end_offset=len(full_text), metadata={})],
+            metadata={"sheet_count": len(segments), "excel_engine": "tsv"},
+        )
 
     if xlrd is None:
         raise UnsupportedDocumentError("未安装 xlrd，无法解析 .xls 文件")
@@ -1478,45 +1646,42 @@ def _parse_excel_html_table(file_bytes: bytes, suffix: str, log: Callable[[str],
     segments: list[ParsedSegment] = []
     parts: list[str] = []
     offset_ref = [0]
-    table_index = 0
+    table_index_ref = [0]
 
     if suffix in {"xlsx", "xlsm"}:
-        if load_workbook is None:
-            raise UnsupportedDocumentError("未安装 openpyxl，无法解析 Excel 文档")
-        _log(f"Excel（{suffix}，HTML 表格）：openpyxl 只读，约 {len(file_bytes)} 字节")
-        wb = load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
-        try:
-            for sheet in wb:
-                row_matrix = _read_xlsx_sheet_rows(sheet, log=log)
-                if not row_matrix:
-                    _log(f"工作表「{sheet.title}」无有效内容，跳过")
-                    continue
-                table_html = _rows_to_html_table(row_matrix, caption=sheet.title)
-                row_batch = _table_row_batch_size(row_matrix)
-                if row_batch > 1 and log:
-                    avg_chars = _estimate_table_row_chars(row_matrix, _split_table_header_and_data(row_matrix)[0])
-                    _log(
-                        f"工作表「{sheet.title}」约 {_table_data_row_count(row_matrix)} 行，"
-                        f"均行 {avg_chars} 字，按每 {row_batch} 行合并为 1 个检索块（≤{MAX_TABLE_ROW_SEGMENT_CHARS} 字/块）"
-                    )
-                sheet_segments = build_table_segments_from_rows(
-                    row_matrix,
-                    table_index,
-                    offset_ref,
-                    parts,
-                    sheet.title,
-                    table_body_html=table_html,
-                    row_batch_size=row_batch,
+        def on_sheet(title: str, row_matrix: list[list[str]]) -> None:
+            table_html = _rows_to_html_table(row_matrix, caption=title)
+            row_batch = _table_row_batch_size(row_matrix)
+            if row_batch > 1 and log:
+                avg_chars = _estimate_table_row_chars(row_matrix, _split_table_header_and_data(row_matrix)[0])
+                _log(
+                    f"工作表「{title}」约 {_table_data_row_count(row_matrix)} 行，"
+                    f"均行 {avg_chars} 字，按每 {row_batch} 行合并为 1 个检索块（≤{MAX_TABLE_ROW_SEGMENT_CHARS} 字/块）"
                 )
-                for seg in sheet_segments:
-                    meta = dict(seg.metadata or {})
-                    meta["sheet"] = sheet.title
-                    meta["excel_engine"] = "html_table"
-                    seg.metadata = meta
-                segments.extend(sheet_segments)
-                table_index += 1
-        finally:
-            wb.close()
+            sheet_segments = build_table_segments_from_rows(
+                row_matrix,
+                table_index_ref[0],
+                offset_ref,
+                parts,
+                title,
+                table_body_html=table_html,
+                row_batch_size=row_batch,
+            )
+            for seg in sheet_segments:
+                meta = dict(seg.metadata or {})
+                meta["sheet"] = title
+                meta["excel_engine"] = "html_table"
+                seg.metadata = meta
+            segments.extend(sheet_segments)
+            table_index_ref[0] += 1
+
+        _parse_xlsx_workbook_sheets(
+            file_bytes,
+            suffix,
+            log,
+            engine_label="HTML 表格",
+            on_sheet=on_sheet,
+        )
     else:
         if xlrd is None:
             raise UnsupportedDocumentError("未安装 xlrd，无法解析 .xls 文件")
@@ -1536,7 +1701,7 @@ def _parse_excel_html_table(file_bytes: bytes, suffix: str, log: Callable[[str],
                 )
             sheet_segments = build_table_segments_from_rows(
                 row_matrix,
-                table_index,
+                table_index_ref[0],
                 offset_ref,
                 parts,
                 title,
@@ -1549,7 +1714,7 @@ def _parse_excel_html_table(file_bytes: bytes, suffix: str, log: Callable[[str],
                 meta["excel_engine"] = "html_table"
                 seg.metadata = meta
             segments.extend(sheet_segments)
-            table_index += 1
+            table_index_ref[0] += 1
 
     full_text = "\n".join(parts).strip()
     if not full_text and segments:
@@ -1561,7 +1726,12 @@ def _parse_excel_html_table(file_bytes: bytes, suffix: str, log: Callable[[str],
         text=full_text,
         char_count=len(full_text),
         segments=segments or [ParsedSegment(text="", start_offset=0, end_offset=0, metadata={})],
-        metadata={"sheet_count": table_index, "excel_engine": "html_table", "table_count": table_index, "chunking_strategy": "table_segments"},
+        metadata={
+            "sheet_count": table_index_ref[0],
+            "excel_engine": "html_table",
+            "table_count": table_index_ref[0],
+            "chunking_strategy": "table_segments",
+        },
     )
 
 
@@ -1784,18 +1954,51 @@ def parse_document(
         return doc
 
     if suffix in {"xlsx", "xlsm", "xls"}:
+        from app.core.mineru_gateway import mineru_supports_excel_suffix
+
         excel_suffix = suffix
-        if opts.excel_engine == "mineru":
-            return _parse_with_mineru(
-                file_bytes,
-                suffix=excel_suffix,
-                file_name=file_name,
-                parser_type=excel_suffix,
-                log=log,
-                require_format_whitelist=False,
+        excel_engine = opts.excel_engine
+        excel_primary = opts.excel_engine
+        excel_fallback = False
+        if excel_engine == "mineru" and not mineru_supports_excel_suffix(excel_suffix):
+            _log(
+                f"MinerU 不支持旧版 .{excel_suffix}（仅支持 xlsx/xlsm），"
+                "自动改用本地 html_table（xlrd）解析…"
             )
-        _log(f"Excel 解析引擎：{opts.excel_engine}")
-        doc = _parse_excel(file_bytes, excel_suffix, engine=opts.excel_engine, log=log)
+            excel_engine = "html_table"
+            excel_fallback = True
+        elif excel_engine == "mineru" and _should_use_local_excel_parser_for_bytes(excel_suffix, file_bytes):
+            _log(
+                "检测到 xlsx 压缩包内为 Windows 反斜杠路径，MinerU 无法解析，"
+                "自动改用本地 html_table（openpyxl）解析…"
+            )
+            excel_engine = "html_table"
+            excel_fallback = True
+        elif excel_engine == "mineru":
+            try:
+                return _parse_with_mineru(
+                    file_bytes,
+                    suffix=excel_suffix,
+                    file_name=file_name,
+                    parser_type=excel_suffix,
+                    log=log,
+                    require_format_whitelist=False,
+                )
+            except UnsupportedDocumentError as exc:
+                if _is_mineru_excel_local_fallback_error(exc):
+                    _log(f"MinerU Excel 解析失败（{exc}），改用本地 html_table 解析…")
+                    excel_engine = "html_table"
+                    excel_fallback = True
+                else:
+                    raise
+        _log(f"Excel 解析引擎：{excel_engine}")
+        doc = _parse_excel(file_bytes, excel_suffix, engine=excel_engine, log=log)
+        meta = dict(doc.metadata or {})
+        meta["parser_backend"] = excel_engine
+        if excel_fallback and excel_primary == "mineru":
+            meta["parser_fallback"] = True
+            meta["parser_primary"] = "mineru"
+        doc.metadata = meta
         _log(f"Excel：字符数 {doc.char_count}，分段 {len(doc.segments)}")
         return doc
 

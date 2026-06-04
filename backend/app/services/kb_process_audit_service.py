@@ -22,6 +22,7 @@ from app.models.knowledge_base import (
     KnowledgeDocumentStatus,
 )
 from app.services.knowledge_base_service import get_knowledge_base_or_error
+from app.services.platform_audit_service import record_platform_audit
 
 ACTION_LABELS: dict[str, str] = {
     "upload": "上传",
@@ -54,6 +55,20 @@ _TERMINAL_ITEM_STATUSES = (
     KbProcessBatchItemStatus.CANCELLED.value,
 )
 
+_TERMINAL_BATCH_STATUSES = (
+    KbProcessBatchStatus.SUCCESS.value,
+    KbProcessBatchStatus.FAILED.value,
+    KbProcessBatchStatus.PARTIAL_FAILED.value,
+)
+
+_PLATFORM_AUDIT_ACTIONS = {
+    "upload": "knowledge_document.batch.upload",
+    "parse": "knowledge_document.batch.parse",
+    "reindex": "knowledge_document.batch.reindex",
+    "delete": "knowledge_document.batch.delete",
+    "cancel": "knowledge_document.batch.cancel",
+}
+
 
 def _utcnow() -> datetime:
     return datetime.utcnow()
@@ -74,6 +89,47 @@ def _action_label(action: str, *, total_count: int, force: bool = False) -> str:
         if action == "upload":
             return "批量上传"
     return ACTION_LABELS.get(action, action)
+
+
+def _batch_duration_seconds(
+    batch: KbProcessBatch,
+    items: list[KbProcessBatchItem] | None = None,
+) -> float | None:
+    """优先用明细项的起止时间（真实作业耗时），回退到批次级时间戳。"""
+    if items:
+        started_times = [item.started_at for item in items if item.started_at is not None]
+        finished_times = [item.finished_at for item in items if item.finished_at is not None]
+        if (
+            started_times
+            and len(finished_times) == len(items)
+            and batch.status in _TERMINAL_BATCH_STATUSES
+        ):
+            return max(0.0, (max(finished_times) - min(started_times)).total_seconds())
+
+    if batch.started_at is None:
+        return None
+    if batch.finished_at is not None:
+        return max(0.0, (batch.finished_at - batch.started_at).total_seconds())
+    if batch.status == KbProcessBatchStatus.RUNNING.value:
+        return max(0.0, (_utcnow() - batch.started_at).total_seconds())
+    return None
+
+
+def format_duration_label(seconds: float | None, *, running: bool = False) -> str:
+    if running and seconds is None:
+        return "进行中"
+    if seconds is None:
+        return "—"
+    if seconds < 1:
+        return "不足 1 秒"
+    total = int(round(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours > 0:
+        return f"{hours} 小时 {minutes} 分 {secs} 秒"
+    if minutes > 0:
+        return f"{minutes} 分 {secs} 秒"
+    return f"{secs} 秒"
 
 
 def _build_summary(*, username: str, action: str, total_count: int, force: bool = False) -> str:
@@ -138,6 +194,67 @@ def _recompute_batch(db: Session, batch: KbProcessBatch) -> None:
         total_count=batch.total_count,
         force=force,
     )
+    _maybe_record_platform_audit(db, batch)
+
+
+def _maybe_record_platform_audit(db: Session, batch: KbProcessBatch) -> None:
+    if batch.status not in _TERMINAL_BATCH_STATUSES:
+        return
+
+    meta = batch.metadata_json if isinstance(batch.metadata_json, dict) else {}
+    if meta.get("platform_audit_recorded"):
+        return
+
+    force = bool(meta.get("force"))
+    username = str(meta.get("username") or _get_username(db, batch.user_id))
+    action_label = _action_label(batch.action, total_count=batch.total_count, force=force)
+    items = db.execute(
+        select(KbProcessBatchItem).where(KbProcessBatchItem.batch_id == batch.id)
+    ).scalars().all()
+    duration_seconds = _batch_duration_seconds(batch, items)
+    duration_label = format_duration_label(
+        duration_seconds,
+        running=batch.status == KbProcessBatchStatus.RUNNING.value,
+    )
+    summary = batch.summary or _build_summary(
+        username=username,
+        action=batch.action,
+        total_count=batch.total_count,
+        force=force,
+    )
+    message = summary
+    if duration_label not in {"—", "进行中"}:
+        message = f"{summary}（耗时 {duration_label}）"
+
+    audit_action = _PLATFORM_AUDIT_ACTIONS.get(batch.action, f"knowledge_document.batch.{batch.action}")
+    record_platform_audit(
+        db,
+        action=audit_action,
+        resource_type="knowledge_document",
+        resource_id=batch.knowledge_base_id,
+        enterprise_space_id=batch.enterprise_space_id,
+        user_id=batch.user_id,
+        detail={
+            "batch_id": batch.id,
+            "batch_uid": batch.batch_uid,
+            "knowledge_base_id": batch.knowledge_base_id,
+            "action": batch.action,
+            "action_label": action_label,
+            "status": batch.status,
+            "total_count": batch.total_count,
+            "success_count": batch.success_count,
+            "failed_count": batch.failed_count,
+            "started_at": batch.started_at.isoformat() if batch.started_at else None,
+            "finished_at": batch.finished_at.isoformat() if batch.finished_at else None,
+            "duration_seconds": duration_seconds,
+            "duration_label": duration_label,
+            "summary": summary,
+        },
+        message=message,
+    )
+    meta = dict(meta)
+    meta["platform_audit_recorded"] = True
+    batch.metadata_json = meta
 
 
 def _get_username(db: Session, user_id: int | None) -> str:
@@ -147,6 +264,54 @@ def _get_username(db: Session, user_id: int | None) -> str:
     if user is None:
         return "未知用户"
     return user.username
+
+
+def _find_open_process_batch_item(
+    db: Session,
+    *,
+    space_id: int,
+    kb_id: int,
+    document_id: int,
+    action: str,
+) -> tuple[KbProcessBatch, KbProcessBatchItem] | None:
+    """begin 未传 batch_uid 时，complete 应复用同一进行中的批次，避免重复建批导致耗时为 0。"""
+    item = db.execute(
+        select(KbProcessBatchItem)
+        .join(KbProcessBatch, KbProcessBatchItem.batch_id == KbProcessBatch.id)
+        .where(
+            KbProcessBatch.enterprise_space_id == space_id,
+            KbProcessBatch.knowledge_base_id == kb_id,
+            KbProcessBatch.action == action,
+            KbProcessBatch.status == KbProcessBatchStatus.RUNNING.value,
+            KbProcessBatchItem.document_id == document_id,
+            KbProcessBatchItem.status == KbProcessBatchItemStatus.RUNNING.value,
+        )
+        .order_by(KbProcessBatchItem.started_at.desc(), KbProcessBatchItem.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if item is None:
+        return None
+    batch = db.get(KbProcessBatch, item.batch_id)
+    if batch is None:
+        return None
+    return batch, item
+
+
+def _load_batch_items_map(
+    db: Session,
+    batch_ids: list[int],
+) -> dict[int, list[KbProcessBatchItem]]:
+    if not batch_ids:
+        return {}
+    rows = db.execute(
+        select(KbProcessBatchItem)
+        .where(KbProcessBatchItem.batch_id.in_(batch_ids))
+        .order_by(KbProcessBatchItem.started_at.asc(), KbProcessBatchItem.id.asc())
+    ).scalars().all()
+    grouped: dict[int, list[KbProcessBatchItem]] = {}
+    for row in rows:
+        grouped.setdefault(row.batch_id, []).append(row)
+    return grouped
 
 
 def _find_batch_by_uid(
@@ -387,6 +552,42 @@ def record_delete(
     db.commit()
 
 
+def record_delete_batch(
+    db: Session,
+    *,
+    space_id: int,
+    kb_id: int,
+    user_id: int | None,
+    batch_uid: str,
+    items: list[dict[str, Any]],
+) -> None:
+    """批量删除完成后一次性写入审计批次。"""
+    if not items:
+        return
+    batch = ensure_batch(
+        db,
+        space_id=space_id,
+        kb_id=kb_id,
+        user_id=user_id,
+        action="delete",
+        batch_uid=batch_uid,
+    )
+    for item in items:
+        document_id = item.get("document_id")
+        file_name = str(item.get("file_name") or "未知文档")
+        if not isinstance(document_id, int):
+            continue
+        start_item(db, batch=batch, document_id=document_id, file_name=file_name)
+        finish_item(
+            db,
+            batch=batch,
+            document_id=document_id,
+            status="success",
+            file_name=file_name,
+        )
+    db.commit()
+
+
 def record_cancel(
     db: Session,
     *,
@@ -448,15 +649,37 @@ def complete_process_item(
     user_id: int | None = None,
     force: bool = False,
 ) -> None:
-    batch = ensure_batch(
-        db,
-        space_id=space_id,
-        kb_id=kb_id,
-        user_id=user_id,
-        action=mode,
-        batch_uid=batch_uid,
-        force=force,
-    )
+    batch: KbProcessBatch | None = None
+    if batch_uid:
+        batch = ensure_batch(
+            db,
+            space_id=space_id,
+            kb_id=kb_id,
+            user_id=user_id,
+            action=mode,
+            batch_uid=batch_uid,
+            force=force,
+        )
+    else:
+        found = _find_open_process_batch_item(
+            db,
+            space_id=space_id,
+            kb_id=kb_id,
+            document_id=document_id,
+            action=mode,
+        )
+        if found is not None:
+            batch, _ = found
+        else:
+            batch = ensure_batch(
+                db,
+                space_id=space_id,
+                kb_id=kb_id,
+                user_id=user_id,
+                action=mode,
+                batch_uid=None,
+                force=force,
+            )
     finish_item(
         db,
         batch=batch,
@@ -673,10 +896,27 @@ def get_process_log_summary(db: Session, *, space_id: int, kb_id: int) -> dict[s
     }
 
 
-def _serialize_batch(db: Session, batch: KbProcessBatch) -> dict[str, Any]:
+def _serialize_batch(
+    db: Session,
+    batch: KbProcessBatch,
+    *,
+    items: list[KbProcessBatchItem] | None = None,
+) -> dict[str, Any]:
     meta = batch.metadata_json if isinstance(batch.metadata_json, dict) else {}
     force = bool(meta.get("force"))
     username = _get_username(db, batch.user_id)
+    running = batch.status == KbProcessBatchStatus.RUNNING.value
+    if items is None:
+        items = db.execute(
+            select(KbProcessBatchItem).where(KbProcessBatchItem.batch_id == batch.id)
+        ).scalars().all()
+    duration_seconds = _batch_duration_seconds(batch, items)
+    if duration_seconds is not None:
+        duration_label = format_duration_label(duration_seconds)
+    elif running:
+        duration_label = "进行中"
+    else:
+        duration_label = "—"
     return {
         "id": batch.id,
         "batch_uid": batch.batch_uid,
@@ -689,6 +929,8 @@ def _serialize_batch(db: Session, batch: KbProcessBatch) -> dict[str, Any]:
         "failed_count": batch.failed_count,
         "started_at": batch.started_at,
         "finished_at": batch.finished_at,
+        "duration_seconds": duration_seconds,
+        "duration_label": duration_label,
         "summary": batch.summary or _build_summary(
             username=username,
             action=batch.action,
@@ -753,8 +995,9 @@ def list_process_log_events(
     if dirty:
         db.commit()
 
+    items_map = _load_batch_items_map(db, [row.id for row in rows])
     return {
-        "items": [_serialize_batch(db, row) for row in rows],
+        "items": [_serialize_batch(db, row, items=items_map.get(row.id, [])) for row in rows],
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -789,7 +1032,7 @@ def list_process_log_batch_items(
     ).scalars().all()
 
     return {
-        "batch": _serialize_batch(db, batch),
+        "batch": _serialize_batch(db, batch, items=items),
         "items": [
             {
                 "id": item.id,

@@ -5,9 +5,28 @@
 # 若使用 3.13+，grpcio 等可能没有对应 wheel，pip 会拉 .tar.gz 并尝试源码编译，
 # 需要系统安装 g++，且容易失败。可指定解释器：
 #   PIP_DOWNLOAD_PYTHON=/path/to/python3.12 ./scripts/download_offline_wheels.sh
+#
+# 若报 ProxyError / Connection refused（pip 走了失效的 HTTP_PROXY）：
+#   PIP_NO_PROXY=1 ./scripts/download_offline_wheels.sh
+# 或手动：unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy
+#
+# 内网可用镜像（示例）：
+#   PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple PIP_NO_PROXY=1 ./scripts/download_offline_wheels.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p offline_deps
+
+if [ "${PIP_NO_PROXY:-0}" = "1" ]; then
+  unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy SOCKS_PROXY SOCKS5_PROXY socks_proxy socks5_proxy || true
+fi
+
+PIP_DOWNLOAD_ARGS=()
+if [ -n "${PIP_INDEX_URL:-}" ]; then
+  PIP_DOWNLOAD_ARGS+=(--index-url "${PIP_INDEX_URL}")
+fi
+if [ -n "${PIP_TRUSTED_HOST:-}" ]; then
+  PIP_DOWNLOAD_ARGS+=(--trusted-host "${PIP_TRUSTED_HOST}")
+fi
 
 if [ -n "${PIP_DOWNLOAD_PYTHON:-}" ]; then
   PY="${PIP_DOWNLOAD_PYTHON}"
@@ -23,6 +42,7 @@ else
 fi
 
 "$PY" -m pip download \
+  "${PIP_DOWNLOAD_ARGS[@]}" \
   -r requirements.txt \
   -r requirements-docker-local-extras.txt \
   -d offline_deps

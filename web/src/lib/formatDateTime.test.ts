@@ -18,4 +18,10 @@ describe('formatApiDateTime', () => {
   it('returns fallback for empty value', () => {
     expect(formatApiDateTime(null)).toBe('—')
   })
+
+  it('formats naive UTC datetime as Asia/Shanghai (CST)', () => {
+    const formatted = formatApiDateTime('2026-06-04T02:30:35')
+    expect(formatted).toContain('10:30:35')
+    expect(formatted).toMatch(/2026/)
+  })
 })

@@ -12,6 +12,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -34,6 +35,8 @@ from app.schemas.knowledge_base import (
     Neo4jConnectionUpdate,
 )
 from app.schemas.knowledge_document import (
+    BatchDocumentDeleteRequest,
+    BatchDocumentDeleteResponse,
     BatchDocumentProcessRequest,
     BatchDocumentProcessResponse,
     ChunkSourceContextResponse,
@@ -71,12 +74,14 @@ from app.services.lightrag_engine import query_graph_kb
 from app.services import document_background_task_service as bg_task_service
 from app.services import kb_process_audit_service
 from app.services.knowledge_base_service import (
+    apply_embedding_probe_on_create,
     build_deleted_knowledge_base_name,
     build_collection_name,
     ensure_knowledge_base_name_unique,
     get_knowledge_base_or_error,
     get_knowledge_base_stats,
     get_neo4j_connection_or_error,
+    raise_if_knowledge_base_name_conflict,
     resolve_knowledge_base_milvus_dimension,
 )
 from app.services.knowledge_document_service import (
@@ -86,6 +91,7 @@ from app.services.knowledge_document_service import (
     MINERU_VIEW_MD_FILENAME,
     cancel_document_process,
     delete_document_asset,
+    delete_documents_batch,
     enqueue_documents_process_batch,
     get_document_detail,
     get_document_or_error,
@@ -199,17 +205,13 @@ def create_knowledge_base(
         milvus_collection_name="",
     )
     db.add(knowledge_base)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise_if_knowledge_base_name_conflict(exc)
     knowledge_base.milvus_collection_name = build_collection_name(knowledge_base.enterprise_space_id, knowledge_base.id)
-    if knowledge_base.vector_db_enabled or knowledge_base.kb_type == "lightrag":
-        try:
-            resolve_knowledge_base_milvus_dimension(
-                db,
-                knowledge_base=knowledge_base,
-                persist=False,
-            )
-        except AppError:
-            pass
+    create_notice = apply_embedding_probe_on_create(db, knowledge_base=knowledge_base)
     db.commit()
     db.refresh(knowledge_base)
     audit_action(
@@ -220,7 +222,13 @@ def create_knowledge_base(
         resource_id=knowledge_base.id,
         enterprise_space_id=current_space.id,
         user_id=current_user.id,
-        detail={"name": knowledge_base.name, "kb_type": knowledge_base.kb_type},
+        detail={
+            "name": knowledge_base.name,
+            "kb_type": knowledge_base.kb_type,
+            "status": knowledge_base.status,
+            "embedding_probe_ok": knowledge_base.status == "active",
+            "create_notice": create_notice,
+        },
     )
     db.commit()
     return knowledge_base
@@ -969,6 +977,25 @@ def delete_document(
         batch_uid=batch_id,
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/{kb_id}/documents/batch-delete", response_model=BatchDocumentDeleteResponse)
+def batch_delete_documents(
+    kb_id: int,
+    payload: BatchDocumentDeleteRequest,
+    current_space: CurrentSpace,
+    current_user: CurrentUser,
+    membership: RequireMembership,
+    db: Session = Depends(get_db),
+) -> dict:
+    return delete_documents_batch(
+        db,
+        space_id=current_space.id,
+        kb_id=kb_id,
+        document_ids=payload.document_ids,
+        user_id=current_user.id,
+        batch_uid=payload.batch_uid,
+    )
 
 
 @router.post("/{kb_id}/documents/{document_id}/reindex", response_model=KnowledgeDocumentResponse)

@@ -7,7 +7,7 @@
       </div>
 
       <Transition name="toast-fade">
-        <div v-if="toastVisible" :class="['center-toast', toastType]">
+        <div v-if="toastVisible" :class="['center-toast', toastType === 'warning' ? 'error' : toastType]">
           <AppIcon :name="toastType === 'success' ? 'check' : 'status'" :size="16" />
           <span>{{ toastMessage }}</span>
         </div>
@@ -116,7 +116,7 @@
               </span>
             </div>
             <div class="kb-tile-meta-row">
-              <span :class="['status-pill', kb.status === 'active' ? 'success' : 'warning']">{{ statusLabelMap[kb.status] || kb.status }}</span>
+              <span :class="['status-pill', kbStatusTone(kb.status)]">{{ statusLabelMap[kb.status] || kb.status }}</span>
               <span class="kb-tile-date">{{ formatDate(kb.created_at) }}</span>
             </div>
           </article>
@@ -200,15 +200,25 @@
               <select v-model="form.status" class="select">
                 <option value="active">运行中</option>
                 <option value="inactive">未激活</option>
+                <option value="embedding_unavailable">Embedding 不可用</option>
               </select>
+              <p v-if="form.status === 'embedding_unavailable'" class="field-hint">
+                修复 Embedding 模型或 GPU 资源后，可改回「运行中」以恢复解析与索引。
+              </p>
             </label>
+
+            <p v-if="submitting && submitPhase === 'probing'" class="field-hint modal-probing-hint">
+              正在检测 Embedding 模型，可能需要 1–2 分钟，请勿重复点击…
+            </p>
 
             <p v-if="modalError" class="modal-error">{{ modalError }}</p>
 
             <footer class="kb-modal-actions">
-              <button class="btn btn-ghost" type="button" :disabled="submitting" @click="closeModal">取消</button>
-              <button class="btn btn-primary" type="submit" :disabled="submitting || !form.name">
-                {{ submitting ? '提交中...' : modalMode === 'create' ? '创建' : '保存' }}
+              <button class="btn btn-ghost" type="button" @click="closeModal">
+                {{ submitting ? '取消请求' : '取消' }}
+              </button>
+              <button class="btn btn-primary" type="submit" :disabled="submitting || !form.name.trim()">
+                {{ submitButtonLabel }}
               </button>
             </footer>
           </form>
@@ -260,6 +270,7 @@
 </template>
 
 <script setup lang="ts">
+import axios from 'axios'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
@@ -278,7 +289,18 @@ import Layout from '../components/Layout.vue'
 const statusLabelMap: Record<string, string> = {
   active: '运行中',
   inactive: '未激活',
+  embedding_unavailable: 'Embedding 不可用',
   deleted: '已删除',
+}
+
+function kbStatusTone(status: string): string {
+  if (status === 'active') {
+    return 'success'
+  }
+  if (status === 'embedding_unavailable') {
+    return 'error'
+  }
+  return 'warning'
 }
 
 const router = useRouter()
@@ -328,25 +350,30 @@ let noticeTimer: number | undefined
 
 const toastVisible = ref(false)
 const toastMessage = ref('')
-const toastType = ref<'success' | 'error'>('success')
+const toastType = ref<'success' | 'error' | 'warning'>('success')
 let toastTimer: number | undefined
 
-const showToast = (text: string, type: 'success' | 'error' = 'success') => {
+const showToast = (text: string, type: 'success' | 'error' | 'warning' = 'success') => {
   toastMessage.value = text
   toastType.value = type
   toastVisible.value = true
   if (toastTimer) {
     window.clearTimeout(toastTimer)
   }
-  toastTimer = window.setTimeout(() => {
-    toastVisible.value = false
-  }, 2000)
+  toastTimer = window.setTimeout(
+    () => {
+      toastVisible.value = false
+    },
+    type === 'warning' ? 6000 : 2000,
+  )
 }
 
 const modalOpen = ref(false)
 const modalMode = ref<'create' | 'edit'>('create')
 const editingId = ref<number | null>(null)
 const submitting = ref(false)
+const submitPhase = ref<'idle' | 'probing'>('idle')
+const createAbortController = ref<AbortController | null>(null)
 const modalError = ref('')
 const openMenuId = ref<number | null>(null)
 
@@ -356,8 +383,36 @@ const form = reactive({
   kb_type: 'classic' as 'classic' | 'lightrag',
   vector_db_enabled: true,
   graph_db_enabled: false,
-  status: 'active' as 'active' | 'inactive',
+  status: 'active' as KnowledgeBase['status'],
 })
+
+const needsEmbeddingProbeOnCreate = computed(() => {
+  if (modalMode.value !== 'create') {
+    return false
+  }
+  return form.kb_type === 'lightrag' || form.vector_db_enabled
+})
+
+const submitButtonLabel = computed(() => {
+  if (!submitting.value) {
+    return modalMode.value === 'create' ? '创建' : '保存'
+  }
+  if (modalMode.value === 'create' && submitPhase.value === 'probing') {
+    return '正在检测 Embedding 模型…'
+  }
+  return '提交中…'
+})
+
+function embeddingProbeWarningMessage(kb: KnowledgeBase): string {
+  const probe = kb.config?.embedding_probe
+  if (probe && typeof probe === 'object' && typeof (probe as { message?: unknown }).message === 'string') {
+    const message = ((probe as { message: string }).message || '').trim()
+    if (message) {
+      return `知识库已创建，但 Embedding 模型暂不可用：${message}`
+    }
+  }
+  return '知识库已创建，但 Embedding 模型暂不可用，请在修复模型后将状态改回「运行中」。'
+}
 
 const kbTypeOptions = [
   {
@@ -580,14 +635,18 @@ const openEditModal = (kb: KnowledgeBase) => {
   form.kb_type = (kb.kb_type === 'lightrag' ? 'lightrag' : 'classic') as 'classic' | 'lightrag'
   form.vector_db_enabled = kb.vector_db_enabled
   form.graph_db_enabled = kb.graph_db_enabled
-  form.status = kb.status === 'inactive' ? 'inactive' : 'active'
+  form.status =
+    kb.status === 'inactive' || kb.status === 'embedding_unavailable' ? kb.status : 'active'
   modalError.value = ''
   modalOpen.value = true
 }
 
 const closeModal = () => {
   if (submitting.value) {
-    return
+    createAbortController.value?.abort()
+    createAbortController.value = null
+    submitting.value = false
+    submitPhase.value = 'idle'
   }
   modalOpen.value = false
   editingId.value = null
@@ -595,25 +654,37 @@ const closeModal = () => {
 }
 
 const submitModal = async () => {
+  if (submitting.value) {
+    return
+  }
   submitting.value = true
+  submitPhase.value = modalMode.value === 'create' && needsEmbeddingProbeOnCreate.value ? 'probing' : 'idle'
   modalError.value = ''
+  createAbortController.value = modalMode.value === 'create' ? new AbortController() : null
 
   const description = form.description.trim() ? form.description.trim() : null
   try {
     if (modalMode.value === 'create') {
-      await knowledgeBaseApi.create({
-        ...createDefaults,
-        name: form.name.trim(),
-        description,
-        kb_type: form.kb_type,
-        vector_db_enabled: form.kb_type === 'classic' ? form.vector_db_enabled : true,
-        graph_db_enabled: form.kb_type === 'lightrag' ? true : form.graph_db_enabled,
-      })
+      const created = await knowledgeBaseApi.create(
+        {
+          ...createDefaults,
+          name: form.name.trim(),
+          description,
+          kb_type: form.kb_type,
+          vector_db_enabled: form.kb_type === 'classic' ? form.vector_db_enabled : true,
+          graph_db_enabled: form.kb_type === 'lightrag' ? true : form.graph_db_enabled,
+        },
+        { signal: createAbortController.value?.signal },
+      )
       modalOpen.value = false
       editingId.value = null
       modalError.value = ''
       await refreshKnowledgeBases()
-      showToast('知识库创建成功', 'success')
+      if (created.status === 'embedding_unavailable') {
+        showToast(embeddingProbeWarningMessage(created), 'warning')
+      } else {
+        showToast('知识库创建成功', 'success')
+      }
     } else if (editingId.value !== null) {
       await knowledgeBaseApi.update(editingId.value, {
         name: form.name.trim(),
@@ -629,9 +700,15 @@ const submitModal = async () => {
       showToast('知识库修改成功', 'success')
     }
   } catch (value) {
+    if (axios.isCancel(value) || (value instanceof DOMException && value.name === 'AbortError')) {
+      modalError.value = '已取消创建请求'
+      return
+    }
     modalError.value = getKnowledgeBaseErrorMessage(value, modalMode.value === 'create' ? '创建知识库失败' : '修改知识库失败')
   } finally {
+    createAbortController.value = null
     submitting.value = false
+    submitPhase.value = 'idle'
   }
 }
 
@@ -1237,6 +1314,11 @@ onBeforeUnmount(() => {
 .toast-fade-enter-from,
 .toast-fade-leave-to {
   opacity: 0;
+}
+
+.modal-probing-hint {
+  margin: 0;
+  color: var(--text-secondary, #64748b);
 }
 
 @media (max-width: 900px) {

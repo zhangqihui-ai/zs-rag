@@ -32,7 +32,13 @@ services:
   opensearch:
     image: ${REGISTRY}/${IMAGE_NAMESPACE}/opensearch:3.6.0
 
+  redis:
+    image: ${REGISTRY}/${IMAGE_NAMESPACE}/redis:7-alpine
+
   backend:
+    image: ${REGISTRY}/${IMAGE_NAMESPACE}/backend:dev
+
+  celery-worker:
     image: ${REGISTRY}/${IMAGE_NAMESPACE}/backend:dev
 
   frontend:

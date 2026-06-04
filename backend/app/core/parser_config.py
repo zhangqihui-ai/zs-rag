@@ -160,7 +160,14 @@ def parser_engine_display_name(engine: str | None, *, fallback: bool = False) ->
         "native": "文本",
     }
     label = labels.get(key, key.upper() if key else "—")
-    if fallback and key in {"mineru", "pypdf", "pypdf_fallback", "opendataloader"}:
+    if fallback and key in {
+        "mineru",
+        "pypdf",
+        "pypdf_fallback",
+        "opendataloader",
+        "html_table",
+        "tsv",
+    }:
         return f"{label}（降级）"
     return label
 

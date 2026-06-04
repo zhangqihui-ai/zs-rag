@@ -12,6 +12,7 @@
 #
 # 启用 MinerU CPU：--profile mineru-cpu（或兼容别名 --profile mineru）
 # 启用 MinerU GPU：--profile mineru-gpu（需宿主机 NVIDIA + nvidia-container-toolkit）
+# 启用 Celery 文档队列：.env 中 CELERY_ENABLED=true，启动时加 --profile celery
 #
 # 数据库迁移：
 #   docker compose -f docker-compose.prod.yml -f docker-compose.prod.registry.yml exec backend python -m alembic upgrade head
@@ -35,7 +36,13 @@ services:
   opensearch:
     image: ${REGISTRY}/${IMAGE_NAMESPACE}/opensearch:3.6.0
 
+  redis:
+    image: ${REGISTRY}/${IMAGE_NAMESPACE}/redis:7-alpine
+
   backend:
+    image: ${REGISTRY}/${IMAGE_NAMESPACE}/backend:prod
+
+  celery-worker:
     image: ${REGISTRY}/${IMAGE_NAMESPACE}/backend:prod
 
   frontend:

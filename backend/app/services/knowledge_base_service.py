@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.embedding_gateway import probe_embedding_dimension
 from app.core.errors import AppError
 from app.core.kb_type import KB_TYPE_LIGHTRAG
-from app.models.knowledge_base import KnowledgeBase, KnowledgeChunk, KnowledgeDocument, Neo4jConnection
+from app.models.knowledge_base import KnowledgeBase, KnowledgeBaseStatus, KnowledgeChunk, KnowledgeDocument, Neo4jConnection
 from app.models.model_management import AIModel, AIModelDefault
 
 # 历史遗留占位：OpenAI text-embedding-ada-002 等常见模型维度；新建库应通过 embedding 探测写入。
@@ -62,6 +64,99 @@ def ensure_knowledge_base_name_unique(
     existing = db.execute(stmt).scalar_one_or_none()
     if existing is not None:
         raise AppError(status_code=409, code="KNOWLEDGE_BASE_ALREADY_EXISTS", message="同名知识库已存在")
+
+
+def raise_if_knowledge_base_name_conflict(exc: IntegrityError) -> None:
+    """并发创建等同名冲突时，将数据库唯一约束转为 409。"""
+    orig = getattr(exc, "orig", None)
+    constraint = getattr(orig, "diag", None)
+    constraint_name = getattr(constraint, "constraint_name", None) if constraint is not None else None
+    message = str(orig or exc)
+    if constraint_name == "uq_knowledge_base_space_name" or "uq_knowledge_base_space_name" in message:
+        raise AppError(
+            status_code=409,
+            code="KNOWLEDGE_BASE_ALREADY_EXISTS",
+            message="同名知识库已存在，请更换名称或刷新列表后查看是否已创建成功",
+        ) from exc
+    raise exc
+
+
+def knowledge_base_needs_embedding(knowledge_base: KnowledgeBase) -> bool:
+    return bool(knowledge_base.vector_db_enabled or knowledge_base.kb_type == KB_TYPE_LIGHTRAG)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def apply_embedding_probe_on_create(
+    db: Session,
+    *,
+    knowledge_base: KnowledgeBase,
+) -> str | None:
+    """
+    创建知识库时探测 embedding 维度。
+    成功：status=active；失败：status=embedding_unavailable，并返回前端提示文案。
+    """
+    if not knowledge_base_needs_embedding(knowledge_base):
+        return None
+
+    config: dict[str, Any] = dict(knowledge_base.config or {})
+    try:
+        dimension = resolve_knowledge_base_milvus_dimension(
+            db,
+            knowledge_base=knowledge_base,
+            persist=False,
+        )
+        config["embedding_probe"] = {
+            "ok": True,
+            "message": f"Embedding 维度探测成功（{dimension}）",
+            "probed_at": _utc_now_iso(),
+        }
+        knowledge_base.config = config
+        knowledge_base.status = KnowledgeBaseStatus.ACTIVE.value
+        return None
+    except AppError as exc:
+        config["embedding_probe"] = {
+            "ok": False,
+            "message": exc.message,
+            "code": exc.code,
+            "probed_at": _utc_now_iso(),
+        }
+        knowledge_base.config = config
+        knowledge_base.status = KnowledgeBaseStatus.EMBEDDING_UNAVAILABLE.value
+        return (
+            f"知识库已创建，但 Embedding 模型暂不可用：{exc.message}。"
+            "请检查模型配置或 GPU 资源占用，修复后可在知识库设置中将状态改回「运行中」。"
+        )
+    except Exception as exc:
+        message = str(exc).strip() or "Embedding 探测失败"
+        config["embedding_probe"] = {
+            "ok": False,
+            "message": message,
+            "code": "EMBEDDING_PROBE_FAILED",
+            "probed_at": _utc_now_iso(),
+        }
+        knowledge_base.config = config
+        knowledge_base.status = KnowledgeBaseStatus.EMBEDDING_UNAVAILABLE.value
+        return (
+            f"知识库已创建，但 Embedding 模型暂不可用：{message}。"
+            "请检查模型配置或 GPU 资源占用，修复后可在知识库设置中将状态改回「运行中」。"
+        )
+
+
+def ensure_knowledge_base_embedding_available(knowledge_base: KnowledgeBase) -> None:
+    if knowledge_base.status != KnowledgeBaseStatus.EMBEDDING_UNAVAILABLE.value:
+        return
+    config = knowledge_base.config if isinstance(knowledge_base.config, dict) else {}
+    probe = config.get("embedding_probe") if isinstance(config.get("embedding_probe"), dict) else {}
+    detail = str(probe.get("message") or "").strip()
+    suffix = f"（{detail}）" if detail else ""
+    raise AppError(
+        status_code=409,
+        code="EMBEDDING_MODEL_UNAVAILABLE",
+        message=f"知识库 Embedding 模型不可用，暂无法解析或索引文档{suffix}",
+    )
 
 
 def build_deleted_knowledge_base_name(original: str, kb_id: int) -> str:
