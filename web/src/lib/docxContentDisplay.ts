@@ -1,3 +1,5 @@
+import { tableCellHtml } from './tableHtmlDisplay'
+
 /** Word docx content_list 块：与后端 docx_view_export 输出一致 */
 
 export type DocxContentBlock = {
@@ -254,6 +256,35 @@ export function chunkMatchesDocxBlock(
   return false
 }
 
+function keyValueLineToHtml(line: string): string | null {
+  if (!line.includes('：') || !line.includes('；')) {
+    return null
+  }
+  const pairs: Array<[string, string]> = []
+  for (const part of line.split('；')) {
+    const idx = part.indexOf('：')
+    if (idx > 0) {
+      const key = part.slice(0, idx).trim()
+      const value = part.slice(idx + 1).trim()
+      if (key) {
+        pairs.push([key, value])
+      }
+    }
+  }
+  if (!pairs.length) {
+    return null
+  }
+  let html = '<table><thead><tr>'
+  html += tableCellHtml('th', '字段')
+  html += tableCellHtml('th', '内容')
+  html += '</tr></thead><tbody>'
+  for (const [key, value] of pairs) {
+    html += `<tr>${tableCellHtml('th', key)}${tableCellHtml('td', value)}</tr>`
+  }
+  html += '</tbody></table>'
+  return html
+}
+
 export function tableBlockPreviewHtml(item: DocxContentBlock): string {
   const text = docxBlockPlainText(item)
   if (!text) {
@@ -263,9 +294,19 @@ export function tableBlockPreviewHtml(item: DocxContentBlock): string {
   if (lines.length === 0) {
     return ''
   }
+  if (lines.length === 1) {
+    const kv = keyValueLineToHtml(lines[0])
+    if (kv) {
+      return kv
+    }
+  }
   const rows: string[][] = []
   for (const line of lines) {
     if (line.includes('；') && line.includes('：')) {
+      const kv = keyValueLineToHtml(line)
+      if (kv && lines.length === 1) {
+        return kv
+      }
       const cells: string[] = []
       for (const part of line.split('；')) {
         const idx = part.indexOf('：')
@@ -288,14 +329,12 @@ export function tableBlockPreviewHtml(item: DocxContentBlock): string {
   }
   if (rows.length >= 2) {
     const width = Math.max(...rows.map((r) => r.length))
-    const esc = (s: string) =>
-      s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     let html = '<table>'
     rows.forEach((row, ri) => {
       html += '<tr>'
       const cells = [...row, ...Array(Math.max(0, width - row.length)).fill('')]
       for (const cell of cells) {
-        html += `<${ri === 0 ? 'th' : 'td'}>${esc(cell)}</${ri === 0 ? 'th' : 'td'}>`
+        html += tableCellHtml(ri === 0 ? 'th' : 'td', cell)
       }
       html += '</tr>'
     })

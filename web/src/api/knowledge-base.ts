@@ -1,7 +1,7 @@
 import axios from 'axios'
 
 import { resolveApiBaseUrl } from '../lib/apiBaseUrl'
-import { http, longRequestTimeoutMs, documentRequestTimeoutMs } from '../lib/http'
+import { http, longRequestTimeoutMs, documentRequestTimeoutMs, searchRequestTimeoutMs, resolveEnterpriseSpaceSlug } from '../lib/http'
 
 export type RetrievalMode = 'vector' | 'keyword' | 'hybrid'
 
@@ -168,6 +168,8 @@ export interface KnowledgeDocument {
   skip_reason?: string | null
   /** 最近一次解析/重建索引完成时间 */
   last_parsed_at?: string | null
+  /** 为 true 表示文档处于"可续传"态（取消时保留了已切片/已向量化内容） */
+  resumable?: boolean
   created_at: string
   updated_at: string
 }
@@ -487,7 +489,7 @@ export const knowledgeBaseApi = {
     }
 
     const token = localStorage.getItem('auth_token')
-    const enterpriseSpace = localStorage.getItem('current_enterprise_space')
+    const enterpriseSpace = resolveEnterpriseSpaceSlug()
     const base = resolveApiBaseUrl().replace(/\/$/, '')
     const url = `${base}/knowledge-bases/${kbId}/documents/upload`
 
@@ -499,7 +501,7 @@ export const knowledgeBaseApi = {
         signal: controller.signal,
         headers: {
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          ...(enterpriseSpace ? { 'X-Enterprise-Space': enterpriseSpace } : {}),
+          'X-Enterprise-Space': enterpriseSpace,
         },
         body: formData,
       })
@@ -613,6 +615,15 @@ export const knowledgeBaseApi = {
     })
     return data as Blob
   },
+  /** Word 预览用 docx（.doc 由后端 LibreOffice 转换） */
+  async fetchDocumentWordPreviewBlob(kbId: number, documentId: number): Promise<Blob> {
+    const fileTimeoutMs = Number(import.meta.env.VITE_FILE_DOWNLOAD_TIMEOUT_MS) || 180_000
+    const { data } = await http.get(`/knowledge-bases/${kbId}/documents/${documentId}/word-preview`, {
+      responseType: 'blob',
+      timeout: fileTimeoutMs,
+    })
+    return data as Blob
+  },
   /** MinerU 侧车 Markdown（仅 MinerU 解析成功且已落盘时可用） */
   async getDocumentMineruMarkdown(kbId: number, documentId: number): Promise<string> {
     const { data } = await http.get(`/knowledge-bases/${kbId}/documents/${documentId}/mineru-markdown`, {
@@ -643,6 +654,7 @@ export const knowledgeBaseApi = {
     return unwrap<void>(
       http.delete(`/knowledge-bases/${kbId}/documents/${documentId}`, {
         params: batchId ? { batch_id: batchId } : undefined,
+        timeout: longRequestTimeoutMs,
       }),
     )
   },
@@ -717,11 +729,15 @@ export const knowledgeBaseApi = {
     )
   },
   search(kbId: number, payload: KnowledgeSearchRequest) {
-    return unwrap<KnowledgeSearchResponse>(http.post(`/knowledge-bases/${kbId}/search`, payload))
+    return unwrap<KnowledgeSearchResponse>(
+      http.post(`/knowledge-bases/${kbId}/search`, payload, { timeout: searchRequestTimeoutMs }),
+    )
   },
   /** 跨多个知识库检索，结果按分数全局合并 */
   searchMulti(payload: MultiKnowledgeSearchRequest) {
-    return unwrap<MultiKnowledgeSearchResponse>(http.post('/knowledge-bases/multi-search', payload))
+    return unwrap<MultiKnowledgeSearchResponse>(
+      http.post('/knowledge-bases/multi-search', payload, { timeout: searchRequestTimeoutMs }),
+    )
   },
 }
 
@@ -756,7 +772,7 @@ export async function streamDocumentProcess(
   },
 ): Promise<KnowledgeDocument> {
   const token = localStorage.getItem('auth_token')
-  const enterpriseSpace = localStorage.getItem('current_enterprise_space')
+  const enterpriseSpace = resolveEnterpriseSpaceSlug()
   const base = resolveApiBaseUrl().replace(/\/$/, '')
   const path =
     mode === 'parse'
@@ -780,7 +796,7 @@ export async function streamDocumentProcess(
     signal: options.signal,
     headers: {
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(enterpriseSpace ? { 'X-Enterprise-Space': enterpriseSpace } : {}),
+      'X-Enterprise-Space': enterpriseSpace,
       Accept: 'text/event-stream',
     },
   })
@@ -926,9 +942,11 @@ export async function streamDocumentProcess(
 export async function cancelDocumentProcess(
   kbId: number,
   documentId: number,
+  preservePartial = false,
 ): Promise<KnowledgeDocument> {
   return unwrap<KnowledgeDocument>(
     http.post(`/knowledge-bases/${kbId}/documents/${documentId}/cancel-process`, undefined, {
+      params: { preserve_partial: preservePartial },
       timeout: documentRequestTimeoutMs,
     }),
   )

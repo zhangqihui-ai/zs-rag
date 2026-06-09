@@ -10,7 +10,8 @@
 #
 #   docker login 192.168.252.252:5566
 #
-#   # ① 只改了 backend（Python / API / 迁移等）
+#   # ① 只改了 backend（Python / API / 迁移 / Celery 任务逻辑等）
+#   #    celery-worker 与 backend 共用 backend:prod，推送 backend 后 115 上须同时重建 celery-worker
 #   ./scripts/push-images-to-registry.sh --offline --backend-only
 #
 #   # ② 只改了 web 前端（Vue/TS/样式等）
@@ -34,33 +35,43 @@
 #   ./scripts/push-images-to-registry.sh --offline --mineru-gpu-only
 #
 #   # 仅改了 .env / CORS / 端口、未改代码：目标机改 .env 后 force-recreate 即可，不必跑本脚本
+#   #   若仅改 CELERY_ENABLED / REDIS_URL：见下方「Redis + Celery」重建 backend + celery-worker
 #
 # 目标机 192.168.252.115（只需 compose + .env，无需源码）：
 #
+#   COMPOSE="-f docker-compose.prod.yml -f docker-compose.prod.registry.yml"
 #   docker login 192.168.252.252:5566
-#   docker compose -f docker-compose.prod.yml -f docker-compose.prod.registry.yml pull
-#   docker compose -f docker-compose.prod.yml -f docker-compose.prod.registry.yml up -d --no-build
 #
-#  启用 Celery 文档队列（.env：CELERY_ENABLED=true）：
-#   docker compose -f docker-compose.prod.yml -f docker-compose.prod.registry.yml --profile celery up -d --no-build
-#   docker compose -f docker-compose.prod.yml -f docker-compose.prod.registry.yml up -d --no-build --force-recreate backend celery-worker
+#   # 全量拉取并启动（含 redis:7-alpine 中间件；不含 celery-worker，须 profile）
+#   docker compose $COMPOSE pull
+#   docker compose $COMPOSE up -d --no-build
 #
-#  若只更新了 前端 镜像，可只重建 frontend
-#   docker compose -f docker-compose.prod.yml -f docker-compose.prod.registry.yml pull frontend
-#   docker compose -f docker-compose.prod.yml -f docker-compose.prod.registry.yml up -d --no-build --force-recreate frontend
-
-#   # 若只更新了 backend 镜像，可只重建 backend：
-#   docker compose -f docker-compose.prod.yml -f docker-compose.prod.registry.yml pull backend
-#   docker compose -f docker-compose.prod.yml -f docker-compose.prod.registry.yml up -d --no-build --force-recreate backend
-
-#    启动miner u
-#   docker compose -f docker-compose.prod.yml -f docker-compose.prod.registry.yml pull mineru
-
-#   docker compose -f docker-compose.prod.yml -f docker-compose.prod.registry.yml --profile mineru up -d --no-build --force-recreate mineru-cpu
-#   docker compose -f docker-compose.prod.yml -f docker-compose.prod.registry.yml up -d --no-build --force-recreate backend
-
-#   # 后端有数据库迁移时（alembic 新版本）：
-#   docker compose -f docker-compose.prod.yml -f docker-compose.prod.registry.yml exec backend python -m alembic upgrade head
+#   # ── Redis + Celery 文档异步队列 ─────────────────────────────────────
+#   # Redis：中间件 redis:7-alpine，全量 pull/up 已包含，无单独 celery 镜像
+#   # Worker：与 backend 相同镜像 backend:prod（解析/向量化在 worker 进程执行）
+#   # .env 示例：CELERY_ENABLED=true  REDIS_URL=redis://redis:6379/0
+#   #
+#   # 首次启用或更新 backend:prod 后（须 pull + 重建 backend 与 celery-worker）：
+#   docker compose $COMPOSE --profile celery pull backend celery-worker
+#   docker compose $COMPOSE --profile celery up -d --no-build --force-recreate backend celery-worker
+#   #
+#   # 仅重启 worker（镜像未变、只改了 .env 里 MinerU/并发等）：
+#   docker compose $COMPOSE --profile celery up -d --no-build --force-recreate celery-worker
+#
+#   # 若只更新了 frontend:prod
+#   docker compose $COMPOSE pull frontend
+#   docker compose $COMPOSE up -d --no-build --force-recreate frontend
+#
+#   # 若只更新了 backend:prod（生产启用 Celery 时务必带上 celery-worker）
+#   docker compose $COMPOSE pull backend
+#   docker compose $COMPOSE --profile celery up -d --no-build --force-recreate backend celery-worker
+#
+#   # MinerU CPU sidecar（可选）
+#   docker compose $COMPOSE pull mineru
+#   docker compose $COMPOSE --profile mineru up -d --no-build --force-recreate mineru-cpu backend
+#
+#   # 数据库迁移（backend 镜像含新 alembic 时）：
+#   docker compose $COMPOSE exec backend python -m alembic upgrade head
 #
 # ─────────────────────────────────────────────────────────────────────────────
 # 首次 / 内网离线环境准备
@@ -75,6 +86,7 @@
 #   ./scripts/push-images-to-registry.sh --offline
 #
 #   缺单个基础镜像：./scripts/sync-registry-image.sh node:20-alpine
+#   缺 Redis：./scripts/sync-registry-image.sh redis:7-alpine
 #
 #   仅推送 MinerU CPU/GPU：--mineru-only / --mineru-gpu-only
 #   全量含 MinerU CPU/GPU：--with-mineru / --with-mineru-gpu
@@ -99,7 +111,7 @@
 #   --with-mineru       额外构建并推送 mineru:cpu
 #   --with-mineru-gpu   额外构建并推送 mineru:gpu（Dockerfile.mineru-gpu）
 #   --frontend-only     仅 frontend:prod
-#   --backend-only      仅 backend:prod
+#   --backend-only      仅 backend:prod（115 部署提示会含 celery-worker，同镜像）
 #   --mineru-only       仅 mineru:cpu（不构建前后端）
 #   --mineru-gpu-only   仅 mineru:gpu
 #   MINERU_VLLM_BASE_IMAGE  GPU 构建的 FROM（默认 vllm/vllm-openai:v0.11.2）
@@ -466,6 +478,16 @@ else
   COMPOSE_FILES="-f docker-compose.yml -f docker-compose.registry.yml"
 fi
 
+# 115 目标机部署提示（Redis 中间件 + Celery worker 与 backend 同镜像）
+CELERY_REDIS_NOTE="  # Redis：redis:7-alpine（中间件，全量 pull 已含；无 celery 专用镜像）
+  # Celery worker：与 backend 同为 backend:prod；.env 须 CELERY_ENABLED=true"
+
+prod_celery_recreate_backend_worker() {
+  printf '%s\n' \
+    "  docker compose ${COMPOSE_FILES} --profile celery pull backend celery-worker" \
+    "  docker compose ${COMPOSE_FILES} --profile celery up -d --no-build --force-recreate backend celery-worker"
+}
+
 DEPLOY_HINT=""
 if [[ "$MODE" == "prod" ]]; then
   if [[ "$BUILD_FRONTEND" == true && "$BUILD_BACKEND" == false ]]; then
@@ -473,28 +495,38 @@ if [[ "$MODE" == "prod" ]]; then
   docker compose ${COMPOSE_FILES} pull frontend
   docker compose ${COMPOSE_FILES} up -d --no-build --force-recreate frontend"
   elif [[ "$BUILD_BACKEND" == true && "$BUILD_FRONTEND" == false ]]; then
-    DEPLOY_HINT="  # 本次仅更新了 backend:prod
+    DEPLOY_HINT="  # 本次仅更新了 backend:prod（含 Celery 任务代码；worker 无独立镜像）
+${CELERY_REDIS_NOTE}
   docker compose ${COMPOSE_FILES} pull backend
-  docker compose ${COMPOSE_FILES} up -d --no-build --force-recreate backend
+$(prod_celery_recreate_backend_worker)
+  # 若未启用 Celery（CELERY_ENABLED=false），可只：force-recreate backend
   # 若镜像内含新 alembic 迁移：
   docker compose ${COMPOSE_FILES} exec backend python -m alembic upgrade head"
   elif [[ "$BUILD_BACKEND" == false && "$BUILD_FRONTEND" == false && "$BUILD_MINERU_CPU" == true ]]; then
     DEPLOY_HINT="  # 本次仅更新了 mineru:cpu
   docker compose ${COMPOSE_FILES} pull mineru
-  docker compose ${COMPOSE_FILES} --profile mineru up -d --no-build
-  docker compose ${COMPOSE_FILES} up -d --no-build --force-recreate backend"
+  docker compose ${COMPOSE_FILES} --profile mineru up -d --no-build --force-recreate mineru-cpu backend
+  # 若启用 Celery 文档队列，建议同时重建 worker：
+$(prod_celery_recreate_backend_worker)"
   elif [[ "$BUILD_BACKEND" == false && "$BUILD_FRONTEND" == false && "$BUILD_MINERU_GPU" == true ]]; then
     DEPLOY_HINT="  # 本次仅更新了 mineru:gpu（.env：MINERU_BACKEND=vlm-vllm-engine，MINERU_BASE_URL=http://mineru-gpu:8000）
   docker compose ${COMPOSE_FILES} pull mineru-gpu
-  docker compose ${COMPOSE_FILES} --profile mineru-gpu up -d --no-build
-  docker compose ${COMPOSE_FILES} up -d --no-build --force-recreate backend"
+  docker compose ${COMPOSE_FILES} --profile mineru-gpu up -d --no-build --force-recreate mineru-gpu backend
+$(prod_celery_recreate_backend_worker)"
+  elif [[ "$SKIP_BUILD" == true ]]; then
+    DEPLOY_HINT="  # 本次仅同步中间件镜像（含 redis:7-alpine），未构建 backend/frontend
+  docker compose ${COMPOSE_FILES} pull
+  docker compose ${COMPOSE_FILES} up -d --no-build
+  # 若需启用 Celery：
+$(prod_celery_recreate_backend_worker)"
   else
     DEPLOY_HINT="  # 全量更新或首次部署
   docker compose ${COMPOSE_FILES} pull
   docker compose ${COMPOSE_FILES} up -d --no-build
-  # 若 .env 中 CELERY_ENABLED=true，须额外启用 celery profile：
-  docker compose ${COMPOSE_FILES} --profile celery up -d --no-build
-  # 首次部署或有新数据库迁移时执行：
+${CELERY_REDIS_NOTE}
+  # 生产文档队列（.env：CELERY_ENABLED=true）须启用 celery profile 并重建 worker：
+$(prod_celery_recreate_backend_worker)
+  # 首次部署或有新数据库迁移：
   docker compose ${COMPOSE_FILES} exec backend python -m alembic upgrade head"
   fi
 fi
@@ -517,5 +549,8 @@ ${DEPLOY_HINT}
   前端: http://192.168.252.115:8090
   后端: http://192.168.252.115:8091/docs
   前端 API 已写入镜像: ${_vite_api_hint}
+
+  Redis: 中间件 redis:7-alpine（compose 全量 pull 即含）
+  Celery: 无独立镜像，worker 使用 backend:prod，部署见上方 --profile celery 说明
 ================================================================================
 EOF

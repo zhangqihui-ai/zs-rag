@@ -82,6 +82,7 @@ services:
       - "9091:9091"
     volumes:
       - milvus_data:/var/lib/milvus
+      - ./configs/milvus-user.yaml:/milvus/configs/user.yaml:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -390,8 +391,8 @@ services:
       - ./web:/app
       # Prevent node_modules from being created in host
       - /app/node_modules
-    # 使用匿名卷 /app/node_modules 时，旧卷里可能缺少新加的依赖；npm ci 按 lock 全量重装更可靠
-    command: sh -c "(npm ci || npm install) && npm run dev -- --host 0.0.0.0 --port 5173"
+    # 匿名卷 /app/node_modules 可能缺新依赖；缺 marked 时清空并重装
+    command: sh -c "if [ ! -f node_modules/marked/package.json ]; then echo '[frontend] installing deps...' && rm -rf node_modules/* && (npm ci || npm install); fi && npm run dev -- --host 0.0.0.0 --port 5173"
     depends_on:
       - backend
     networks:

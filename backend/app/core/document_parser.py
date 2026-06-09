@@ -886,9 +886,11 @@ def _is_plausible_header_row(cells: list[str]) -> bool:
 MAX_WHOLE_TABLE_TEXT_CHARS = 12_000
 MAX_WHOLE_TABLE_DATA_ROWS = 100
 # 宽表按行检索：单块字符预算 + 每块最多行数；段数硬顶避免索引爆炸
-MAX_TABLE_ROW_SEGMENT_CHARS = 4_000
+# 注：单块字符预算需保持在 embedding 模型 token 上限（约 8192 token ≈ 6500 中文字）之内，
+# 否则图知识库复用解析切片入库时会被 embedding 截断（丢内容）且单块向量化很慢。
+MAX_TABLE_ROW_SEGMENT_CHARS = 6_500
 MAX_TABLE_ROWS_PER_SEGMENT = 10
-MAX_TABLE_ROW_SEGMENTS = 2_400
+MAX_TABLE_ROW_SEGMENTS = 3_200
 
 
 def _rows_to_markdown_table(rows: list[list[str]]) -> str:
@@ -1128,9 +1130,14 @@ def build_table_segments_from_rows(
 def compact_table_segments_for_index(
     segments: list[ParsedSegment],
     *,
-    max_segments: int = 2400,
+    max_segments: int = MAX_TABLE_ROW_SEGMENTS,
+    max_chars_per_segment: int = MAX_TABLE_ROW_SEGMENT_CHARS,
 ) -> list[ParsedSegment]:
-    """索引前压缩过密的表格行 segment（兼容旧解析结果或未重启服务的情况）。"""
+    """索引前压缩过密的表格行 segment（兼容旧解析结果或未重启服务的情况）。
+
+    合并时同时受「段数上限」与「单段字符上限」约束：即便段数仍超标，也绝不把单段合并到
+    超过 max_chars_per_segment（保持在 embedding token 上限内，避免截断与超慢向量化）。
+    """
     if len(segments) <= max_segments:
         return segments
 
@@ -1153,6 +1160,11 @@ def compact_table_segments_for_index(
         row_segs.sort(key=lambda s: (s.metadata or {}).get("table_row_index", 0))
         n = len(row_segs)
         batch = max(1, (n + per_table_budget - 1) // per_table_budget)
+        # 字符上限优先：若按段数算出的 batch 会撑爆单段字符预算，则缩小 batch。
+        if batch > 1 and max_chars_per_segment > 0:
+            avg_row_chars = max(1, sum(len(s.text) for s in row_segs) // n)
+            batch_by_chars = max(1, max_chars_per_segment // avg_row_chars)
+            batch = min(batch, batch_by_chars)
         for i in range(0, n, batch):
             group = row_segs[i : i + batch]
             text = "\n".join(s.text for s in group if s.text.strip())

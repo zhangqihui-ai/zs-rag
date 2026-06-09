@@ -5,6 +5,8 @@ from app.core.enterprise_space_context import CurrentSpace, CurrentUser, Require
 from app.core.platform_audit_helper import audit_action
 from app.db.session import get_db
 from app.schemas.rag_evaluation import (
+    RagAgenticComparisonRequest,
+    RagAgenticComparisonResponse,
     RagBenchmarkCreate,
     RagBenchmarkResponse,
     RagEvaluationRunRequest,
@@ -105,6 +107,23 @@ def list_runs(
 ) -> list[RagEvaluationRunResponse]:
     return rag_evaluation_service.list_evaluation_runs(
         db, space_id=current_space.id, benchmark_id=benchmark_id
+    )
+
+
+@router.post("/benchmarks/{benchmark_id}/agentic-comparison", response_model=RagAgenticComparisonResponse)
+def compare_agentic_rag(
+    benchmark_id: int,
+    payload: RagAgenticComparisonRequest,
+    current_space: CurrentSpace,
+    _: RequireMembership,
+    db: Session = Depends(get_db),
+) -> RagAgenticComparisonResponse:
+    return rag_evaluation_service.compare_agentic_rag_with_baseline(
+        db,
+        space_id=current_space.id,
+        benchmark_id=benchmark_id,
+        retrieval_config=payload.retrieval_config,
+        agentic_config=payload.agentic_config,
     )
 
 

@@ -132,9 +132,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
+import { useEnterpriseSpaceChange } from '../composables/useEnterpriseSpaceChange'
 import { useAppStore } from '../stores/app'
 import { useAuthStore } from '../stores/auth'
 import {
@@ -155,8 +156,8 @@ const navItems = computed(() => {
   const items = [
     { to: '/', label: '首页仪表盘', caption: '平台概览', icon: 'dashboard' },
     { to: '/knowledge-bases', label: '知识库管理', caption: '资产配置', icon: 'knowledge' },
-    { to: '/retrieval', label: '知识检索', caption: '效果验证', icon: 'retrieval' },
-    { to: '/chat', label: '对话', caption: '知识助手', icon: 'chat' },
+    { to: '/retrieval', label: '知识检索', caption: '普通 / 智能', icon: 'retrieval' },
+    { to: '/chat', label: '聊天助手', caption: '智能对话', icon: 'chat' },
     { to: '/providers', label: '模型管理', caption: '模型供给', icon: 'models' },
   ] as Array<{ to: string; label: string; caption: string; icon: string }>
 
@@ -180,7 +181,7 @@ const currentPage = computed(() => ({
   title:
     layoutPageTitleOverride.value ||
     (route.meta.title as string) ||
-    navItems.value.find((item) => item.to === route.path)?.label ||
+    navItems.value.find((item) => item.to === route.path || route.path.startsWith(`${item.to}/`))?.label ||
     '工作台',
 }))
 
@@ -197,11 +198,11 @@ const breadcrumbs = computed(() => {
     const tail = layoutBreadcrumbTailOverride.value
     const chatHome = layoutChatHomeHandler.value
     if (tail && chatHome) {
-      items.push({ label: '对话', onClick: chatHome })
+      items.push({ label: '聊天助手', onClick: chatHome })
       items.push({ label: tail })
       return items
     }
-    items.push({ label: '对话' })
+    items.push({ label: '聊天助手' })
     return items
   }
 
@@ -224,21 +225,14 @@ const isChatEmbedPanel = computed(() => {
   const ep = route.query.embed_panel
   return ep === '1' || ep === 'true'
 })
-const spaceWatchReady = ref(false)
+const spaceScopedDetailRoutes = new Set(['knowledge-base-detail', 'knowledge-document-detail'])
 
-watch(
-  () => authStore.currentSpaceSlug,
-  (value, oldValue) => {
-    if (!spaceWatchReady.value) {
-      spaceWatchReady.value = true
-      return
-    }
-
-    if (value && oldValue && value !== oldValue) {
-      router.go(0)
-    }
-  },
-)
+useEnterpriseSpaceChange(() => {
+  const routeName = route.name
+  if (typeof routeName === 'string' && spaceScopedDetailRoutes.has(routeName)) {
+    void router.replace({ name: 'knowledge-bases' })
+  }
+}, { flush: 'sync' })
 
 const handleLogout = () => {
   authStore.logout()
@@ -668,8 +662,8 @@ button.app-breadcrumb-link {
   flex: 1 1 0%;
   min-height: 0;
   overflow: hidden;
-  /* 对话页主卡片更靠近标题区，与其它页 36px 顶距区分 */
-  padding: 14px 40px 40px;
+  /* 对话页略收紧边距，但保留足够左内边距避免侧栏文字被裁切 */
+  padding: 10px 24px 18px 18px;
 }
 
 .app-content-inner.app-content-inner--chat {

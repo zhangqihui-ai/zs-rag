@@ -167,6 +167,28 @@
               <textarea v-model.trim="form.description" class="textarea" maxlength="2000" placeholder="可选，描述用途与范围"></textarea>
             </label>
 
+            <label class="field">
+              <span class="field-label">Embedding 模型</span>
+              <div class="kb-embed-select-wrap">
+                <select
+                  v-model="formEmbeddingModelKey"
+                  class="select kb-embed-select"
+                  :disabled="embeddingModels.length === 0 && !embeddingDefault"
+                >
+                  <option value="">
+                    {{ embeddingDefaultOptionLabel }}
+                  </option>
+                  <option v-for="model in embeddingModels" :key="model.id" :value="String(model.id)">
+                    {{ model.model_name }}（{{ model.provider_name }}）
+                  </option>
+                </select>
+                <span class="kb-embed-select-arrow" aria-hidden="true">
+                  <AppIcon name="chevron-down" :size="14" />
+                </span>
+              </div>
+              <p class="field-hint">用于文档向量化与检索；未选择时使用企业空间默认模型。</p>
+            </label>
+
             <div class="field">
               <span class="field-label">知识库类型</span>
               <div class="kb-type-picker" role="radiogroup" aria-label="知识库类型">
@@ -274,6 +296,7 @@ import axios from 'axios'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
+
 import {
   getKnowledgeBaseErrorMessage,
   knowledgeBaseApi,
@@ -306,6 +329,7 @@ function kbStatusTone(status: string): string {
 const router = useRouter()
 
 const knowledgeBases = ref<KnowledgeBase[]>([])
+let knowledgeBaseLoadSeq = 0
 const searchTerm = ref('')
 const currentPage = ref(1)
 const pageSize = ref(12)
@@ -380,10 +404,24 @@ const openMenuId = ref<number | null>(null)
 const form = reactive({
   name: '',
   description: '',
+  embedding_model_id: null as number | null,
   kb_type: 'classic' as 'classic' | 'lightrag',
   vector_db_enabled: true,
   graph_db_enabled: false,
   status: 'active' as KnowledgeBase['status'],
+})
+
+const embeddingDefaultOptionLabel = computed(() => {
+  const name = embeddingDefault.value?.model_name?.trim()
+  return name ? `默认（${name}）` : '默认（工作区默认）'
+})
+
+const formEmbeddingModelKey = computed({
+  get: () => (form.embedding_model_id == null ? '' : String(form.embedding_model_id)),
+  set: (value: string) => {
+    const trimmed = value.trim()
+    form.embedding_model_id = trimmed ? Number(trimmed) : null
+  },
 })
 
 const needsEmbeddingProbeOnCreate = computed(() => {
@@ -476,6 +514,7 @@ const showNotice = (text: string, type: 'success' | 'error' = 'success') => {
 const resetForm = () => {
   form.name = ''
   form.description = ''
+  form.embedding_model_id = null
   form.kb_type = 'classic'
   form.vector_db_enabled = true
   form.graph_db_enabled = false
@@ -489,10 +528,14 @@ function displayKbName(kb: KnowledgeBase) {
 }
 
 const refreshKnowledgeBases = async () => {
+  const seq = ++knowledgeBaseLoadSeq
   loading.value = true
   error.value = ''
   try {
     const [raw] = await Promise.all([knowledgeBaseApi.list(), loadEmbeddingContext()])
+    if (seq !== knowledgeBaseLoadSeq) {
+      return
+    }
     const list = normalizeKnowledgeBaseList(raw)
     if (
       list.length === 0 &&
@@ -507,9 +550,14 @@ const refreshKnowledgeBases = async () => {
     }
     knowledgeBases.value = list
   } catch (value) {
+    if (seq !== knowledgeBaseLoadSeq) {
+      return
+    }
     error.value = getKnowledgeBaseErrorMessage(value, '加载知识库失败')
   } finally {
-    loading.value = false
+    if (seq === knowledgeBaseLoadSeq) {
+      loading.value = false
+    }
   }
 }
 
@@ -632,6 +680,7 @@ const openEditModal = (kb: KnowledgeBase) => {
   editingId.value = kb.id
   form.name = kb.name
   form.description = kb.description || ''
+  form.embedding_model_id = kb.embedding_model_id
   form.kb_type = (kb.kb_type === 'lightrag' ? 'lightrag' : 'classic') as 'classic' | 'lightrag'
   form.vector_db_enabled = kb.vector_db_enabled
   form.graph_db_enabled = kb.graph_db_enabled
@@ -670,6 +719,7 @@ const submitModal = async () => {
           ...createDefaults,
           name: form.name.trim(),
           description,
+          embedding_model_id: form.embedding_model_id,
           kb_type: form.kb_type,
           vector_db_enabled: form.kb_type === 'classic' ? form.vector_db_enabled : true,
           graph_db_enabled: form.kb_type === 'lightrag' ? true : form.graph_db_enabled,
@@ -689,6 +739,7 @@ const submitModal = async () => {
       await knowledgeBaseApi.update(editingId.value, {
         name: form.name.trim(),
         description,
+        embedding_model_id: form.embedding_model_id,
         vector_db_enabled: form.vector_db_enabled,
         graph_db_enabled: form.graph_db_enabled,
         status: form.status,
@@ -1256,6 +1307,24 @@ onBeforeUnmount(() => {
   color: var(--text-tertiary);
   font-size: 0.82rem;
   line-height: 1.5;
+}
+
+.kb-embed-select-wrap {
+  position: relative;
+}
+
+.kb-embed-select {
+  appearance: none;
+  padding-right: 40px;
+}
+
+.kb-embed-select-arrow {
+  position: absolute;
+  top: 50%;
+  right: 14px;
+  transform: translateY(-50%);
+  color: var(--text-tertiary);
+  pointer-events: none;
 }
 
 @media (max-width: 640px) {

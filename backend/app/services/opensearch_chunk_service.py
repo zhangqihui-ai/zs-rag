@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Any
 
 import httpx
@@ -16,6 +17,11 @@ from app.models.knowledge_base import KnowledgeChunk, KnowledgeDocument, Knowled
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+# 单次 _bulk 条数过大易触发 OpenSearch circuit breaker（429）
+OPENSEARCH_BULK_BATCH_SIZE = 40
+OPENSEARCH_BULK_MAX_RETRIES = 5
+OPENSEARCH_BULK_RETRY_BASE_SEC = 2.0
 
 # 问句里高频、单独命中会污染结果的中文词（不要求命中）
 _CN_QUERY_NOISE: frozenset[str] = frozenset(
@@ -288,6 +294,68 @@ def delete_by_knowledge_base_id(knowledge_base_id: int, *, client: httpx.Client 
             c.close()
 
 
+def _chunk_bulk_doc(*, idx: str, document_name: str, ch: KnowledgeChunk) -> tuple[str, str]:
+    action = json.dumps({"index": {"_index": idx, "_id": ch.chunk_uid}}, ensure_ascii=False)
+    kw = (ch.keyword_text or ch.content or "").strip()
+    chunk_meta = ch.metadata_json if isinstance(ch.metadata_json, dict) else {}
+    doc_body: dict[str, Any] = {
+        "chunk_uid": ch.chunk_uid,
+        "chunk_id": int(ch.id),
+        "enterprise_space_id": int(ch.enterprise_space_id),
+        "knowledge_base_id": int(ch.knowledge_base_id),
+        "document_id": int(ch.document_id),
+        "document_name": document_name,
+        "chunk_index": int(ch.chunk_index),
+        "page_no": int(ch.page_no) if ch.page_no is not None else None,
+        "keyword_text": kw,
+        "content": (ch.content or "")[:200_000],
+    }
+    block = chunk_meta.get("block")
+    if block:
+        doc_body["block"] = str(block)
+    chunk_role = chunk_meta.get("chunk_role")
+    if chunk_role:
+        doc_body["chunk_role"] = str(chunk_role)
+    if doc_body["page_no"] is None:
+        del doc_body["page_no"]
+    return action, json.dumps(doc_body, ensure_ascii=False)
+
+
+def _post_bulk_ndjson(client: httpx.Client, lines: list[str]) -> None:
+    payload = ("\n".join(lines) + "\n").encode("utf-8")
+    last_response: httpx.Response | None = None
+    for attempt in range(OPENSEARCH_BULK_MAX_RETRIES):
+        r = client.post(
+            "/_bulk",
+            content=payload,
+            headers={"Content-Type": "application/x-ndjson"},
+        )
+        last_response = r
+        if r.status_code == 429:
+            if attempt < OPENSEARCH_BULK_MAX_RETRIES - 1:
+                wait = OPENSEARCH_BULK_RETRY_BASE_SEC * (2**attempt)
+                logger.warning(
+                    "OpenSearch bulk 429，%ss 后重试 (%s/%s)",
+                    wait,
+                    attempt + 1,
+                    OPENSEARCH_BULK_MAX_RETRIES,
+                )
+                time.sleep(wait)
+                continue
+            break
+        r.raise_for_status()
+        data = r.json()
+        if data.get("errors"):
+            for item in data.get("items") or []:
+                err = item.get("index", {}).get("error")
+                if err:
+                    logger.warning("OpenSearch bulk item error: %s", err)
+                    break
+        return
+    if last_response is not None:
+        last_response.raise_for_status()
+
+
 def bulk_upsert_chunks(
     *,
     document_name: str,
@@ -301,47 +369,14 @@ def bulk_upsert_chunks(
     c = client or _client(timeout=120.0)
     try:
         ensure_chunk_index(client=c)
-        lines: list[str] = []
-        for ch in chunks:
-            action = {"index": {"_index": idx, "_id": ch.chunk_uid}}
-            kw = (ch.keyword_text or ch.content or "").strip()
-            chunk_meta = ch.metadata_json if isinstance(ch.metadata_json, dict) else {}
-            doc = {
-                "chunk_uid": ch.chunk_uid,
-                "chunk_id": int(ch.id),
-                "enterprise_space_id": int(ch.enterprise_space_id),
-                "knowledge_base_id": int(ch.knowledge_base_id),
-                "document_id": int(ch.document_id),
-                "document_name": document_name,
-                "chunk_index": int(ch.chunk_index),
-                "page_no": int(ch.page_no) if ch.page_no is not None else None,
-                "keyword_text": kw,
-                "content": (ch.content or "")[:200_000],
-            }
-            block = chunk_meta.get("block")
-            if block:
-                doc["block"] = str(block)
-            chunk_role = chunk_meta.get("chunk_role")
-            if chunk_role:
-                doc["chunk_role"] = str(chunk_role)
-            if doc["page_no"] is None:
-                del doc["page_no"]
-            lines.append(json.dumps(action, ensure_ascii=False))
-            lines.append(json.dumps(doc, ensure_ascii=False))
-        payload = ("\n".join(lines) + "\n").encode("utf-8")
-        r = c.post(
-            "/_bulk",
-            content=payload,
-            headers={"Content-Type": "application/x-ndjson"},
-        )
-        r.raise_for_status()
-        data = r.json()
-        if data.get("errors"):
-            for item in data.get("items") or []:
-                err = item.get("index", {}).get("error")
-                if err:
-                    logger.warning("OpenSearch bulk item error: %s", err)
-                    break
+        batch_size = max(1, OPENSEARCH_BULK_BATCH_SIZE)
+        for start in range(0, len(chunks), batch_size):
+            batch = chunks[start : start + batch_size]
+            lines: list[str] = []
+            for ch in batch:
+                action, doc_line = _chunk_bulk_doc(idx=idx, document_name=document_name, ch=ch)
+                lines.extend([action, doc_line])
+            _post_bulk_ndjson(c, lines)
     except httpx.HTTPError as e:
         logger.warning("OpenSearch bulk_upsert_chunks failed: %s", e)
     finally:

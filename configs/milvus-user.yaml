@@ -1,0 +1,6 @@
+# Milvus 用户配置（挂载为 /milvus/configs/user.yaml）
+# 解决 LightRAG 大批量 upsert 时 gRPC 报 RESOURCE_EXHAUSTED（默认 64MB 上限）。
+proxy:
+  grpc:
+    serverMaxRecvSize: 268435456
+    clientMaxRecvSize: 268435456

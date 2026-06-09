@@ -583,7 +583,10 @@ export function useDocumentParseTasks(kbId: () => number | undefined) {
     }
   }
 
-  async function cancelTask(documentId: number): Promise<KnowledgeDocument | null> {
+  async function cancelTask(
+    documentId: number,
+    preservePartial = false,
+  ): Promise<KnowledgeDocument | null> {
     const id = resolveKbId()
     if (id == null) {
       return null
@@ -599,7 +602,7 @@ export function useDocumentParseTasks(kbId: () => number | undefined) {
     }
 
     try {
-      const doc = await cancelDocumentProcess(id, documentId)
+      const doc = await cancelDocumentProcess(id, documentId, preservePartial)
       if (task) {
         task.status = 'cancelled'
         appendLog(documentId, '【已取消】用户停止了解析')

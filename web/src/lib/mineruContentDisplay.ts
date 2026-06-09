@@ -1,6 +1,8 @@
 /** MinerU content_list 条目：用于按页 Markdown 与 PDF 框选联动（与后端 mineru_gateway 过滤大致一致） */
 
 import type { KnowledgeChunk } from '../api/knowledge-base'
+import { tableBlockPreviewHtml } from './docxContentDisplay'
+import { enrichTableHtmlForDisplay, tableCellHtml } from './tableHtmlDisplay'
 
 export type MineruContentItem = Record<string, unknown> & { _index?: number }
 
@@ -27,7 +29,7 @@ function gridToHtmlTable(rows: string[][], headerRows = 1): string {
     const cells = [...row, ...Array(Math.max(0, width - row.length)).fill('')]
     for (const cell of cells) {
       const tag = ri < headerRows ? 'th' : 'td'
-      parts.push(`<${tag}>${escapeHtml(cell)}</${tag}>`)
+      parts.push(tableCellHtml(tag, cell))
     }
     parts.push('</tr>')
   })
@@ -381,6 +383,53 @@ export function chunkTableHtml(
 
 export function chunkShowsTableView(chunk: KnowledgeChunk, items: MineruContentItem[]): boolean {
   return chunkTableHtml(chunk, items).length > 0
+}
+
+/** 是否为表格类切片（Excel 行块或 MinerU 表格块）。 */
+export function isTableKnowledgeChunk(chunk: {
+  content?: string | null
+  metadata?: Record<string, unknown> | null
+  citation?: { block?: string | null }
+}): boolean {
+  const meta = chunk.metadata
+  if (meta && typeof meta === 'object' && meta.block === 'table') {
+    return true
+  }
+  const citeBlock = chunk.citation?.block
+  if (citeBlock === 'table') {
+    return true
+  }
+  const content = (chunk.content || '').trim()
+  return content.length > 0 && content.includes('：') && content.includes('；')
+}
+
+/**
+ * 解析切片可渲染的表格 HTML（检索详情、文档详情共用）。
+ * 优先 metadata / content_list；否则将「列名：值；…」降级为两列表格。
+ */
+export function resolveChunkTableHtml(
+  chunk: KnowledgeChunk,
+  items: MineruContentItem[] = [],
+): string {
+  const html = chunkTableHtml(chunk, items)
+  if (html) {
+    return enrichTableHtmlForDisplay(html)
+  }
+  if (!isTableKnowledgeChunk(chunk)) {
+    return ''
+  }
+  const content = (chunk.content || '').trim()
+  if (!content) {
+    return ''
+  }
+  return enrichTableHtmlForDisplay(
+    tableBlockPreviewHtml({
+      block_index: 0,
+      block: 'table',
+      type: 'table',
+      text: content,
+    }),
+  )
 }
 
 /**

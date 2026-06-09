@@ -1,5 +1,26 @@
 import { http } from '../lib/http'
 
+export type RagMode = 'classic' | 'agentic'
+
+export interface AgentTraceEvent {
+  step: string
+  elapsed_ms?: number | null
+  decision?: string | null
+  reason?: string | null
+  query?: string | null
+  total?: number | null
+  iteration?: number | null
+  relevant_count?: number | null
+  from?: string | null
+  to?: string | null
+  citation_count?: number | null
+  answer_chars?: number | null
+  confidence?: string | null
+  route_pass?: number | null
+  pre_retrieve_total?: number | null
+  kb_context_chars?: number | null
+}
+
 /** 对话（1 个 chat 下多个 session） */
 export interface ChatConversation {
   id: string
@@ -32,6 +53,9 @@ export interface ChatConversation {
   suggest_next_questions_model_id?: number | null
   suggest_next_questions_prompt_mode?: 'system' | 'custom'
   suggest_next_questions_custom_prompt?: string | null
+  rag_mode?: RagMode
+  agentic_max_iterations?: number
+  agentic_min_relevant_docs?: number
 }
 
 export interface ChatSession {
@@ -72,6 +96,9 @@ export interface ChatConfiguration {
   suggest_next_questions_model_id?: number | null
   suggest_next_questions_prompt_mode?: 'system' | 'custom'
   suggest_next_questions_custom_prompt?: string | null
+  rag_mode?: RagMode
+  agentic_max_iterations?: number
+  agentic_min_relevant_docs?: number
 }
 
 /** 助手消息保存的知识库引文（与正文中的 [1]、[2] 角标对应） */
@@ -97,6 +124,7 @@ export interface ChatMessage {
   content: string
   created_at: string
   citations?: ChatCitation[]
+  agent_trace?: AgentTraceEvent[]
 }
 
 /** 对话（chat）CRUD 与下辖会话列表：/api/v1/chats */

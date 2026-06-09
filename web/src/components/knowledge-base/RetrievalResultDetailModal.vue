@@ -3,7 +3,10 @@
     <div v-if="open" class="retrieval-chunk-modal-overlay" role="presentation" @click.self="emit('close')">
       <div
         class="retrieval-chunk-modal"
-        :class="{ 'retrieval-chunk-modal--wide': showPdfPreview }"
+        :class="{
+          'retrieval-chunk-modal--wide': showPdfPreview && !isFullscreen,
+          'retrieval-chunk-modal--fullscreen': isFullscreen,
+        }"
         role="dialog"
         aria-modal="true"
         aria-labelledby="retrieval-chunk-modal-title"
@@ -17,9 +20,19 @@
               {{ result.document_name }} · {{ chunkLabel }}
             </p>
           </div>
-          <button type="button" class="icon-button" aria-label="关闭" @click="emit('close')">
-            <AppIcon name="close" :size="18" />
-          </button>
+          <div class="retrieval-chunk-modal-head-actions">
+            <button
+              type="button"
+              class="icon-button"
+              :aria-label="isFullscreen ? '退出全屏' : '全屏查看'"
+              @click="isFullscreen = !isFullscreen"
+            >
+              <AppIcon :name="isFullscreen ? 'fullscreen-exit' : 'fullscreen'" :size="18" />
+            </button>
+            <button type="button" class="icon-button" aria-label="关闭" @click="emit('close')">
+              <AppIcon name="close" :size="18" />
+            </button>
+          </div>
         </header>
 
         <div class="retrieval-chunk-modal-body">
@@ -66,7 +79,13 @@
                 >
                   已省略前后文。
                 </p>
-                <div v-if="excerptHtml" class="retrieval-chunk-excerpt" v-html="excerptHtml" />
+                <p v-if="tableContextPrefix" class="retrieval-chunk-table-prefix">{{ tableContextPrefix }}</p>
+                <ChunkDataTableDisplay
+                  v-if="excerptTableHtml"
+                  :html="excerptTableHtml"
+                  wrap-class="retrieval-chunk-excerpt-table"
+                />
+                <div v-else-if="excerptHtml" class="retrieval-chunk-excerpt" v-html="excerptHtml" />
                 <p v-else class="retrieval-chunk-note">暂无原文片段</p>
               </template>
             </section>
@@ -87,7 +106,12 @@
 
             <section class="retrieval-chunk-section">
               <h4>入库切片正文</h4>
-              <pre class="retrieval-chunk-content">{{ displayContent }}</pre>
+              <ChunkDataTableDisplay
+                v-if="chunkTableDisplayHtml"
+                :html="chunkTableDisplayHtml"
+                wrap-class="retrieval-chunk-content-table"
+              />
+              <pre v-else class="retrieval-chunk-content">{{ displayContent }}</pre>
             </section>
           </template>
         </div>
@@ -111,8 +135,14 @@ import type {
 } from '../../api/knowledge-base'
 import { knowledgeBaseApi } from '../../api/knowledge-base'
 import { findMineruBlocksForChunk } from '../../lib/documentCitationFocus'
+import { tableBlockPreviewHtml } from '../../lib/docxContentDisplay'
 import { renderExcerptHtml } from '../../lib/excerptRender'
-import type { MineruContentItem } from '../../lib/mineruContentDisplay'
+import {
+  chunkTableContextPrefix,
+  isTableKnowledgeChunk,
+  resolveChunkTableHtml,
+  type MineruContentItem,
+} from '../../lib/mineruContentDisplay'
 import {
   formatSearchScore,
   searchResultBlockLabel,
@@ -123,6 +153,7 @@ import {
   searchResultQuestions,
 } from '../../lib/retrieval-result-display'
 import AppIcon from '../AppIcon.vue'
+import ChunkDataTableDisplay from './ChunkDataTableDisplay.vue'
 
 const DocumentPdfMineruLayout = defineAsyncComponent(() => import('../DocumentPdfMineruLayout.vue'))
 
@@ -138,6 +169,7 @@ const emit = defineEmits<{
 
 const loading = ref(false)
 const loadError = ref('')
+const isFullscreen = ref(false)
 const loadedChunk = ref<KnowledgeChunk | null>(null)
 const sourceContext = ref<ChunkSourceContext | null>(null)
 const documentInfo = ref<KnowledgeDocument | null>(null)
@@ -165,10 +197,88 @@ const questions = computed(() => (props.result ? searchResultQuestions(props.res
 const charCount = computed(() => loadedChunk.value?.char_count ?? props.result?.char_count ?? null)
 const displayContent = computed(() => loadedChunk.value?.content ?? props.result?.content ?? '')
 
+const tableChunkSource = computed((): KnowledgeChunk | null => {
+  if (loadedChunk.value) {
+    return loadedChunk.value
+  }
+  const result = props.result
+  if (!result) {
+    return null
+  }
+  return {
+    id: result.chunk_id,
+    knowledge_base_id: result.knowledge_base_id ?? resolveKbId() ?? 0,
+    document_id: result.document_id,
+    chunk_index: result.chunk_index,
+    chunk_uid: result.chunk_uid,
+    content: result.content,
+    char_count: result.char_count,
+    page_no: result.citation.page_no,
+    heading_path: result.heading_path,
+    start_offset: result.start_offset,
+    end_offset: result.end_offset,
+    metadata: result.metadata,
+    enrichment_keywords: result.enrichment_keywords,
+    enrichment_questions: result.enrichment_questions,
+  } as KnowledgeChunk
+})
+
+const showsTableView = computed(() => {
+  const chunk = tableChunkSource.value
+  if (!chunk) {
+    return false
+  }
+  return isTableKnowledgeChunk({
+    content: chunk.content,
+    metadata: chunk.metadata,
+    citation: props.result?.citation,
+  })
+})
+
+const chunkTableDisplayHtml = computed(() => {
+  const chunk = tableChunkSource.value
+  if (!chunk || !showsTableView.value) {
+    return ''
+  }
+  return resolveChunkTableHtml(chunk, mineruItems.value)
+})
+
+const tableContextPrefix = computed(() => {
+  const chunk = loadedChunk.value
+  return chunk ? chunkTableContextPrefix(chunk) : ''
+})
+
 const excerptHtml = computed(() => {
+  if (showsTableView.value) {
+    return ''
+  }
   const ctx = sourceContext.value
   if (!ctx || !ctx.text) return ''
   return renderExcerptHtml(ctx.text, ctx.highlight_start, ctx.highlight_end)
+})
+
+const excerptTableHtml = computed(() => {
+  if (!showsTableView.value) {
+    return ''
+  }
+  const chunk = tableChunkSource.value
+  if (chunk) {
+    const fromChunk = resolveChunkTableHtml(chunk, mineruItems.value)
+    if (fromChunk) {
+      return fromChunk
+    }
+  }
+  const ctx = sourceContext.value
+  const text = ctx?.text?.trim() || displayContent.value.trim()
+  if (!text) {
+    return ''
+  }
+  return tableBlockPreviewHtml({
+    block_index: 0,
+    block: 'table',
+    type: 'table',
+    text,
+  })
 })
 
 function resolveKbId() {
@@ -184,11 +294,22 @@ function resetState() {
   pdfActiveIndex.value = null
   pdfFocusPage.value = null
   loadError.value = ''
+  isFullscreen.value = false
 }
 
 async function loadMineruItems(kbId: number, documentId: number): Promise<MineruContentItem[]> {
   try {
     const raw = await knowledgeBaseApi.getDocumentMineruContentListText(kbId, documentId)
+    const parsed = JSON.parse(raw) as unknown
+    return Array.isArray(parsed) ? (parsed as MineruContentItem[]) : []
+  } catch {
+    return []
+  }
+}
+
+async function loadOfficeContentList(kbId: number, documentId: number): Promise<MineruContentItem[]> {
+  try {
+    const raw = await knowledgeBaseApi.getDocumentDocxContentListText(kbId, documentId)
     const parsed = JSON.parse(raw) as unknown
     return Array.isArray(parsed) ? (parsed as MineruContentItem[]) : []
   } catch {
@@ -230,7 +351,8 @@ async function loadChunkDetail() {
     loadedChunk.value = chunk
     documentInfo.value = document
 
-    if ((document.file_ext || '').toLowerCase() === 'pdf') {
+    const ext = (document.file_ext || '').toLowerCase()
+    if (ext === 'pdf') {
       const items = await loadMineruItems(kbId, document.id)
       mineruItems.value = items
       if (items.length) {
@@ -240,6 +362,8 @@ async function loadChunkDetail() {
         pdfActiveIndex.value = firstBlock
         pdfFocusPage.value = resolvePdfFocusPage(chunk, firstBlock, items)
       }
+    } else if (showsTableView.value && ['xls', 'xlsx', 'xlsm', 'docx', 'csv'].includes(ext)) {
+      mineruItems.value = await loadOfficeContentList(kbId, document.id)
     }
 
     if (!showPdfPreview.value) {
@@ -302,6 +426,19 @@ watch(
 
 .retrieval-chunk-modal--wide {
   width: min(1040px, calc(100vw - 32px));
+}
+
+.retrieval-chunk-modal--fullscreen {
+  width: calc(100vw - 24px);
+  height: calc(100vh - 24px);
+  max-height: none;
+}
+
+.retrieval-chunk-modal-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
 .retrieval-chunk-pdf-wrap {
@@ -400,6 +537,38 @@ watch(
   color: var(--text-primary);
   max-height: 280px;
   overflow: auto;
+}
+
+.retrieval-chunk-modal--fullscreen .retrieval-chunk-content,
+.retrieval-chunk-modal--fullscreen .retrieval-chunk-excerpt {
+  max-height: none;
+  flex: 1;
+  min-height: 200px;
+}
+
+.retrieval-chunk-modal--fullscreen :deep(.retrieval-chunk-content-table),
+.retrieval-chunk-modal--fullscreen :deep(.retrieval-chunk-excerpt-table) {
+  max-height: min(50vh, 520px);
+}
+
+.retrieval-chunk-modal--fullscreen :deep(.chunk-data-table-cell-detail-body) {
+  max-height: min(36vh, 360px);
+}
+
+.retrieval-chunk-table-prefix {
+  margin: 0 0 10px;
+  color: var(--text-secondary);
+  font-size: 0.86rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.retrieval-chunk-content-table {
+  max-height: min(480px, 55vh);
+}
+
+.retrieval-chunk-excerpt-table {
+  max-height: min(380px, 45vh);
 }
 
 .retrieval-chunk-excerpt {

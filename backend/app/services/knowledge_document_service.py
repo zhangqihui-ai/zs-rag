@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.document_parser import (
+    MAX_TABLE_ROW_SEGMENTS,
     ParsedDocument,
     ParsedSegment,
     UnsupportedDocumentError,
@@ -26,7 +27,7 @@ from app.core.document_parser import (
     validate_parsed_document_for_indexing,
 )
 from app.db.session import SessionLocal, ensure_db_connection
-from app.core.embedding_gateway import generate_embeddings
+from app.core.embedding_gateway import generate_embeddings, resolve_embedding_concurrency
 from app.core.chunking_engine import (
     apply_general_chunking,
     apply_parent_child_chunking,
@@ -136,7 +137,7 @@ def _persist_parse_view_artifacts(*, parsed, file_path: Path) -> None:
     parent = file_path.parent
     backend = meta.get("parser_backend")
 
-    if parsed.parser_type == "docx" and backend != "mineru":
+    if parsed.parser_type in {"docx", "doc"} and backend != "mineru":
         view = persist_docx_view_artifacts(segments=parsed.segments or [], file_path_parent=parent)
         meta["parse_view"] = view
         meta["docx_view"] = view
@@ -440,6 +441,32 @@ def _storage_path_for(document: KnowledgeDocument) -> Path:
     return STORAGE_ROOT / str(document.enterprise_space_id) / str(document.knowledge_base_id) / str(document.id) / f"original{extension}"
 
 
+WORD_PREVIEW_DOCX_FILENAME = "word_preview.docx"
+
+
+def resolve_word_preview_docx_path(document: KnowledgeDocument) -> Path:
+    """返回可用于浏览器预览的 docx 路径：.docx 为原文件，.doc 经 LibreOffice 转换并缓存。"""
+    original = resolve_original_file_path(document)
+    if not original:
+        raise AppError(status_code=404, code="DOCUMENT_FILE_NOT_FOUND", message="原始文件不存在")
+    ext = (document.file_ext or "").strip().lower().lstrip(".")
+    if ext == "docx":
+        return original
+    if ext != "doc":
+        raise AppError(status_code=400, code="UNSUPPORTED_PREVIEW", message="该文件类型不支持 Word 预览")
+    cache = original.parent / WORD_PREVIEW_DOCX_FILENAME
+    try:
+        if cache.is_file() and cache.stat().st_mtime >= original.stat().st_mtime:
+            return cache
+    except OSError:
+        pass
+    from app.core.doc_conversion import convert_doc_to_docx_bytes
+
+    docx_bytes = convert_doc_to_docx_bytes(original.read_bytes(), source_name=document.file_name or "document.doc")
+    cache.write_bytes(docx_bytes)
+    return cache
+
+
 def resolve_original_file_path(document: KnowledgeDocument) -> Path | None:
     """
     定位磁盘上的原始上传文件。
@@ -563,6 +590,7 @@ def serialize_document(
         "upload_skipped": upload_skipped,
         "skip_reason": skip_reason,
         "last_parsed_at": _document_last_parsed_at(document),
+        "resumable": _document_has_resume_marker(document),
         "created_at": document.created_at,
         "updated_at": document.updated_at,
     }
@@ -1342,7 +1370,9 @@ def _build_chunk_candidates_from_parsed(
     if not chunk_candidates:
         emit("分块结果为空")
         raise AppError(status_code=400, code="DOCUMENT_CHUNK_EMPTY", message="文档分块结果为空")
-    max_indexable_chunks = 2500
+    # 上限需与宽表分段上限（MAX_TABLE_ROW_SEGMENTS）对齐并留余量，
+    # 否则按行切分的大 Excel（≤6500 字/段，约 2700~3200 段）会被误判为分块爆炸。
+    max_indexable_chunks = max(2500, MAX_TABLE_ROW_SEGMENTS + 400)
     if len(chunk_candidates) > max_indexable_chunks:
         backend = str((parsed.metadata or {}).get("parser_backend") or "")
         emit(
@@ -1544,10 +1574,12 @@ def _persist_parse_chunks_to_db(
             else:
                 emit(msg)
 
+        embedding_concurrency = resolve_embedding_concurrency(knowledge_base.config)
         vectors = generate_embeddings(
             embedding_model,
             [(c.keyword_text or c.content) for c in chunk_records],
             batch_size=batch_size,
+            max_concurrency=embedding_concurrency,
             on_batch_start=_embedding_batch_start,
             on_progress=_embedding_progress,
         )
@@ -1721,14 +1753,59 @@ def _index_document_lightrag(
     if log_kind == "reindex":
         try:
             emit("重建索引：先删除 LightRAG 中旧文档图谱…")
-            lightrag_delete_document(db, knowledge_base=knowledge_base, document=document)
+            lightrag_delete_document(
+                db,
+                knowledge_base=knowledge_base,
+                document=document,
+                wait_removed=True,
+            )
+            emit("旧图谱已删除，开始重新入库…")
         except AppError as exc:
             if exc.code not in ("LIGHTRAG_QUERY_FAILED",):
                 emit(f"删除旧图谱警告：{exc.message}")
 
     try:
         emit("LightRAG 实体抽取与图谱入库中，约需数分钟，请耐心等待…")
-        emit(f"调用 LightRAG ainsert，文本长度 {len(parsed_text)} 字符…")
+        from app.services.lightrag_engine import (
+            get_lightrag_config,
+            resolve_lightrag_index_chunk_mode,
+            resolve_lightrag_prechunk_min_chars,
+            should_use_lightrag_prechunks,
+        )
+
+        lgr_cfg = get_lightrag_config(knowledge_base)
+        index_chunk_mode = resolve_lightrag_index_chunk_mode(lgr_cfg)
+        prechunk_min_chars = resolve_lightrag_prechunk_min_chars(lgr_cfg)
+        prechunk_texts = [str(c.content).strip() for c in chunk_candidates if str(c.content).strip()]
+        if index_chunk_mode == "reuse_parse" and not prechunk_texts:
+            raise AppError(
+                status_code=400,
+                code="LIGHTRAG_PRECHUNK_EMPTY",
+                message="解析块为空，无法图谱入库（index_chunk_mode=reuse_parse）",
+            )
+        use_prechunks = should_use_lightrag_prechunks(
+            parsed_text,
+            prechunk_texts,
+            index_chunk_mode=index_chunk_mode,
+            prechunk_min_chars=prechunk_min_chars,
+        )
+        prechunk_chars = sum(len(item) for item in prechunk_texts)
+        emit(
+            f"LightRAG 索引：parse_chunks={len(prechunk_texts)}, index_mode={index_chunk_mode}, "
+            f"use_prechunks={use_prechunks}, prechunk_chars={prechunk_chars}, text_chars={len(parsed_text)}"
+        )
+        if use_prechunks:
+            emit(
+                f"调用 LightRAG ainsert，复用解析切片 {len(prechunk_texts)} 段作索引大段"
+                f"（已启用 prechunk 边界入库，原文字符 {len(parsed_text)}）…"
+            )
+        elif prechunk_texts:
+            emit(
+                f"调用 LightRAG ainsert，小文档走原生分块（解析切片 {len(prechunk_texts)} 段仅作预览，"
+                f"原文字符 {len(parsed_text)}）…"
+            )
+        else:
+            emit(f"调用 LightRAG ainsert，文本长度 {len(parsed_text)} 字符…")
 
         def _lightrag_progress(phase: str, current: int | None, total: int | None, message: str) -> None:
             if phase == "queued":
@@ -1741,6 +1818,7 @@ def _index_document_lightrag(
             knowledge_base=knowledge_base,
             document=document,
             text=parsed_text,
+            text_chunks=prechunk_texts if use_prechunks else None,
             on_progress=emit,
             on_structured_progress=_lightrag_progress,
             cancel_event=cancel_event,
@@ -1765,6 +1843,114 @@ def _index_document_lightrag(
     _progress(
         "done",
         message=f"完成：状态=图谱已就绪（graph_indexed），chunk_count={document.chunk_count}",
+    )
+    return serialize_document(document)
+
+
+def _resume_index_document_lightrag(
+    db: Session,
+    *,
+    knowledge_base: KnowledgeBase,
+    document: KnowledgeDocument,
+    emit: Callable[[str], None] | None = None,
+    emit_progress: Callable[..., None] | None = None,
+    cancel_event: threading.Event | None = None,
+) -> dict[str, Any]:
+    """续传入库：复用 knowledge_chunk 已切片内容，跳过重新解析。
+
+    - 不清空 knowledge_chunk / Milvus 向量 / LightRAG 抽取缓存；
+    - 向量经 embedding 缓存命中"秒回"，不重算；
+    - 实体抽取命中 LightRAG llm_response_cache（keep_cache），仅失败/新段重抽。
+    """
+    from app.services.lightrag_engine import (
+        insert_document as lightrag_insert_document,
+        lightrag_document_chunk_count,
+    )
+
+    _emit = emit or (lambda _msg: None)
+    log_lines: list[dict[str, str]] = [
+        {"t": _utc_now_iso(), "text": "继续解析：检测到可续传态，复用已切片/已向量化内容"}
+    ]
+
+    def _progress(phase: str, *, current: int | None = None, total: int | None = None, message: str = "") -> None:
+        check_cancelled(cancel_event)
+        if emit_progress:
+            emit_progress(phase=phase, current=current, total=total, message=message)
+        if message:
+            if len(log_lines) < MAX_PARSE_LOG_LINES:
+                log_lines.append({"t": _utc_now_iso(), "text": message})
+            _emit(message)
+
+    rows = db.execute(
+        select(KnowledgeChunk)
+        .where(KnowledgeChunk.document_id == document.id)
+        .order_by(KnowledgeChunk.chunk_index.asc())
+    ).scalars().all()
+    prechunk_texts = [str(row.content).strip() for row in rows if str(row.content).strip()]
+    if not prechunk_texts:
+        # 没有可复用切片：清掉续传标记，回退为常规重新解析
+        _clear_document_resume_marker(document)
+        db.commit()
+        db.refresh(document)
+        raise AppError(
+            status_code=400,
+            code="RESUME_NO_CHUNKS",
+            message="未找到可复用的已切片内容，请改用「重新解析」",
+        )
+
+    _progress(
+        "graph_indexing",
+        message=f"续传：复用已切片 {len(prechunk_texts)} 段，跳过重新解析，复用已向量化向量与实体抽取缓存…",
+    )
+
+    document.status = KnowledgeDocumentStatus.GRAPH_INDEXING.value
+    document.error_message = None
+    db.commit()
+    db.refresh(document)
+
+    # 复用切片仅需 text_chunks；text 仅用于 use_prechunks 判定（按总长度）。
+    # 这里用普通换行拼接而非 prechunk 边界标记，避免万一走原生分块时标记泄漏进正文。
+    reconstructed_text = "\n\n".join(prechunk_texts)
+
+    def _lightrag_progress(phase: str, current: int | None, total: int | None, message: str) -> None:
+        if phase == "queued":
+            _progress("queued", message=message)
+        else:
+            _progress("graph_indexing", current=current, total=total, message=message)
+
+    try:
+        lightrag_insert_document(
+            db,
+            knowledge_base=knowledge_base,
+            document=document,
+            text=reconstructed_text,
+            text_chunks=prechunk_texts,
+            on_progress=_emit,
+            on_structured_progress=_lightrag_progress,
+            cancel_event=cancel_event,
+            resume=True,
+        )
+    except DocumentProcessCancelled:
+        raise
+    except AppError:
+        raise
+    except Exception as exc:
+        raise AppError(
+            status_code=502,
+            code="LIGHTRAG_INSERT_FAILED",
+            message=f"LightRAG 续传入库失败：{exc}",
+        ) from exc
+
+    check_cancelled(cancel_event)
+    document.chunk_count = lightrag_document_chunk_count(knowledge_base, document)
+    document.status = KnowledgeDocumentStatus.GRAPH_INDEXED.value
+    _clear_document_resume_marker(document)
+    document.parse_log_json = _build_parse_log_payload("parse", "success", log_lines)
+    db.commit()
+    db.refresh(document)
+    _progress(
+        "done",
+        message=f"续传完成：状态=图谱已就绪（graph_indexed），chunk_count={document.chunk_count}",
     )
     return serialize_document(document)
 
@@ -2199,6 +2385,20 @@ def process_document(
             code="DOCUMENT_NOT_PARSEABLE",
             message="仅「待解析」「失败」或中断后的解析中文档可开始解析；已完成请使用「重建索引」",
         )
+    # 续传：图知识库且处于可续传态时，复用已切片/已向量化内容，跳过重新解析
+    if (
+        knowledge_base.kb_type == KnowledgeBaseType.LIGHTRAG.value
+        and _document_has_resume_marker(document)
+    ):
+        return _resume_index_document_lightrag(
+            db,
+            knowledge_base=knowledge_base,
+            document=document,
+            emit=emit,
+            emit_progress=emit_progress,
+            cancel_event=cancel_event,
+        )
+
     if document.status in _STUCK_STATUSES or document.status in (
         KnowledgeDocumentStatus.FAILED.value,
         KnowledgeDocumentStatus.GRAPH_FAILED.value,
@@ -2290,6 +2490,35 @@ def reindex_document(
     )
 
 
+_RESUME_METADATA_KEY = "resume"
+
+
+def _document_has_resume_marker(document: KnowledgeDocument) -> bool:
+    """文档是否处于"可续传"态（取消时保留了切片/向量/抽取缓存）。"""
+    meta = document.metadata_json
+    if not isinstance(meta, dict):
+        return False
+    resume = meta.get(_RESUME_METADATA_KEY)
+    return isinstance(resume, dict) and bool(resume.get("chunks_preserved"))
+
+
+def _set_document_resume_marker(document: KnowledgeDocument, *, chunk_count: int) -> None:
+    base = dict(document.metadata_json) if isinstance(document.metadata_json, dict) else {}
+    base[_RESUME_METADATA_KEY] = {
+        "chunks_preserved": True,
+        "chunk_count": int(chunk_count),
+        "preserved_at": _utc_now_iso(),
+    }
+    document.metadata_json = base
+
+
+def _clear_document_resume_marker(document: KnowledgeDocument) -> None:
+    meta = document.metadata_json
+    if not isinstance(meta, dict) or _RESUME_METADATA_KEY not in meta:
+        return
+    document.metadata_json = {k: v for k, v in meta.items() if k != _RESUME_METADATA_KEY}
+
+
 def _reset_document_after_cancel(
     db: Session,
     *,
@@ -2297,17 +2526,38 @@ def _reset_document_after_cancel(
     document: KnowledgeDocument,
     log_kind: Literal["parse", "reindex"] = "parse",
     log_lines: list[dict[str, str]] | None = None,
+    preserve_partial: bool = False,
 ) -> dict[str, Any]:
-    """取消后清理部分写入并将文档重置为待解析。"""
-    from app.services.lightrag_engine import delete_document as lightrag_delete_document
+    """取消后处理：默认清理部分写入并重置为待解析；保留模式下保留已处理内容以便续传。"""
+    is_lightrag = knowledge_base.kb_type == KnowledgeBaseType.LIGHTRAG.value
+    existing_chunk_count = int(document.chunk_count or 0)
+
+    if preserve_partial:
+        lines = log_lines or [
+            {"t": _utc_now_iso(), "text": "用户已取消解析（已保留已切片/已向量化内容，可继续解析复用）"}
+        ]
+        # 保留 knowledge_chunk 行、Milvus 向量与 LightRAG 抽取缓存，仅置为可续传态
+        _set_document_resume_marker(document, chunk_count=existing_chunk_count)
+        if is_lightrag:
+            document.status = KnowledgeDocumentStatus.GRAPH_FAILED.value
+        else:
+            document.status = KnowledgeDocumentStatus.FAILED.value
+        document.error_message = None
+        document.parse_log_json = _build_parse_log_payload(log_kind, "error", lines)
+        db.commit()
+        db.refresh(document)
+        return serialize_document(document)
 
     lines = log_lines or [{"t": _utc_now_iso(), "text": "用户已取消解析"}]
     _clear_document_chunks_and_vectors(db, knowledge_base=knowledge_base, document=document)
-    if knowledge_base.kb_type == KnowledgeBaseType.LIGHTRAG.value:
-        try:
-            lightrag_delete_document(db, knowledge_base=knowledge_base, document=document)
-        except AppError:
-            pass
+    if is_lightrag:
+        _delete_lightrag_graph_document(
+            db,
+            space_id=knowledge_base.enterprise_space_id,
+            knowledge_base=knowledge_base,
+            document=document,
+        )
+    _clear_document_resume_marker(document)
     document.status = KnowledgeDocumentStatus.UPLOADED.value
     document.error_message = None
     document.chunk_count = 0
@@ -2315,6 +2565,45 @@ def _reset_document_after_cancel(
     db.commit()
     db.refresh(document)
     return serialize_document(document)
+
+
+def _document_index_succeeded(document: KnowledgeDocument) -> bool:
+    return document.status in _INDEXED_DOCUMENT_STATUSES
+
+
+def _complete_process_audit_safely(
+    *,
+    space_id: int,
+    kb_id: int,
+    batch_uid: str | None,
+    document_id: int,
+    file_name: str,
+    mode: Literal["parse", "reindex"],
+    outcome: Literal["success", "failed", "cancelled"],
+    error_message: str | None = None,
+    user_id: int | None = None,
+    force: bool = False,
+) -> None:
+    try:
+        kb_process_audit_service.complete_process_item_in_new_session(
+            space_id=space_id,
+            kb_id=kb_id,
+            batch_uid=batch_uid,
+            document_id=document_id,
+            file_name=file_name,
+            mode=mode,
+            outcome=outcome,
+            error_message=error_message,
+            user_id=user_id,
+            force=force,
+        )
+    except Exception:
+        logger.exception(
+            "Process audit complete failed (kb_id=%s document_id=%s outcome=%s)",
+            kb_id,
+            document_id,
+            outcome,
+        )
 
 
 def execute_document_process_job(
@@ -2349,49 +2638,59 @@ def execute_document_process_job(
     audit_started = True
     audit_completed = False
     slot_acquired = False
+    doc_lock_acquired = False
     try:
-        acquire_parse_slot(
-            cancel_event,
-            on_wait=(lambda: emit("当前解析任务较多，正在排队等待空闲名额…")) if emit else None,
-        )
-        slot_acquired = True
-        if mode == "parse":
-            result = process_document(
-                db,
+        from app.core.distributed_lock import acquire_distributed_lock
+
+        with acquire_distributed_lock(
+            f"zs-rag:doc-process:{kb_id}:{document_id}",
+            ttl_sec=7200,
+            wait_sec=0.0,
+            on_wait=(lambda: emit("同一文档另有 worker 正在处理，等待其结束…")) if emit else None,
+        ):
+            doc_lock_acquired = True
+            acquire_parse_slot(
+                cancel_event,
+                on_wait=(lambda: emit("当前解析任务较多，正在排队等待空闲名额…")) if emit else None,
+            )
+            slot_acquired = True
+            if mode == "parse":
+                result = process_document(
+                    db,
+                    space_id=space_id,
+                    kb_id=kb_id,
+                    document_id=document_id,
+                    embedding_model_id=embedding_model_id,
+                    emit=emit,
+                    emit_progress=emit_progress,
+                    cancel_event=cancel_event,
+                    force=force,
+                )
+            else:
+                result = reindex_document(
+                    db,
+                    space_id=space_id,
+                    kb_id=kb_id,
+                    document_id=document_id,
+                    embedding_model_id=embedding_model_id,
+                    emit=emit,
+                    emit_progress=emit_progress,
+                    cancel_event=cancel_event,
+                    force=force,
+                )
+            _complete_process_audit_safely(
                 space_id=space_id,
                 kb_id=kb_id,
+                batch_uid=batch_uid,
                 document_id=document_id,
-                embedding_model_id=embedding_model_id,
-                emit=emit,
-                emit_progress=emit_progress,
-                cancel_event=cancel_event,
+                file_name=doc_file_name,
+                mode=mode,
+                outcome="success",
+                user_id=user_id,
                 force=force,
             )
-        else:
-            result = reindex_document(
-                db,
-                space_id=space_id,
-                kb_id=kb_id,
-                document_id=document_id,
-                embedding_model_id=embedding_model_id,
-                emit=emit,
-                emit_progress=emit_progress,
-                cancel_event=cancel_event,
-                force=force,
-            )
-        kb_process_audit_service.complete_process_item_in_new_session(
-            space_id=space_id,
-            kb_id=kb_id,
-            batch_uid=batch_uid,
-            document_id=document_id,
-            file_name=doc_file_name,
-            mode=mode,
-            outcome="success",
-            user_id=user_id,
-            force=force,
-        )
-        audit_completed = True
-        return result
+            audit_completed = True
+            return result
     except DocumentProcessCancelled:
         knowledge_base = get_knowledge_base_or_error(db, space_id=space_id, kb_id=kb_id)
         document = get_document_or_error(db, space_id=space_id, kb_id=kb_id, document_id=document_id)
@@ -2401,7 +2700,7 @@ def execute_document_process_job(
             document=document,
             log_kind=mode,
         )
-        kb_process_audit_service.complete_process_item_in_new_session(
+        _complete_process_audit_safely(
             space_id=space_id,
             kb_id=kb_id,
             batch_uid=batch_uid,
@@ -2415,7 +2714,34 @@ def execute_document_process_job(
         audit_completed = True
         raise
     except AppError as exc:
-        kb_process_audit_service.complete_process_item_in_new_session(
+        with SessionLocal() as verify_db:
+            document = get_document_or_error(
+                verify_db,
+                space_id=space_id,
+                kb_id=kb_id,
+                document_id=document_id,
+            )
+            if _document_index_succeeded(document):
+                logger.warning(
+                    "Document %s reached %s despite AppError: %s",
+                    document_id,
+                    document.status,
+                    exc.message,
+                )
+                _complete_process_audit_safely(
+                    space_id=space_id,
+                    kb_id=kb_id,
+                    batch_uid=batch_uid,
+                    document_id=document_id,
+                    file_name=doc_file_name,
+                    mode=mode,
+                    outcome="success",
+                    user_id=user_id,
+                    force=force,
+                )
+                audit_completed = True
+                return serialize_document(document)
+        _complete_process_audit_safely(
             space_id=space_id,
             kb_id=kb_id,
             batch_uid=batch_uid,
@@ -2430,7 +2756,34 @@ def execute_document_process_job(
         audit_completed = True
         raise
     except Exception as exc:
-        kb_process_audit_service.complete_process_item_in_new_session(
+        with SessionLocal() as verify_db:
+            document = get_document_or_error(
+                verify_db,
+                space_id=space_id,
+                kb_id=kb_id,
+                document_id=document_id,
+            )
+            if _document_index_succeeded(document):
+                logger.warning(
+                    "Document %s reached %s despite unexpected error: %s",
+                    document_id,
+                    document.status,
+                    exc,
+                )
+                _complete_process_audit_safely(
+                    space_id=space_id,
+                    kb_id=kb_id,
+                    batch_uid=batch_uid,
+                    document_id=document_id,
+                    file_name=doc_file_name,
+                    mode=mode,
+                    outcome="success",
+                    user_id=user_id,
+                    force=force,
+                )
+                audit_completed = True
+                return serialize_document(document)
+        _complete_process_audit_safely(
             space_id=space_id,
             kb_id=kb_id,
             batch_uid=batch_uid,
@@ -2443,7 +2796,7 @@ def execute_document_process_job(
             force=force,
         )
         audit_completed = True
-        raise
+        raise AppError(status_code=500, code="DOCUMENT_PROCESS_FAILED", message="文档处理失败") from exc
     finally:
         if audit_started and not audit_completed:
             try:
@@ -2546,6 +2899,8 @@ def _emit_new_parse_log_lines(
         document_id=document_id,
     )
     lines = log_payload.get("lines") or []
+    if len(lines) < last_line_count:
+        last_line_count = 0
     for item in lines[last_line_count:]:
         if isinstance(item, dict):
             text = str(item.get("text", "")).strip()
@@ -2634,6 +2989,32 @@ def _poll_celery_document_process(
                 message = (row.error_message or "文档处理失败").strip()
                 if message == "cancelled":
                     raise DocumentProcessCancelled()
+                document = get_document_or_error(
+                    db,
+                    space_id=space_id,
+                    kb_id=kb_id,
+                    document_id=document_id,
+                )
+                if _document_index_succeeded(document):
+                    logger.warning(
+                        "Reconcile Celery task %s as completed: document %s is %s",
+                        background_task_id,
+                        document_id,
+                        document.status,
+                    )
+                    bg_task_service.mark_task_completed(db, background_task_id)
+                    db.commit()
+                    last_line_count = _emit_new_parse_log_lines(
+                        db,
+                        space_id=space_id,
+                        kb_id=kb_id,
+                        document_id=document_id,
+                        last_line_count=last_line_count,
+                        emit=emit,
+                        emit_progress=emit_progress,
+                    )
+                    emit_progress(phase="done", message="完成")
+                    return serialize_document(document)
                 raise AppError(status_code=500, code="DOCUMENT_PROCESS_FAILED", message=message)
             last_line_count = _emit_new_parse_log_lines(
                 db,
@@ -2654,15 +3035,24 @@ def cancel_document_process(
     kb_id: int,
     document_id: int,
     user_id: int | None = None,
+    preserve_partial: bool = False,
 ) -> dict[str, Any]:
-    """请求取消进行中的解析/重建任务；若无活跃 worker 但 DB 卡在进行中则直接重置。"""
+    """请求取消进行中的解析/重建任务；若无活跃 worker 但 DB 卡在进行中则直接重置。
+
+    ``preserve_partial=True`` 时保留已切片/已向量化内容与抽取缓存，置为可续传态。
+    """
     key = make_task_key(space_id, kb_id, document_id)
     if request_cancel(key):
         wait_task_finished(key, timeout_sec=10.0)
         document = get_document_or_error(db, space_id=space_id, kb_id=kb_id, document_id=document_id)
         if document.status in _DOCUMENT_IN_PROGRESS_STATUSES:
             knowledge_base = get_knowledge_base_or_error(db, space_id=space_id, kb_id=kb_id)
-            return _reset_document_after_cancel(db, knowledge_base=knowledge_base, document=document)
+            return _reset_document_after_cancel(
+                db,
+                knowledge_base=knowledge_base,
+                document=document,
+                preserve_partial=preserve_partial,
+            )
         return serialize_document(document)
 
     document = get_document_or_error(db, space_id=space_id, kb_id=kb_id, document_id=document_id)
@@ -2677,7 +3067,12 @@ def cancel_document_process(
 
     if document.status in _DOCUMENT_IN_PROGRESS_STATUSES:
         knowledge_base = get_knowledge_base_or_error(db, space_id=space_id, kb_id=kb_id)
-        result = _reset_document_after_cancel(db, knowledge_base=knowledge_base, document=document)
+        result = _reset_document_after_cancel(
+            db,
+            knowledge_base=knowledge_base,
+            document=document,
+            preserve_partial=preserve_partial,
+        )
         kb_process_audit_service.record_cancel(
             db,
             space_id=space_id,
@@ -2800,30 +3195,45 @@ def enqueue_document_process(
         force=force,
     )
 
-    active_task = _get_active_document_background_task(db, kb_id=kb_id, document_id=document_id)
-    if active_task is not None:
-        if not effective_force:
+    from app.core.distributed_lock import acquire_distributed_lock
+
+    enqueue_lock_key = f"zs-rag:doc-process-enqueue:{kb_id}:{document_id}"
+    try:
+        with acquire_distributed_lock(enqueue_lock_key, ttl_sec=120, wait_sec=10.0):
+            active_task = _get_active_document_background_task(db, kb_id=kb_id, document_id=document_id)
+            if active_task is not None:
+                if not effective_force:
+                    return {
+                        "document_id": document_id,
+                        "queued": False,
+                        "skipped": True,
+                        "skip_reason": "任务已在队列中执行",
+                        "mode": mode,
+                    }
+                bg_task_service.revoke_celery_task(active_task.celery_task_id)
+                bg_task_service.mark_task_failed(db, active_task.id, error_message="被新的批量任务取代")
+                db.commit()
+
+            bg_row = bg_task_service.create_document_background_task(
+                db,
+                enterprise_space_id=space_id,
+                knowledge_base_id=kb_id,
+                document_id=document_id,
+                action=mode,
+            )
+            db.commit()
+            background_task_id = bg_row.id
+            task_uid = bg_row.task_uid
+    except AppError as exc:
+        if exc.code == "RESOURCE_BUSY":
             return {
                 "document_id": document_id,
                 "queued": False,
                 "skipped": True,
-                "skip_reason": "任务已在队列中执行",
+                "skip_reason": "任务正在提交中，请稍候",
                 "mode": mode,
             }
-        bg_task_service.revoke_celery_task(active_task.celery_task_id)
-        bg_task_service.mark_task_failed(db, active_task.id, error_message="被新的批量任务取代")
-        db.commit()
-
-    bg_row = bg_task_service.create_document_background_task(
-        db,
-        enterprise_space_id=space_id,
-        knowledge_base_id=kb_id,
-        document_id=document_id,
-        action=mode,
-    )
-    db.commit()
-    background_task_id = bg_row.id
-    task_uid = bg_row.task_uid
+        raise
 
     celery_task_id = bg_task_service.try_dispatch_celery_index_task(
         task_uid=task_uid,
@@ -3112,6 +3522,86 @@ def iter_document_process_sse_events(
         pass
 
 
+def _prepare_lightrag_document_for_delete(
+    db: Session,
+    *,
+    space_id: int,
+    knowledge_base: KnowledgeBase,
+    document: KnowledgeDocument,
+    fast: bool = False,
+) -> None:
+    """删除前终止进行中的图谱入库并等待释放同库入库锁。"""
+    if document.status not in _DOCUMENT_IN_PROGRESS_STATUSES:
+        return
+
+    from app.services import document_background_task_service as bg_task_service
+    from app.services.lightrag_engine import wait_lightrag_kb_lock_released
+
+    key = make_task_key(space_id, knowledge_base.id, document.id)
+    request_cancel(key)
+
+    active_task = _get_active_document_background_task(
+        db,
+        kb_id=knowledge_base.id,
+        document_id=document.id,
+    )
+    if active_task is not None:
+        bg_task_service.revoke_celery_task(active_task.celery_task_id)
+        bg_task_service.mark_task_failed(db, active_task.id, error_message="deleted")
+        db.commit()
+
+    task_wait = 5.0 if fast else 30.0
+    lock_wait = 10.0 if fast else 90.0
+    wait_task_finished(key, timeout_sec=task_wait)
+    lock_released = wait_lightrag_kb_lock_released(knowledge_base.id, timeout_sec=lock_wait)
+    if not lock_released:
+        logger.warning(
+            "LightRAG kb lock still held after cancel kb_id=%s doc_id=%s fast=%s",
+            knowledge_base.id,
+            document.id,
+            fast,
+        )
+
+
+def _delete_lightrag_graph_document(
+    db: Session,
+    *,
+    space_id: int,
+    knowledge_base: KnowledgeBase,
+    document: KnowledgeDocument,
+) -> None:
+    """图知识库文档删除：入库中走快速清理，已完成图谱走 adelete。"""
+    from app.services.lightrag_engine import delete_document as lightrag_delete_document
+    from app.services.lightrag_engine import purge_lightrag_document_local_state
+
+    in_progress = document.status in _DOCUMENT_IN_PROGRESS_STATUSES
+    if in_progress:
+        _prepare_lightrag_document_for_delete(
+            db,
+            space_id=space_id,
+            knowledge_base=knowledge_base,
+            document=document,
+            fast=True,
+        )
+        purge_lightrag_document_local_state(knowledge_base, document)
+        return
+
+    try:
+        lightrag_delete_document(
+            db,
+            knowledge_base=knowledge_base,
+            document=document,
+            lock_wait_sec=60.0,
+        )
+    except AppError as exc:
+        if exc.code in ("LIGHTRAG_QUERY_FAILED",):
+            return
+        if exc.code == "RESOURCE_BUSY":
+            purge_lightrag_document_local_state(knowledge_base, document)
+            return
+        raise
+
+
 def delete_document_asset(
     db: Session,
     *,
@@ -3182,19 +3672,18 @@ def delete_documents_batch(
     delete_ids = [document.id for document in to_delete]
     audit_items: list[dict[str, Any]] = []
     is_lightrag = knowledge_base.kb_type == KnowledgeBaseType.LIGHTRAG.value
-    if is_lightrag:
-        from app.services.lightrag_engine import delete_document as lightrag_delete_document
 
     ready: list[KnowledgeDocument] = []
     for document in to_delete:
         file_name = document.file_name
         try:
             if is_lightrag:
-                try:
-                    lightrag_delete_document(db, knowledge_base=knowledge_base, document=document)
-                except AppError as exc:
-                    if exc.code not in ("LIGHTRAG_QUERY_FAILED",):
-                        raise
+                _delete_lightrag_graph_document(
+                    db,
+                    space_id=space_id,
+                    knowledge_base=knowledge_base,
+                    document=document,
+                )
             _clear_document_storage_dir(document.storage_path)
             ready.append(document)
         except AppError as exc:

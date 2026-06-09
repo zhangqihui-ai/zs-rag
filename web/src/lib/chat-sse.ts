@@ -4,6 +4,7 @@
  */
 
 import { resolveApiBaseUrl } from './apiBaseUrl'
+import { resolveEnterpriseSpaceSlug } from './http'
 
 export async function streamChatCompletion(
   sessionId: string,
@@ -12,13 +13,13 @@ export async function streamChatCompletion(
   options?: { signal?: AbortSignal },
 ): Promise<void> {
   const token = localStorage.getItem('auth_token') || ''
-  const enterpriseSpace = localStorage.getItem('current_enterprise_space')
+  const enterpriseSpace = resolveEnterpriseSpaceSlug()
   const res = await fetch(`${resolveApiBaseUrl()}/api/v1/chats/sessions/${sessionId}/stream`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(enterpriseSpace ? { 'X-Enterprise-Space': enterpriseSpace } : {}),
+      'X-Enterprise-Space': enterpriseSpace,
     },
     body: JSON.stringify({ content }),
     signal: options?.signal,

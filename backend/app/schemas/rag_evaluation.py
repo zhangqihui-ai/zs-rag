@@ -45,6 +45,34 @@ class RagEvaluationRunRequest(BaseModel):
     retrieval_config: dict | None = None
 
 
+class RagAgenticComparisonRequest(BaseModel):
+    retrieval_config: dict | None = None
+    agentic_config: dict | None = None
+
+
+class RagAgenticComparisonItem(BaseModel):
+    question: str
+    baseline_hit: bool
+    agentic_hit: bool
+    baseline_top_score: float | None = None
+    baseline_total: int = 0
+    agentic_citation_count: int = 0
+    agentic_iterations: int = 0
+    agentic_route_decision: str | None = None
+    agentic_trace: list[dict] = Field(default_factory=list)
+
+
+class RagAgenticComparisonResponse(BaseModel):
+    benchmark_id: int
+    total: int
+    baseline_hits: int
+    agentic_hits: int
+    baseline_hit_rate: float
+    agentic_hit_rate: float
+    avg_agentic_iterations: float
+    items: list[RagAgenticComparisonItem] = Field(default_factory=list)
+
+
 class RagEvaluationResultResponse(BaseModel):
     id: int
     benchmark_item_id: int

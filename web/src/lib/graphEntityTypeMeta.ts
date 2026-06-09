@@ -5,6 +5,68 @@ export interface EntityTypeMeta {
   description: string
 }
 
+/** LightRAG 默认 11 类实体（与 backend DEFAULT_LIGHTRAG_ENTITY_TYPES 一致） */
+export const LIGHTRAG_DEFAULT_ENTITY_TYPES: readonly string[] = [
+  'Person',
+  'Creature',
+  'Organization',
+  'Location',
+  'Event',
+  'Concept',
+  'Method',
+  'Content',
+  'Data',
+  'Artifact',
+  'NaturalObject',
+] as const
+
+export type LightragEntityTypePresetKey = 'full' | 'regulation' | 'checklist'
+
+export interface LightragEntityTypePreset {
+  label: string
+  description: string
+  types: readonly string[]
+}
+
+/** 图谱抽取实体类型预设模板 */
+export const LIGHTRAG_ENTITY_TYPE_PRESETS: Record<LightragEntityTypePresetKey, LightragEntityTypePreset> = {
+  full: {
+    label: '全量',
+    description: '启用 LightRAG 默认 11 类实体，覆盖最全',
+    types: LIGHTRAG_DEFAULT_ENTITY_TYPES,
+  },
+  regulation: {
+    label: '法规库',
+    description: '侧重机构、人物、地点、事件、概念、方法与条款内容',
+    types: ['Organization', 'Person', 'Location', 'Event', 'Concept', 'Method', 'Content'],
+  },
+  checklist: {
+    label: '事项库',
+    description: '侧重组织、人物、地点、事件、概念与结构化数据字段',
+    types: ['Organization', 'Person', 'Location', 'Event', 'Concept', 'Content', 'Data'],
+  },
+}
+
+function entityTypesMatchPreset(selected: readonly string[], presetTypes: readonly string[]): boolean {
+  if (selected.length !== presetTypes.length) {
+    return false
+  }
+  const set = new Set(selected)
+  return presetTypes.every((item) => set.has(item))
+}
+
+/** 当前选中实体类型与某一预设完全一致时返回该预设 key，否则为 null（自定义组合） */
+export function matchLightragEntityTypePreset(
+  selected: readonly string[],
+): LightragEntityTypePresetKey | null {
+  for (const key of Object.keys(LIGHTRAG_ENTITY_TYPE_PRESETS) as LightragEntityTypePresetKey[]) {
+    if (entityTypesMatchPreset(selected, LIGHTRAG_ENTITY_TYPE_PRESETS[key].types)) {
+      return key
+    }
+  }
+  return null
+}
+
 const TYPE_META: Record<string, EntityTypeMeta> = {
   category: {
     labelZh: '类别',
@@ -45,6 +107,10 @@ const TYPE_META: Record<string, EntityTypeMeta> = {
   naturalobject: {
     labelZh: '自然物',
     description: '自然存在或自然形成的对象，如矿物、灾害因素等。',
+  },
+  creature: {
+    labelZh: '生物',
+    description: '动物、植物等生物实体。',
   },
   measurement: {
     labelZh: '度量',

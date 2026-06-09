@@ -10,7 +10,7 @@ import {
 } from './docxContentDisplay'
 import { mineruBlockPlainText } from './mineruContentDisplay'
 
-const OFFICE_PREVIEW_EXTS = new Set(['docx', 'pdf', 'xlsx', 'xlsm', 'xls', 'csv'])
+const OFFICE_PREVIEW_EXTS = new Set(['doc', 'docx', 'pdf', 'xlsx', 'xlsm', 'xls', 'csv'])
 
 export function canShowOfficeOriginalPreview(fileExt: string | null | undefined) {
   return OFFICE_PREVIEW_EXTS.has(String(fileExt || '').toLowerCase())
@@ -45,7 +45,7 @@ export async function loadDocumentContentListBlocks(
   document: KnowledgeDocument,
 ): Promise<DocxContentBlock[]> {
   const ext = String(document.file_ext || '').toLowerCase()
-  if (ext !== 'docx') {
+  if (ext !== 'docx' && ext !== 'doc') {
     return []
   }
   const backend = String(document.metadata?.parser_backend || '')

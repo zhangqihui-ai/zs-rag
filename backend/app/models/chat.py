@@ -59,6 +59,9 @@ class ChatConversation(Base):
     )
     suggest_next_questions_prompt_mode: Mapped[str] = mapped_column(String(20), default="system", nullable=False)
     suggest_next_questions_custom_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rag_mode: Mapped[str] = mapped_column(String(20), default="classic", nullable=False)
+    agentic_max_iterations: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
+    agentic_min_relevant_docs: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
     sessions: Mapped[list["ChatSession"]] = relationship(
         "ChatSession",
@@ -99,6 +102,7 @@ class ChatMessage(Base):
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     citations: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    agent_trace: Mapped[list | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
     session: Mapped["ChatSession"] = relationship("ChatSession", back_populates="messages")

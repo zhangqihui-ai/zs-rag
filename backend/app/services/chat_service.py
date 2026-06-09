@@ -12,6 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.errors import AppError
+from app.core.config import get_settings
 from app.core.openai_compat import (
     build_chat_completion_chunk,
     estimate_usage,
@@ -42,12 +43,14 @@ DEFAULT_CHAT_SYSTEM_PROMPT_RAG = (
     "1）若问题需要依据文档，请优先引用参考片段中的信息，并在对应叙述处使用角标 [1]、[2] 等。\n"
     "2）若问题是问候、闲聊、常识、或明显与参考片段无关（例如询问你是谁、用的什么模型），请直接自然回答，不要强行引用片段，也不要说「知识库中未找到您要的答案」之类套话。\n"
     "3）仅当用户问题**明确期望**从知识库文档中得到事实，且参考片段均不相关或明显不足时，再说明「知识库中未找到您要的答案！」并可补充合理说明。\n"
-    "回答需结合聊天历史。\n以下是参考片段：\n{knowledge}\n以上结束。"
+    "回答需结合聊天历史。\n以下是参考片段：\n{knowledge}\n以上结束。\n"
+    "回复请用 Markdown 排版：用 ##/### 作小节标题，条目用列表，对比/材料类信息优先用表格，重点用 **加粗**。"
 )
 
 DEFAULT_CHAT_SYSTEM_PROMPT_GENERAL = (
     "你是一个乐于助人的智能助手。请结合聊天历史自然回答用户问题。\n"
-    "当前对话未选择知识库，或本轮检索未返回任何参考片段：请按通用对话方式回复，不必强行关联知识库或编造文档来源。"
+    "当前对话未选择知识库，或本轮检索未返回任何参考片段：请按通用对话方式回复，不必强行关联知识库或编造文档来源。\n"
+    "回复请用 Markdown 排版：用 ##/### 作小节标题，条目用列表，对比/材料类信息优先用表格，重点用 **加粗**。"
 )
 
 # 兼容旧代码与文档中的名称：默认 GENERAL 作为「未自定义且未注入片段」时的基线说明长度参考
@@ -317,6 +320,31 @@ def _clamp_chunk_top_k(raw: Any) -> int | None:
         return max(1, min(100, int(raw)))
     except (TypeError, ValueError):
         return None
+
+
+def _normalize_rag_mode(raw: Any) -> str:
+    value = str(raw or "classic").strip().lower()
+    return value if value in {"classic", "agentic"} else "classic"
+
+
+def _clamp_agentic_max_iterations(raw: Any) -> int:
+    default = get_settings().agentic_rag_max_iterations
+    if raw is None:
+        return max(1, min(5, int(default)))
+    try:
+        return max(1, min(5, int(raw)))
+    except (TypeError, ValueError):
+        return max(1, min(5, int(default)))
+
+
+def _clamp_agentic_min_relevant_docs(raw: Any) -> int:
+    default = get_settings().agentic_rag_min_relevant_docs
+    if raw is None:
+        return max(1, min(10, int(default)))
+    try:
+        return max(1, min(10, int(raw)))
+    except (TypeError, ValueError):
+        return max(1, min(10, int(default)))
 
 
 def _default_top_k_for_kb_ids(db: Session, *, enterprise_space_id: int, kb_ids: list[int]) -> int:
@@ -591,6 +619,9 @@ def _config_response(conv: ChatConversation) -> ChatConfigurationResponse:
             getattr(conv, "suggest_next_questions_prompt_mode", None) or "system"
         ),
         suggest_next_questions_custom_prompt=getattr(conv, "suggest_next_questions_custom_prompt", None),
+        rag_mode=_normalize_rag_mode(getattr(conv, "rag_mode", None)),
+        agentic_max_iterations=_clamp_agentic_max_iterations(getattr(conv, "agentic_max_iterations", None)),
+        agentic_min_relevant_docs=_clamp_agentic_min_relevant_docs(getattr(conv, "agentic_min_relevant_docs", None)),
     )
 
 
@@ -869,6 +900,9 @@ def create_chat_conversation(
         suggest_next_questions_model_id=config_data.get("suggest_next_questions_model_id"),
         suggest_next_questions_prompt_mode=str(config_data.get("suggest_next_questions_prompt_mode") or "system"),
         suggest_next_questions_custom_prompt=config_data.get("suggest_next_questions_custom_prompt"),
+        rag_mode=_normalize_rag_mode(config_data.get("rag_mode")),
+        agentic_max_iterations=_clamp_agentic_max_iterations(config_data.get("agentic_max_iterations")),
+        agentic_min_relevant_docs=_clamp_agentic_min_relevant_docs(config_data.get("agentic_min_relevant_docs")),
     )
     db.add(conv)
     db.flush()
@@ -1033,6 +1067,13 @@ def update_chat_configuration(
         raise AppError(status_code=404, code="CONVERSATION_NOT_FOUND", message="Conversation not found")
 
     update_data = obj_in.model_dump(exclude_unset=True)
+    update_data.pop("rag_mode", None)
+    if "agentic_max_iterations" in update_data:
+        update_data["agentic_max_iterations"] = _clamp_agentic_max_iterations(update_data["agentic_max_iterations"])
+    if "agentic_min_relevant_docs" in update_data:
+        update_data["agentic_min_relevant_docs"] = _clamp_agentic_min_relevant_docs(
+            update_data["agentic_min_relevant_docs"]
+        )
     mid = update_data.pop("model_id", None)
     if mid is not None:
         conv.selected_llm_model_id = mid
@@ -1069,10 +1110,19 @@ def add_chat_message(
     content: str,
     message_id: str | None = None,
     citations: list[dict[str, Any]] | None = None,
+    agent_trace: list[dict[str, Any]] | None = None,
 ) -> ChatMessage:
     mid = message_id or str(uuid.uuid4())
     cite_store = citations if role == "assistant" and citations else None
-    msg = ChatMessage(id=mid, session_id=session_id, role=role, content=content, citations=cite_store)
+    trace_store = agent_trace if role == "assistant" and agent_trace else None
+    msg = ChatMessage(
+        id=mid,
+        session_id=session_id,
+        role=role,
+        content=content,
+        citations=cite_store,
+        agent_trace=trace_store,
+    )
     db.add(msg)
     db.flush()
     sess = db.get(ChatSession, session_id)
@@ -1138,6 +1188,116 @@ def complete_chat_turn_blocking(
     return done
 
 
+def _iter_agentic_chat_turn(
+    db: Session,
+    *,
+    session_id: str,
+    session_obj: ChatSession,
+    conv: ChatConversation,
+    user_content: str,
+) -> Iterator[dict[str, object]]:
+    from app.services.agentic_rag.chat_runner import iter_agentic_chat_turn_events
+
+    messages = load_session_messages_for_llm(db, session_id=session_id, conv=conv)
+    prior_history = messages[:-1] if messages else []
+
+    assistant_content = ""
+    turn_citations: list[dict[str, Any]] = []
+    agent_trace: list[dict[str, Any]] = []
+    delta_sent = False
+
+    for event in iter_agentic_chat_turn_events(
+        db,
+        conv=conv,
+        enterprise_space_id=session_obj.enterprise_space_id,
+        user_content=user_content,
+        chat_history=prior_history,
+    ):
+        event_type = event.get("type")
+        if event_type == "agent_step":
+            trace_item = event.get("trace")
+            if isinstance(trace_item, dict):
+                agent_trace.append(trace_item)
+            yield event
+            continue
+        if event_type == "assistant_delta":
+            piece = str(event.get("content") or "")
+            if piece:
+                assistant_content += piece
+                delta_sent = True
+            yield event
+            continue
+        if event_type == "error":
+            message = str(event.get("message") or "Agentic RAG 执行失败")
+            assistant_content = f"【错误】{message}"
+            yield {"type": "assistant_delta", "content": assistant_content}
+            saved = add_chat_message(db, session_id=session_id, role="assistant", content=assistant_content)
+            yield {
+                "type": "assistant_done",
+                "id": saved.id,
+                "session_id": saved.session_id,
+                "role": saved.role,
+                "content": saved.content,
+                "created_at": saved.created_at.isoformat(),
+                "citations": [],
+                "agent_trace": [],
+            }
+            return
+        if event_type == "assistant_done":
+            assistant_content = str(event.get("answer") or assistant_content)
+            turn_citations = list(event.get("citations") or [])
+            agent_trace = list(event.get("trace") or agent_trace)
+            if assistant_content and not delta_sent:
+                yield {"type": "assistant_delta", "content": assistant_content}
+            saved = add_chat_message(
+                db,
+                session_id=session_id,
+                role="assistant",
+                content=assistant_content,
+                citations=turn_citations or None,
+                agent_trace=agent_trace or None,
+            )
+            yield {
+                "type": "assistant_done",
+                "id": saved.id,
+                "session_id": saved.session_id,
+                "role": saved.role,
+                "content": saved.content,
+                "created_at": saved.created_at.isoformat(),
+                "citations": list(saved.citations or []),
+                "agent_trace": list(saved.agent_trace or []),
+            }
+            yield from _yield_suggest_question_events(
+                db,
+                conv=conv,
+                enterprise_space_id=session_obj.enterprise_space_id,
+                user_content=user_content,
+                assistant_content=assistant_content,
+            )
+            return
+
+    if not assistant_content:
+        assistant_content = "【错误】Agentic RAG 未返回有效回答"
+    saved = add_chat_message(
+        db,
+        session_id=session_id,
+        role="assistant",
+        content=assistant_content,
+        citations=turn_citations or None,
+        agent_trace=agent_trace or None,
+    )
+    yield {
+        "type": "assistant_done",
+        "id": saved.id,
+        "session_id": saved.session_id,
+        "role": saved.role,
+        "content": saved.content,
+        "created_at": saved.created_at.isoformat(),
+        "citations": list(saved.citations or []),
+        "agent_trace": list(saved.agent_trace or []),
+    }
+
+
 def iter_chat_stream_events(
     db: Session,
     *,
@@ -1154,6 +1314,16 @@ def iter_chat_stream_events(
     add_chat_message(db, session_id=session_id, role="user", content=user_content)
 
     conv = _conversation_row_after_user_message(db, session_obj.conversation_id)
+
+    if conv and _normalize_rag_mode(getattr(conv, "rag_mode", None)) == "agentic":
+        yield from _iter_agentic_chat_turn(
+            db,
+            session_id=session_id,
+            session_obj=session_obj,
+            conv=conv,
+            user_content=user_content,
+        )
+        return
 
     provider_cfg: AIModelProvider | None = None
     api_model_name = ""

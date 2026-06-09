@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
+import AgenticRagView from '../views/AgenticRagView.vue'
 import ChatEmbedBootstrap from '../views/ChatEmbedBootstrap.vue'
 import ChatView from '../views/ChatView.vue'
 import HealthView from '../views/HealthView.vue'
@@ -7,6 +8,7 @@ import HomeView from '../views/HomeView.vue'
 import KnowledgeBaseDetailView from '../views/KnowledgeBaseDetailView.vue'
 import KnowledgeBasesView from '../views/KnowledgeBasesView.vue'
 import KnowledgeDocumentDetailView from '../views/KnowledgeDocumentDetailView.vue'
+import KnowledgeRetrievalView from '../views/KnowledgeRetrievalView.vue'
 import LoginView from '../views/LoginView.vue'
 import NoSpaceAssignedView from '../views/NoSpaceAssignedView.vue'
 import ProvidersView from '../views/ProvidersView.vue'
@@ -85,12 +87,27 @@ const router = createRouter({
     },
     {
       path: '/retrieval',
-      name: 'retrieval',
-      component: RetrievalView,
+      component: KnowledgeRetrievalView,
       meta: {
         title: '知识检索',
-        description: '验证召回效果、筛选策略与结果质量。',
+        description: '普通检索验证召回效果，智能检索完成闭环问答。',
       },
+      children: [
+        {
+          path: '',
+          name: 'retrieval',
+          component: RetrievalView,
+        },
+        {
+          path: 'agentic',
+          name: 'retrieval-agentic',
+          component: AgenticRagView,
+        },
+      ],
+    },
+    {
+      path: '/agentic-rag',
+      redirect: { name: 'retrieval-agentic' },
     },
     {
       path: '/chat/embed',
@@ -107,8 +124,8 @@ const router = createRouter({
       name: 'chat',
       component: ChatView,
       meta: {
-        title: '对话',
-        description: '面向企业知识助手的 RAG 对话工作台。',
+        title: '聊天助手',
+        description: '面向企业智能对话的 RAG 工作台。',
       },
     },
     {

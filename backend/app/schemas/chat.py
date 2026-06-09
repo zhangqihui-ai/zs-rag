@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -68,6 +68,7 @@ class ChatMessageResponse(ChatMessageBase):
     session_id: str
     created_at: datetime
     citations: list[dict[str, Any]] | None = None
+    agent_trace: list[dict[str, Any]] | None = None
 
 
 class ChatConfigurationBase(BaseModel):
@@ -161,10 +162,26 @@ class ChatConfigurationBase(BaseModel):
         max_length=10_000,
         description="自定义下一步问题生成提示词；prompt_mode=custom 时生效。",
     )
+    rag_mode: Literal["classic", "agentic"] = Field(
+        default="classic",
+        description="检索模式：classic=单次 RAG；agentic=智能体多轮检索（创建后不可修改）。",
+    )
+    agentic_max_iterations: int = Field(
+        default=2,
+        ge=1,
+        le=5,
+        description="Agentic 模式最大检索/改写轮数。",
+    )
+    agentic_min_relevant_docs: int = Field(
+        default=1,
+        ge=1,
+        le=10,
+        description="Agentic 模式判定检索足够的最少相关片段数。",
+    )
 
 
 class ChatConfigurationUpdate(ChatConfigurationBase):
-    pass
+    rag_mode: Literal["classic", "agentic"] | None = Field(default=None, exclude=True)
 
 
 class ChatConfigurationResponse(ChatConfigurationBase):
@@ -229,6 +246,9 @@ class ChatConversationResponse(BaseModel):
     suggest_next_questions_model_id: int | None = None
     suggest_next_questions_prompt_mode: str = "system"
     suggest_next_questions_custom_prompt: str | None = None
+    rag_mode: str = "classic"
+    agentic_max_iterations: int = 2
+    agentic_min_relevant_docs: int = 1
 
     class Config:
         from_attributes = True

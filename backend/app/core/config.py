@@ -74,16 +74,109 @@ class Settings(BaseSettings):
         description="lightrag_use_tiktoken=true 时使用的 tiktoken 模型名",
     )
     lightrag_llm_timeout_sec: int = Field(
-        default=300,
-        description="LightRAG 实体/关系抽取 LLM 单次请求读超时（秒）；大 chunk 可能需数分钟",
+        default=600,
+        ge=60,
+        le=3600,
+        description=(
+            "LightRAG 实体/关系抽取 LLM 单次读超时（秒）；"
+            "同时作为 LightRAG default_llm_timeout，其 worker 层超时为 2× 该值"
+        ),
     )
     lightrag_llm_max_retries: int = Field(
         default=3,
         description="LightRAG LLM 读超时等可重试错误的最大重试次数",
     )
+    lightrag_chunk_token_size: int = Field(
+        default=4096,
+        ge=512,
+        le=32768,
+        description="LightRAG 单段 token 上限；图知识库复用解析切片时需覆盖 Excel 等大块（约 4000 字）",
+    )
+    lightrag_chunk_overlap_token_size: int = Field(
+        default=50,
+        ge=0,
+        le=512,
+        description="LightRAG 分块重叠 token 数",
+    )
+    lightrag_milvus_upsert_batch_size: int = Field(
+        default=128,
+        ge=1,
+        le=2000,
+        description="LightRAG 写入 Milvus 时每批向量条数，避免单次 gRPC 超过 64MB",
+    )
+    lightrag_prechunk_min_chars: int = Field(
+        default=150_000,
+        ge=10_000,
+        le=5_000_000,
+        description="解析全文超过该字符数时，图入库复用解析切片作为 LightRAG 索引大段；小文档走 LightRAG 原生分块",
+    )
+    lightrag_insert_wait_timeout_sec: int = Field(
+        default=7200,
+        ge=300,
+        le=86400,
+        description="单文档 LightRAG 图谱入库最长等待时间（秒）",
+    )
+    lightrag_delete_lock_wait_sec: int = Field(
+        default=120,
+        ge=10,
+        le=600,
+        description="删除文档时等待图知识库入库锁的最长时间（秒）；入库进行中会先尝试取消任务",
+    )
+    lightrag_embedding_batch_num: int = Field(
+        default=4,
+        ge=1,
+        le=32,
+        description="LightRAG 单次调用 Embedding 的文本条数；大表格 chunk 建议 2–4",
+    )
+    agentic_rag_enabled: bool = Field(default=True, description="是否启用独立 Agentic RAG 端点")
+    agentic_rag_max_iterations: int = Field(
+        default=2,
+        ge=1,
+        le=5,
+        description="Agentic RAG 单轮最多检索/改写迭代次数",
+    )
+    agentic_rag_grade_batch_size: int = Field(
+        default=8,
+        ge=1,
+        le=50,
+        description="Agentic RAG 相关性评估单批片段数（预留配置，当前按 Top K 一批评估）",
+    )
+    agentic_rag_min_relevant_docs: int = Field(
+        default=1,
+        ge=1,
+        le=10,
+        description="Agentic RAG 判定检索结果足够的最少相关片段数",
+    )
+    agentic_route_doc_titles_per_kb: int = Field(
+        default=15,
+        ge=1,
+        le=50,
+        description="Agentic 路由注入每库文档标题数上限",
+    )
+    agentic_route_pre_retrieve_top_k: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="Agentic 路由轻量预检索 Top K",
+    )
+    agentic_route_pre_retrieve_enabled: bool = Field(
+        default=True,
+        description="Agentic 路由在首轮判定 retrieve 后是否做预检索二次路由",
+    )
+    agentic_route_kb_context_max_chars: int = Field(
+        default=3000,
+        ge=500,
+        le=12000,
+        description="Agentic 路由知识库元数据上下文最大字符数",
+    )
     embedding_timeout_sec: int = Field(
-        default=180,
-        description="Embedding API 单次批量请求读超时（秒）；私有 GPU 部署或大表格 chunk 建议 120–300",
+        default=300,
+        ge=60,
+        le=3600,
+        description=(
+            "Embedding API 单次批量请求读超时（秒）；"
+            "同时作为 LightRAG default_embedding_timeout，worker 层超时为 2× 该值"
+        ),
     )
     embedding_max_retries: int = Field(
         default=3,
@@ -94,6 +187,29 @@ class Settings(BaseSettings):
         ge=1,
         le=128,
         description="单次调用 Embedding API 的文本条数（大批量文档索引时可适当增大）",
+    )
+    embedding_max_concurrency: int = Field(
+        default=4,
+        ge=1,
+        le=16,
+        description=(
+            "向量化（embedding）并发度默认值：同时向 Embedding 服务发起的请求数。"
+            "仅在 Embedding 后端为多实例/可并行时才有提速效果；"
+            "单实例服务设为 1 即可。知识库可在配置页单独覆盖该值。"
+        ),
+    )
+    embedding_cache_enabled: bool = Field(
+        default=True,
+        description=(
+            "是否启用持久化 embedding 缓存（按模型+内容哈希缓存向量）。"
+            "开启后重解析/续传/重建索引时命中缓存的段无需再次调用 GPU 计算向量。"
+        ),
+    )
+    embedding_cache_ttl_sec: int = Field(
+        default=1_209_600,
+        ge=60,
+        le=31_536_000,
+        description="embedding 缓存条目存活时间（秒），默认 14 天。",
     )
     tiktoken_cache_dir: str | None = Field(
         default=None,

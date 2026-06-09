@@ -251,11 +251,7 @@
                           :disabled="batchParsing || batchStopping || batchDeleting"
                           @click="parseDocumentAction(document.id)"
                         >
-                          {{
-                            documentIsParseFailed(document) || documentIsStuckProcessing(document)
-                              ? '重新解析'
-                              : '开始解析'
-                          }}
+                          {{ documentPrimaryParseLabel(document) }}
                         </button>
                         <button
                           v-if="documentCanReindex(document)"
@@ -359,7 +355,7 @@
                         :disabled="isDocumentProcessingLocally(document) || batchParsing || batchStopping || batchDeleting"
                         @click="parseDocumentAction(document.id)"
                       >
-                        {{ isDocumentProcessingLocally(document) ? '解析中…' : '重新解析' }}
+                        {{ isDocumentProcessingLocally(document) ? '解析中…' : documentPrimaryParseLabel(document) }}
                       </button>
                     </div>
                   </article>
@@ -907,6 +903,7 @@
               <div class="section-heading">
                 <div>
                   <h3>知识库配置</h3>
+                  <p class="kb-settings-type-hint">类型：{{ knowledgeBaseTypeLabel }}</p>
                 </div>
               </div>
 
@@ -947,34 +944,111 @@
                 <div class="pdf-parser-row">
                   <h4 class="pdf-parser-label">实体抽取 LLM</h4>
                   <div class="pdf-parser-field">
-                    <div class="custom-select-wrap pdf-parser-select-wrap">
-                      <select
-                        v-if="!llmModelsLoading"
-                        class="custom-select"
-                        :value="extractLlmModelId ?? ''"
+                    <div class="pdf-parser-select-wrap">
+                      <LlmModelPicker
+                        :model-value="extractLlmModelId"
+                        :models="llmModels"
+                        :loading="llmModelsLoading"
+                        :default-model="defaultLlmModel"
                         :disabled="savingExtractLlm"
-                        @change="(e) => saveExtractLlmModel((e.target as HTMLSelectElement).value ? Number((e.target as HTMLSelectElement).value) : null)"
-                      >
-                        <option value="">
-                          默认{{ defaultLlmModel ? `（${defaultLlmModel.model_name}）` : '' }}
-                        </option>
-                        <option
-                          v-for="model in llmModels"
-                          :key="model.id"
-                          :value="model.id"
-                        >
-                          {{ model.model_name }}（{{ model.provider_name }}）
-                        </option>
-                      </select>
-                      <span v-else class="embedding-model-loading">加载中…</span>
-                      <span class="custom-select-arrow">
-                        <AppIcon name="chevron-down" :size="14" />
-                      </span>
+                        hint=""
+                        @update:model-value="saveExtractLlmModel"
+                      />
                     </div>
                     <span v-if="savingExtractLlm" class="embedding-model-saving">保存中…</span>
                   </div>
                 </div>
                 <p class="pdf-parser-hint">用于 LightRAG 图谱入库时的实体与关系抽取；未指定时使用企业空间默认 LLM。</p>
+              </div>
+
+              <div v-if="isLightragKb" class="pdf-parser-section lightrag-graph-extract-section">
+                <div class="lightrag-graph-extract-header">
+                  <h4 class="pdf-parser-label">LightRAG 图谱抽取</h4>
+                  <span v-if="savingLightragExtract" class="embedding-model-saving">保存中…</span>
+                </div>
+                <p class="pdf-parser-hint">
+                  收窄实体类型可减少 LLM 抽取范围；关闭补抽（glean）约减半每段 LLM 调用，但可能漏抽实体。
+                </p>
+                <div class="lightrag-preset-row">
+                  <span class="lightrag-preset-label">预设模板</span>
+                  <div class="lightrag-preset-buttons">
+                    <button
+                      v-for="[presetKey, preset] in lightragPresetEntries"
+                      :key="presetKey"
+                      type="button"
+                      class="btn btn-secondary btn-sm lightrag-preset-btn"
+                      :class="{ 'lightrag-preset-btn--active': activeLightragEntityTypePreset === presetKey }"
+                      :disabled="savingLightragExtract"
+                      :title="preset.description"
+                      @click="applyLightragEntityTypePreset(presetKey)"
+                    >
+                      {{ preset.label }}
+                    </button>
+                  </div>
+                </div>
+                <div class="lightrag-entity-type-grid">
+                  <label
+                    v-for="entityType in LIGHTRAG_DEFAULT_ENTITY_TYPES"
+                    :key="entityType"
+                    class="lightrag-entity-type-option"
+                    :title="getEntityTypeMeta(entityType).description"
+                  >
+                    <input
+                      type="checkbox"
+                      :checked="lightragEntityTypesSelected.includes(entityType)"
+                      :disabled="savingLightragExtract || (lightragEntityTypesSelected.length <= 1 && lightragEntityTypesSelected.includes(entityType))"
+                      @change="toggleLightragEntityType(entityType)"
+                    />
+                    <span class="lightrag-entity-type-label">
+                      {{ getEntityTypeMeta(entityType).labelZh }}
+                      <span class="lightrag-entity-type-en">{{ entityType }}</span>
+                    </span>
+                  </label>
+                </div>
+                <div class="lightrag-glean-row">
+                  <label class="lightrag-glean-toggle">
+                    <input
+                      v-model="lightragGleanEnabled"
+                      type="checkbox"
+                      :disabled="savingLightragExtract"
+                      @change="saveLightragGraphExtractConfig"
+                    />
+                    <span>启用补抽（glean）</span>
+                  </label>
+                  <span class="pdf-parser-hint lightrag-glean-hint">
+                    {{ lightragGleanEnabled ? '每段最多 2 次 LLM 抽取，召回更全' : '每段仅 1 次 LLM 抽取，入库更快' }}
+                  </span>
+                </div>
+              </div>
+
+              <div
+                v-if="knowledgeBase?.vector_db_enabled"
+                class="pdf-parser-section embedding-concurrency-section"
+              >
+                <div class="lightrag-graph-extract-header">
+                  <h4 class="pdf-parser-label">向量化并发（Embedding 并发）</h4>
+                  <span v-if="savingEmbeddingConcurrency" class="embedding-model-saving">保存中…</span>
+                </div>
+                <p class="pdf-parser-hint">
+                  同时向 Embedding 服务发起的请求数。仅当 Embedding 后端为多实例/可并行时才能提速；
+                  单实例服务保持 1 即可，并发过高可能拖慢后端。新配置在后续解析或重建时生效。
+                </p>
+                <div class="embedding-concurrency-row">
+                  <label class="embedding-concurrency-label" for="embedding-concurrency-select">
+                    并发数
+                  </label>
+                  <select
+                    id="embedding-concurrency-select"
+                    class="embedding-concurrency-select"
+                    :value="embeddingConcurrency"
+                    :disabled="savingEmbeddingConcurrency"
+                    @change="onEmbeddingConcurrencyChange"
+                  >
+                    <option v-for="opt in EMBEDDING_CONCURRENCY_OPTIONS" :key="opt" :value="opt">
+                      {{ opt }}{{ opt === 4 ? '（默认）' : '' }}
+                    </option>
+                  </select>
+                </div>
               </div>
 
               <ParserSettingsPanel
@@ -1191,6 +1265,47 @@
           </div>
         </div>
       </div>
+      <div v-if="showCancelChoiceModal" class="modal-overlay" @click.self="resolveCancelChoice(null)">
+        <div class="modal-card cancel-choice-modal">
+          <div class="modal-header">
+            <div>
+              <h3>停止解析</h3>
+              <p>{{ cancelChoiceSubtitle }}</p>
+            </div>
+            <button class="icon-button" type="button" @click="resolveCancelChoice(null)">
+              <AppIcon name="close" :size="16" />
+            </button>
+          </div>
+          <div class="modal-body cancel-choice-body">
+            <p class="cancel-choice-tip">
+              已完成的向量化结果会被缓存复用。请选择停止后如何处理已处理的内容：
+            </p>
+            <button
+              type="button"
+              class="cancel-choice-option cancel-choice-option-primary"
+              @click="resolveCancelChoice('preserve')"
+            >
+              <span class="cancel-choice-option-title">保留已切片 / 已向量化内容（推荐）</span>
+              <span class="cancel-choice-option-desc">
+                保留切片与已计算向量、实体抽取缓存；之后可「继续解析」复用，仅重跑未完成部分。
+              </span>
+            </button>
+            <button
+              type="button"
+              class="cancel-choice-option"
+              @click="resolveCancelChoice('clean')"
+            >
+              <span class="cancel-choice-option-title">全部清理</span>
+              <span class="cancel-choice-option-desc">
+                清除本文档已写入的切片、向量与图谱，恢复为待解析状态。
+              </span>
+            </button>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-ghost" type="button" @click="resolveCancelChoice(null)">取消</button>
+          </div>
+        </div>
+      </div>
     </div>
     <Teleport to="body">
       <Transition name="kb-detail-toast">
@@ -1224,6 +1339,7 @@ import AppIcon from '../components/AppIcon.vue'
 import AppSelect from '../components/AppSelect.vue'
 import ChunkingSettingsPanel from '../components/knowledge-base/ChunkingSettingsPanel.vue'
 import EnrichmentSettingsPanel from '../components/knowledge-base/EnrichmentSettingsPanel.vue'
+import LlmModelPicker from '../components/knowledge-base/LlmModelPicker.vue'
 import ParserSettingsPanel from '../components/knowledge-base/ParserSettingsPanel.vue'
 import DocumentFileIcon from '../components/DocumentFileIcon.vue'
 import DocumentParseProgress from '../components/knowledge-base/DocumentParseProgress.vue'
@@ -1249,8 +1365,9 @@ import Layout from '../components/Layout.vue'
 import { graphSearch, getGraphErrorMessage, type GraphSearchResponse, type LightRagQueryMode } from '../api/graph-knowledge-base'
 import { GRAPH_ENTITY_QUERY_KEY, GRAPH_TAB_QUERY_KEY } from '../lib/graphNavigation'
 import { colorForEntityType } from '../lib/graphEntityColors'
-import { countDistinctEntityTypes } from '../lib/graphEntityTypeMeta'
+import { countDistinctEntityTypes, getEntityTypeMeta, LIGHTRAG_DEFAULT_ENTITY_TYPES, LIGHTRAG_ENTITY_TYPE_PRESETS, matchLightragEntityTypePreset, type LightragEntityTypePreset, type LightragEntityTypePresetKey } from '../lib/graphEntityTypeMeta'
 import { documentParserDisplay, documentUploadTypeDisplay, uploadExtension } from '../lib/parserDisplay'
+import { isGraphKnowledgeBase } from '../lib/kbType'
 
 const route = useRoute()
 const router = useRouter()
@@ -1298,7 +1415,11 @@ const baseTabs: { key: DetailTab; label: string; caption: string; icon: string }
   { key: 'settings', label: '配置', caption: '默认参数', icon: 'settings' },
 ]
 
-const isLightragKb = computed(() => knowledgeBase.value?.kb_type === 'lightrag')
+const isLightragKb = computed(() => isGraphKnowledgeBase(knowledgeBase.value))
+
+const knowledgeBaseTypeLabel = computed(() =>
+  isLightragKb.value ? '图知识库（LightRAG）' : '经典向量知识库',
+)
 
 function getLightragConfigRecord(kb: KnowledgeBase | null | undefined): Record<string, unknown> {
   const cfg = kb?.config
@@ -1313,6 +1434,121 @@ const extractLlmModelId = computed(() => {
   const raw = getLightragConfigRecord(knowledgeBase.value).extract_llm_id
   return typeof raw === 'number' && Number.isFinite(raw) ? raw : null
 })
+
+function syncLightragExtractFormFromKb() {
+  const cfg = getLightragConfigRecord(knowledgeBase.value)
+  const rawTypes = cfg.entity_types
+  if (Array.isArray(rawTypes) && rawTypes.length > 0) {
+    lightragEntityTypesSelected.value = rawTypes.map((item) => String(item))
+  } else {
+    lightragEntityTypesSelected.value = [...LIGHTRAG_DEFAULT_ENTITY_TYPES]
+  }
+  const glean = cfg.entity_extract_max_gleaning
+  lightragGleanEnabled.value =
+    glean === undefined || glean === null ? true : Number(glean) > 0
+}
+
+async function saveLightragGraphExtractConfig() {
+  if (!kbId.value || Number.isNaN(kbId.value) || !knowledgeBase.value) {
+    return
+  }
+  if (lightragEntityTypesSelected.value.length === 0) {
+    showNotice('请至少选择一种实体类型', 'error')
+    syncLightragExtractFormFromKb()
+    return
+  }
+  savingLightragExtract.value = true
+  try {
+    const currentConfig =
+      knowledgeBase.value.config && typeof knowledgeBase.value.config === 'object'
+        ? { ...(knowledgeBase.value.config as Record<string, unknown>) }
+        : {}
+    const nextLightrag = { ...getLightragConfigRecord(knowledgeBase.value) }
+    nextLightrag.entity_types = [...lightragEntityTypesSelected.value]
+    nextLightrag.entity_extract_max_gleaning = lightragGleanEnabled.value ? 1 : 0
+    const updated = await knowledgeBaseApi.update(kbId.value, {
+      config: { ...currentConfig, lightrag: nextLightrag },
+    })
+    knowledgeBase.value = updated
+    syncLightragExtractFormFromKb()
+    showNotice(
+      'LightRAG 图谱抽取配置已更新。新配置将在后续解析或重建图谱时生效。',
+      'success',
+      5000,
+    )
+  } catch (value) {
+    showNotice(getKnowledgeBaseErrorMessage(value, '更新 LightRAG 图谱抽取配置失败'), 'error')
+    syncLightragExtractFormFromKb()
+  } finally {
+    savingLightragExtract.value = false
+  }
+}
+
+function syncEmbeddingConcurrencyFromKb() {
+  const cfg = knowledgeBase.value?.config
+  const raw =
+    cfg && typeof cfg === 'object'
+      ? (cfg as Record<string, unknown>).embedding_concurrency
+      : undefined
+  const value = Number(raw)
+  embeddingConcurrency.value =
+    Number.isFinite(value) && value >= 1
+      ? Math.min(Math.round(value), EMBEDDING_CONCURRENCY_MAX)
+      : EMBEDDING_CONCURRENCY_DEFAULT
+}
+
+async function saveEmbeddingConcurrency(next: number) {
+  if (!kbId.value || Number.isNaN(kbId.value) || !knowledgeBase.value) {
+    return
+  }
+  const clamped = Math.max(1, Math.min(Math.round(next), EMBEDDING_CONCURRENCY_MAX))
+  savingEmbeddingConcurrency.value = true
+  try {
+    const currentConfig =
+      knowledgeBase.value.config && typeof knowledgeBase.value.config === 'object'
+        ? { ...(knowledgeBase.value.config as Record<string, unknown>) }
+        : {}
+    currentConfig.embedding_concurrency = clamped
+    const updated = await knowledgeBaseApi.update(kbId.value, { config: currentConfig })
+    knowledgeBase.value = updated
+    syncEmbeddingConcurrencyFromKb()
+    showNotice('向量化并发已更新。新配置将在后续解析或重建时生效。', 'success', 5000)
+  } catch (value) {
+    showNotice(getKnowledgeBaseErrorMessage(value, '更新向量化并发失败'), 'error')
+    syncEmbeddingConcurrencyFromKb()
+  } finally {
+    savingEmbeddingConcurrency.value = false
+  }
+}
+
+function onEmbeddingConcurrencyChange(event: Event) {
+  const target = event.target as HTMLSelectElement
+  const next = Number(target.value)
+  if (!Number.isFinite(next)) {
+    return
+  }
+  embeddingConcurrency.value = next
+  void saveEmbeddingConcurrency(next)
+}
+
+function applyLightragEntityTypePreset(key: LightragEntityTypePresetKey) {
+  lightragEntityTypesSelected.value = [...LIGHTRAG_ENTITY_TYPE_PRESETS[key].types]
+  void saveLightragGraphExtractConfig()
+}
+
+function toggleLightragEntityType(entityType: string) {
+  const next = new Set(lightragEntityTypesSelected.value)
+  if (next.has(entityType)) {
+    if (next.size <= 1) {
+      return
+    }
+    next.delete(entityType)
+  } else {
+    next.add(entityType)
+  }
+  lightragEntityTypesSelected.value = [...next]
+  void saveLightragGraphExtractConfig()
+}
 
 const showGraphTab = computed(() => isLightragKb.value)
 
@@ -1605,6 +1841,31 @@ const batchStopping = ref(false)
 const batchDeleting = ref(false)
 const headerSelectAllRef = ref<HTMLInputElement | null>(null)
 const showParseLogModal = ref(false)
+const showCancelChoiceModal = ref(false)
+const cancelChoiceCount = ref(1)
+type CancelChoice = 'preserve' | 'clean' | null
+let cancelChoiceResolver: ((choice: CancelChoice) => void) | null = null
+const cancelChoiceSubtitle = computed(() =>
+  cancelChoiceCount.value > 1
+    ? `共 ${cancelChoiceCount.value} 个进行中的任务`
+    : '停止后可选择是否保留已处理内容',
+)
+
+function resolveCancelChoice(choice: CancelChoice) {
+  showCancelChoiceModal.value = false
+  const resolver = cancelChoiceResolver
+  cancelChoiceResolver = null
+  resolver?.(choice)
+}
+
+/** 弹出"保留 vs 清理"选择框；返回用户选择，null 表示放弃停止。 */
+function askCancelChoice(count = 1): Promise<CancelChoice> {
+  cancelChoiceCount.value = count
+  showCancelChoiceModal.value = true
+  return new Promise<CancelChoice>((resolve) => {
+    cancelChoiceResolver = resolve
+  })
+}
 const parseLogTitle = ref('')
 const parseLogLines = ref<{ t: string; text: string }[]>([])
 const parseLogPhase = ref<'running' | 'success' | 'error' | 'cancelled'>('running')
@@ -1689,6 +1950,21 @@ const defaultEmbeddingModel = ref<DefaultModelOption | null>(null)
 const llmModels = ref<ModelItem[]>([])
 const llmModelsLoading = ref(false)
 const savingExtractLlm = ref(false)
+const lightragEntityTypesSelected = ref<string[]>([...LIGHTRAG_DEFAULT_ENTITY_TYPES])
+const lightragGleanEnabled = ref(true)
+const savingLightragExtract = ref(false)
+const EMBEDDING_CONCURRENCY_OPTIONS = [1, 2, 3, 4, 6, 8]
+const EMBEDDING_CONCURRENCY_DEFAULT = 4
+const EMBEDDING_CONCURRENCY_MAX = 16
+const embeddingConcurrency = ref<number>(EMBEDDING_CONCURRENCY_DEFAULT)
+const savingEmbeddingConcurrency = ref(false)
+const lightragPresetEntries = Object.entries(LIGHTRAG_ENTITY_TYPE_PRESETS) as Array<
+  [LightragEntityTypePresetKey, LightragEntityTypePreset]
+>
+
+const activeLightragEntityTypePreset = computed(() =>
+  matchLightragEntityTypePreset(lightragEntityTypesSelected.value),
+)
 const defaultLlmModel = ref<DefaultModelOption | null>(null)
 const parserSettingsExpanded = ref(false)
 
@@ -2054,6 +2330,21 @@ function documentCanStartParse(document: KnowledgeDocument) {
     documentIsParseFailed(document) ||
     documentIsStuckProcessing(document)
   )
+}
+
+function documentIsResumable(document: KnowledgeDocument) {
+  return document.resumable === true
+}
+
+/** 主解析按钮文案：可续传 → 继续解析；失败/中断 → 重新解析；否则 → 开始解析。 */
+function documentPrimaryParseLabel(document: KnowledgeDocument) {
+  if (documentIsResumable(document)) {
+    return '继续解析（复用已向量化）'
+  }
+  if (documentIsParseFailed(document) || documentIsStuckProcessing(document)) {
+    return '重新解析'
+  }
+  return '开始解析'
 }
 
 function documentCanReindex(document: KnowledgeDocument) {
@@ -2809,6 +3100,8 @@ async function loadPage() {
   try {
     documentsPage.value = 1
     knowledgeBase.value = await knowledgeBaseApi.get(kbId.value)
+    syncLightragExtractFormFromKb()
+    syncEmbeddingConcurrencyFromKb()
     skipRetrievalFormAutoSave.value = true
     searchForm.value = retrievalFormFromKnowledgeBase(knowledgeBase.value)
     nextTick(() => {
@@ -2817,7 +3110,7 @@ async function loadPage() {
     await Promise.all([
       refreshDocuments(),
       loadEmbeddingModels(),
-      ...(knowledgeBase.value?.kb_type === 'lightrag' ? [loadLlmModels()] : []),
+      ...(isGraphKnowledgeBase(knowledgeBase.value) ? [loadLlmModels()] : []),
     ])
   } catch (value) {
     error.value = getKnowledgeBaseErrorMessage(value, '加载知识库详情失败')
@@ -3458,14 +3751,17 @@ function clearDocumentSelection() {
   selectedDocumentIds.value = []
 }
 
-async function stopDocumentProcessingSafely(documentId: number): Promise<boolean> {
+async function stopDocumentProcessingSafely(
+  documentId: number,
+  preservePartial = false,
+): Promise<boolean> {
   if (!kbId.value || Number.isNaN(kbId.value)) {
     return false
   }
   stopDocumentStatusPoll(documentId)
   const wasRunningLocally = parseTasks.isRunning(documentId)
   try {
-    const snapshot = await parseTasks.cancelTask(documentId)
+    const snapshot = await parseTasks.cancelTask(documentId, preservePartial)
     if (snapshot) {
       patchDocumentInList(documentId, snapshot)
     } else {
@@ -3482,7 +3778,7 @@ async function stopDocumentProcessingSafely(documentId: number): Promise<boolean
       return true
     }
     try {
-      const snapshot = await cancelDocumentProcess(kbId.value, documentId)
+      const snapshot = await cancelDocumentProcess(kbId.value, documentId, preservePartial)
       patchDocumentInList(documentId, snapshot)
       return true
     } catch {
@@ -3530,7 +3826,14 @@ async function batchStopSelectedDocuments() {
     showNotice('所选文档中没有进行中的解析任务。', 'info', 4000)
     return
   }
-  if (
+  let preservePartial = false
+  if (isLightragKb.value) {
+    const choice = await askCancelChoice(stoppable.length)
+    if (choice === null) {
+      return
+    }
+    preservePartial = choice === 'preserve'
+  } else if (
     !window.confirm(
       `确定停止已选的 ${stoppable.length} 个进行中的解析任务吗？已写入的部分将被清理。`,
     )
@@ -3542,7 +3845,7 @@ async function batchStopSelectedDocuments() {
   let fail = 0
   try {
     for (const documentId of stoppable) {
-      const stopped = await stopDocumentProcessingSafely(documentId)
+      const stopped = await stopDocumentProcessingSafely(documentId, preservePartial)
       if (stopped) {
         ok += 1
       } else {
@@ -3565,11 +3868,18 @@ async function batchStopSelectedDocuments() {
 }
 
 async function cancelDocumentParseAction(documentId: number) {
-  if (!window.confirm('确定停止该文档的解析吗？已写入的部分将被清理。')) {
+  let preservePartial = false
+  if (isLightragKb.value) {
+    const choice = await askCancelChoice(1)
+    if (choice === null) {
+      return
+    }
+    preservePartial = choice === 'preserve'
+  } else if (!window.confirm('确定停止该文档的解析吗？已写入的部分将被清理。')) {
     return
   }
   try {
-    const snapshot = await parseTasks.cancelTask(documentId)
+    const snapshot = await parseTasks.cancelTask(documentId, preservePartial)
     stopDocumentStatusPoll(documentId)
     parseLogDocumentId.value = documentId
     parseLogPhase.value = 'cancelled'
@@ -3583,7 +3893,11 @@ async function cancelDocumentParseAction(documentId: number) {
       })
     }
     await refreshDocuments()
-    showNotice('已停止解析', 'info', 3000)
+    showNotice(
+      preservePartial ? '已停止解析（已保留内容，可继续解析复用）' : '已停止解析',
+      'info',
+      3500,
+    )
   } catch (value) {
     showNotice(getKnowledgeBaseErrorMessage(value, '停止解析失败'), 'error')
     await refreshDocuments()
@@ -4066,6 +4380,12 @@ watch(openChunkingMenuForId, (value) => {
   margin-top: 1px;
 }
 
+.kb-settings-type-hint {
+  margin: 4px 0 0;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
 .pdf-parser-section {
   display: grid;
   gap: 10px;
@@ -4112,6 +4432,143 @@ watch(openChunkingMenuForId, (value) => {
 .extract-llm-section:focus-within .pdf-parser-hint,
 .extract-llm-section:hover .pdf-parser-hint {
   display: block;
+}
+
+.lightrag-graph-extract-section {
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--border-subtle, rgba(148, 163, 184, 0.25));
+  background: var(--surface-secondary, rgba(248, 250, 252, 0.6));
+}
+
+.lightrag-graph-extract-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.lightrag-preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+}
+
+.lightrag-preset-label {
+  font-size: 0.88rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.lightrag-preset-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.lightrag-preset-btn {
+  min-height: 32px;
+  transition:
+    border-color 0.15s ease,
+    background-color 0.15s ease,
+    box-shadow 0.15s ease,
+    color 0.15s ease;
+}
+
+.lightrag-preset-btn--active {
+  border-color: var(--brand-primary, #3b82f6);
+  background: var(--brand-primary-light, rgba(59, 130, 246, 0.1));
+  color: var(--brand-primary, #2563eb);
+  box-shadow: 0 0 0 2px var(--brand-primary-light, rgba(59, 130, 246, 0.25));
+  font-weight: 600;
+}
+
+.lightrag-preset-btn--active:disabled {
+  opacity: 1;
+}
+
+.lightrag-entity-type-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 8px 12px;
+}
+
+.lightrag-entity-type-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle, rgba(148, 163, 184, 0.2));
+  background: var(--surface-primary, #fff);
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.lightrag-entity-type-option input {
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+
+.lightrag-entity-type-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.35;
+}
+
+.lightrag-entity-type-en {
+  font-size: 0.75rem;
+  color: var(--text-tertiary);
+}
+
+.lightrag-glean-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  padding-top: 4px;
+}
+
+.lightrag-glean-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.lightrag-glean-hint {
+  margin: 0;
+}
+
+.embedding-concurrency-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-top: 4px;
+}
+
+.embedding-concurrency-label {
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+
+.embedding-concurrency-select {
+  min-width: 140px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle, rgba(148, 163, 184, 0.2));
+  background: var(--surface-primary, #fff);
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.embedding-concurrency-select:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 .knowledge-detail-view {
@@ -5337,6 +5794,58 @@ watch(openChunkingMenuForId, (value) => {
   max-width: 520px;
   margin-left: auto;
   margin-right: auto;
+}
+
+.cancel-choice-modal {
+  width: min(560px, 92vw);
+}
+
+.cancel-choice-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.cancel-choice-tip {
+  margin: 0 0 4px;
+  color: var(--color-text-secondary, #6b7280);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.cancel-choice-option {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+  padding: 14px 16px;
+  border: 1px solid var(--color-border, #e5e7eb);
+  border-radius: 10px;
+  background: var(--color-surface, #fff);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.cancel-choice-option:hover {
+  border-color: var(--color-primary, #2563eb);
+  background: var(--color-primary-soft, rgba(37, 99, 235, 0.06));
+}
+
+.cancel-choice-option-primary {
+  border-color: var(--color-primary, #2563eb);
+  box-shadow: 0 0 0 1px var(--color-primary, #2563eb) inset;
+}
+
+.cancel-choice-option-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--color-text, #111827);
+}
+
+.cancel-choice-option-desc {
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--color-text-secondary, #6b7280);
 }
 
 .hidden-file-input {

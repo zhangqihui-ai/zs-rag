@@ -1,4 +1,6 @@
 import axios from 'axios'
+
+import { useAuthStore } from '../stores/auth'
 import { resolveApiBaseUrl } from './apiBaseUrl'
 
 const baseURL = resolveApiBaseUrl()
@@ -16,10 +18,22 @@ export const longRequestTimeoutMs = Number(import.meta.env.VITE_LONG_REQUEST_TIM
 export const documentRequestTimeoutMs =
   Number(import.meta.env.VITE_DOCUMENT_REQUEST_TIMEOUT_MS) || longRequestTimeoutMs
 
+/**
+ * 检索测试 / 对话知识库检索（混合检索需调用 Embedding + Milvus + OpenSearch，私有 GPU 冷启动常 >30s）
+ */
+export const searchRequestTimeoutMs =
+  Number(import.meta.env.VITE_SEARCH_REQUEST_TIMEOUT_MS) || 120_000
+
 export const http = axios.create({
   baseURL,
   timeout: defaultTimeoutMs,
 })
+
+/** 当前企业空间 slug（Pinia 优先，与请求头保持一致） */
+export function resolveEnterpriseSpaceSlug(): string {
+  const authStore = useAuthStore()
+  return authStore.currentSpaceSlug || localStorage.getItem('current_enterprise_space') || 'default'
+}
 
 // 请求拦截器 - 添加认证 Token 和企业空间上下文
 http.interceptors.request.use((config) => {
@@ -29,9 +43,8 @@ http.interceptors.request.use((config) => {
     config.headers.Authorization = `Bearer ${token}`
   }
 
-  // 从 localStorage 获取当前企业空间
-  const enterpriseSpace = localStorage.getItem('current_enterprise_space')
-  if (enterpriseSpace && !config.headers['X-Enterprise-Space']) {
+  const enterpriseSpace = resolveEnterpriseSpaceSlug()
+  if (!config.headers['X-Enterprise-Space']) {
     config.headers['X-Enterprise-Space'] = enterpriseSpace
   }
 

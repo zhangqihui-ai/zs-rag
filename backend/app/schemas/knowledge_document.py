@@ -40,6 +40,7 @@ class KnowledgeDocumentResponse(BaseModel):
     upload_skipped: bool = False
     skip_reason: str | None = None
     last_parsed_at: datetime | None = None
+    resumable: bool = False
     created_at: datetime
     updated_at: datetime
 

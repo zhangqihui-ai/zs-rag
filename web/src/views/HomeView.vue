@@ -214,7 +214,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 import { getDashboardOverview, type DashboardOverview } from '../api/dashboard'
 import AppIcon from '../components/AppIcon.vue'
@@ -384,7 +384,7 @@ function formatBytes(value: number): string {
 }
 
 const fetchDashboard = async () => {
-  if (!authStore.currentSpace) {
+  if (!authStore.currentSpaceSlug) {
     overview.value = null
     error.value = '请先选择企业空间'
     loading.value = false
@@ -410,15 +410,6 @@ const fetchDashboard = async () => {
 }
 
 onMounted(fetchDashboard)
-
-watch(
-  () => authStore.currentSpace?.slug,
-  (slug, prev) => {
-    if (slug && slug !== prev) {
-      fetchDashboard()
-    }
-  },
-)
 </script>
 
 <style scoped>

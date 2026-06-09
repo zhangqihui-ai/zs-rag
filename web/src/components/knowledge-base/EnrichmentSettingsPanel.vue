@@ -10,6 +10,7 @@ import {
   type ModelItem,
 } from '../../api/model-management'
 import AppIcon from '../AppIcon.vue'
+import LlmModelPicker from './LlmModelPicker.vue'
 
 const DEFAULT_ENRICHMENT = {
   enabled: false,
@@ -96,9 +97,8 @@ async function onEnabledChange(evt: Event) {
   await saveEnrichment({ enabled: (evt.target as HTMLInputElement).checked })
 }
 
-async function onLlmChange(evt: Event) {
-  const val = (evt.target as HTMLSelectElement).value
-  await saveEnrichment({ llm_id: val ? Number(val) : null })
+async function onLlmIdChange(modelId: number | null) {
+  await saveEnrichment({ llm_id: modelId })
 }
 
 onMounted(() => {
@@ -161,25 +161,15 @@ watch(
         <div v-if="enabled" class="enrichment-row">
           <label class="enrichment-label">LLM 模型</label>
           <div class="enrichment-field">
-            <div class="custom-select-wrap">
-              <select
-                v-if="!llmModelsLoading"
-                class="custom-select"
-                :value="llmId ?? ''"
-                :disabled="saving"
-                @change="onLlmChange"
-              >
-                <option value="">
-                  默认{{ defaultLlmModel ? `（${defaultLlmModel.model_name}）` : '' }}
-                </option>
-                <option v-for="model in llmModels" :key="model.id" :value="model.id">
-                  {{ model.model_name }}（{{ model.provider_name }}）
-                </option>
-              </select>
-              <span v-else class="enrichment-loading">加载中…</span>
-              <span class="custom-select-arrow"><AppIcon name="chevron-down" :size="14" /></span>
-            </div>
-            <p class="enrichment-hint">未指定时使用企业空间默认 LLM。重新索引文档后生效。</p>
+            <LlmModelPicker
+              :model-value="llmId"
+              :models="llmModels"
+              :loading="llmModelsLoading"
+              :default-model="defaultLlmModel"
+              :disabled="saving"
+              hint="未指定时使用企业空间默认 LLM。重新索引文档后生效。"
+              @update:model-value="onLlmIdChange"
+            />
           </div>
         </div>
       </div>
@@ -329,40 +319,8 @@ watch(
   line-height: 1.5;
 }
 
-.enrichment-hint {
-  margin: 0;
-  font-size: 0.82rem;
-  color: var(--text-secondary);
-}
-
-.enrichment-saving,
-.enrichment-loading {
+.enrichment-saving {
   font-size: 0.85rem;
-  color: var(--text-secondary);
-}
-
-.custom-select-wrap {
-  position: relative;
-  max-width: 420px;
-}
-
-.custom-select {
-  width: 100%;
-  appearance: none;
-  padding: 8px 36px 8px 12px;
-  border-radius: 10px;
-  border: 1px solid var(--border-color);
-  background: var(--bg-elevated);
-  color: var(--text-primary);
-  font-size: 0.9rem;
-}
-
-.custom-select-arrow {
-  position: absolute;
-  right: 10px;
-  top: 50%;
-  transform: translateY(-50%);
-  pointer-events: none;
   color: var(--text-secondary);
 }
 </style>

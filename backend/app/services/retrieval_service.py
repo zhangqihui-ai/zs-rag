@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 import math
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,6 +26,7 @@ from app.core.knowledge_retrieval_defaults import (
 from app.core.rerank_gateway import RERANK_RECALL_FACTOR, rerank_texts
 from app.models.knowledge_base import KnowledgeBase, KnowledgeChunk, KnowledgeDocument, KnowledgeDocumentStatus
 from app.schemas.retrieval import KnowledgeSearchRequest
+from app.db.session import SessionLocal
 from app.services.knowledge_base_service import (
     ensure_knowledge_base_milvus_fields,
     get_embedding_model_for_knowledge_base,
@@ -1110,6 +1113,57 @@ def _vector_candidates(
     return candidates
 
 
+def _hybrid_channel_candidates(
+    db: Session,
+    *,
+    knowledge_base: KnowledgeBase,
+    query: str,
+    limit: int,
+    document_ids: list[int] | None,
+    exclude_standalone_image_ocr: bool,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    混合检索双路召回：向量路（含 Embedding）与关键词路并行，缩短总耗时。
+    每路使用独立 DB Session（SQLAlchemy Session 非线程安全）。
+    """
+    kb_id = knowledge_base.id
+    space_id = knowledge_base.enterprise_space_id
+
+    def _vector_job() -> list[dict[str, Any]]:
+        session = SessionLocal()
+        try:
+            kb = get_knowledge_base_or_error(session, space_id=space_id, kb_id=kb_id)
+            return _vector_candidates(
+                session,
+                knowledge_base=kb,
+                query=query,
+                limit=limit,
+                document_ids=document_ids,
+            )
+        finally:
+            session.close()
+
+    def _keyword_job() -> list[dict[str, Any]]:
+        session = SessionLocal()
+        try:
+            return _keyword_candidates(
+                session,
+                enterprise_space_id=space_id,
+                knowledge_base_id=kb_id,
+                query=query,
+                limit=limit,
+                document_ids=document_ids,
+                exclude_standalone_image_ocr=exclude_standalone_image_ocr,
+            )
+        finally:
+            session.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        vector_future = pool.submit(_vector_job)
+        keyword_future = pool.submit(_keyword_job)
+        return vector_future.result(), keyword_future.result()
+
+
 def search_knowledge_base(
     db: Session,
     *,
@@ -1117,6 +1171,7 @@ def search_knowledge_base(
     kb_id: int,
     payload: KnowledgeSearchRequest,
 ) -> dict[str, Any]:
+    search_started = time.perf_counter()
     knowledge_base = get_knowledge_base_or_error(db, space_id=space_id, kb_id=kb_id)
     mode = payload.mode or knowledge_base.default_retrieval_mode
     top_k = payload.top_k or knowledge_base.default_top_k
@@ -1203,17 +1258,9 @@ def search_knowledge_base(
             apply_threshold=True,
         )
     elif use_rerank and hybrid_strategy == "rerank":
-        vector_candidates = _vector_candidates(
+        vector_candidates, keyword_candidates = _hybrid_channel_candidates(
             db,
             knowledge_base=knowledge_base,
-            query=query,
-            limit=hybrid_recall_limit,
-            document_ids=document_ids,
-        )
-        keyword_candidates = _keyword_candidates(
-            db,
-            enterprise_space_id=knowledge_base.enterprise_space_id,
-            knowledge_base_id=knowledge_base.id,
             query=query,
             limit=hybrid_recall_limit,
             document_ids=document_ids,
@@ -1251,17 +1298,9 @@ def search_knowledge_base(
         ]
         results = _post_process_results(preliminary, apply_threshold=True)
     else:
-        vector_candidates = _vector_candidates(
+        vector_candidates, keyword_candidates = _hybrid_channel_candidates(
             db,
             knowledge_base=knowledge_base,
-            query=query,
-            limit=hybrid_recall_limit,
-            document_ids=document_ids,
-        )
-        keyword_candidates = _keyword_candidates(
-            db,
-            enterprise_space_id=knowledge_base.enterprise_space_id,
-            knowledge_base_id=knowledge_base.id,
             query=query,
             limit=hybrid_recall_limit,
             document_ids=document_ids,
@@ -1441,6 +1480,17 @@ def search_knowledge_base(
             if score_threshold is not None:
                 ranked = [item for item in ranked if item["score"] >= score_threshold]
             results = _post_process_results(ranked, apply_threshold=False)
+
+    elapsed = time.perf_counter() - search_started
+    if elapsed >= 5.0:
+        logger.info(
+            "knowledge search slow kb_id=%s mode=%s hits=%s elapsed=%.2fs query=%r",
+            kb_id,
+            mode,
+            len(results),
+            elapsed,
+            (query or "")[:120],
+        )
 
     return {
         "query": payload.query,

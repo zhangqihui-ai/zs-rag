@@ -12,7 +12,7 @@
         <div class="chat-grid-header">
           <div class="chat-grid-title">
             <AppIcon name="chat" :size="24" style="color: var(--brand-primary);" />
-            <h2>聊天</h2>
+            <h2>聊天助手</h2>
           </div>
           <div class="chat-grid-actions">
             <div class="search-box">
@@ -27,43 +27,68 @@
         </div>
 
         <div class="chat-cards-container">
-          <div 
-            v-for="chat in filteredConversations" 
-            :key="chat.id" 
-            class="chat-grid-card"
+          <article
+            v-for="chat in filteredConversations"
+            :key="chat.id"
+            class="chat-tile"
+            role="button"
+            tabindex="0"
             @click="chatStore.selectConversation(chat.id)"
+            @keydown.enter.prevent="chatStore.selectConversation(chat.id)"
+            @keydown.space.prevent="chatStore.selectConversation(chat.id)"
           >
-            <div class="chat-grid-card-icon">
-              <AppIcon name="chat" :size="16" />
-            </div>
-            <div class="chat-grid-card-content" style="flex: 1;">
-              <template v-if="editGridChatId === chat.id">
-                <input 
-                  type="text" 
-                  class="input" 
-                  v-model="editGridChatTitle" 
-                  @click.stop 
-                  @keyup.enter="saveGridTitle" 
-                  @keyup.esc="cancelEditGridTitle" 
-                  @blur="saveGridTitle"
-                  style="padding: 4px 8px; font-size: 1rem; margin: 0; width: 100%;"
-                  v-focus
-                />
-              </template>
-              <template v-else>
-                <h4 :title="chat.title">{{ chat.title }}</h4>
-              </template>
-              <span>{{ new Date(chat.updated_at).toLocaleString() }}</span>
-            </div>
-            
-            <div class="chat-grid-card-menu-container">
-              <button class="tile-menu-trigger" type="button" @click.stop="toggleMenu(chat.id)">⋯</button>
-              <div v-if="openMenuId === chat.id" class="tile-menu" @click.stop>
-                <button class="tile-menu-item" type="button" @click.stop="startEditGridTitle(chat)">修改</button>
-                <button class="tile-menu-item danger" type="button" @click.stop="openDeleteConversation(chat)">删除...</button>
+            <div class="chat-tile-top">
+              <div
+                :class="[
+                  'chat-tile-avatar',
+                  resolveRagMode(chat) === 'agentic' ? 'chat-tile-avatar--agentic' : 'chat-tile-avatar--classic',
+                ]"
+                :title="ragModeMeta(resolveRagMode(chat)).title"
+                :aria-label="ragModeMeta(resolveRagMode(chat)).title"
+              >
+                <AppIcon :name="ragModeMeta(resolveRagMode(chat)).icon" :size="20" />
+              </div>
+              <div class="chat-grid-card-menu-container">
+                <button class="tile-menu-trigger" type="button" @click.stop="toggleMenu(chat.id)">⋯</button>
+                <div v-if="openMenuId === chat.id" class="tile-menu" @click.stop>
+                  <button class="tile-menu-item" type="button" @click.stop="startEditGridTitle(chat)">修改</button>
+                  <button class="tile-menu-item danger" type="button" @click.stop="openDeleteConversation(chat)">删除...</button>
+                </div>
               </div>
             </div>
-          </div>
+
+            <template v-if="editGridChatId === chat.id">
+              <input
+                type="text"
+                class="input chat-tile-title-input"
+                v-model="editGridChatTitle"
+                @click.stop
+                @keyup.enter="saveGridTitle"
+                @keyup.esc="cancelEditGridTitle"
+                @blur="saveGridTitle"
+                v-focus
+              />
+            </template>
+            <h4 v-else class="chat-tile-title" :title="chat.title">{{ chat.title }}</h4>
+
+            <p class="chat-tile-desc">{{ ragModeMeta(resolveRagMode(chat)).subtitle }}</p>
+
+            <div class="chat-tile-tags">
+              <span
+                :class="[
+                  'chat-tag',
+                  resolveRagMode(chat) === 'agentic' ? 'chat-tag--agentic' : 'chat-tag--classic',
+                ]"
+              >
+                <AppIcon :name="ragModeMeta(resolveRagMode(chat)).icon" :size="12" />
+                {{ ragModeMeta(resolveRagMode(chat)).title }}
+              </span>
+            </div>
+
+            <div class="chat-tile-meta-row">
+              <span class="chat-tile-date">{{ formatGridDate(chat.updated_at) }}</span>
+            </div>
+          </article>
           <EmptyState
             v-if="filteredConversations.length === 0"
             title="没有找到对话"
@@ -112,9 +137,9 @@
           <div class="session-rail-header">
             <h3 class="session-rail-title">会话</h3>
             <div class="session-rail-header-actions">
-              <button type="button" class="btn-new-session" @click.stop="addSession">
-                <AppIcon name="plus" :size="14" />
-                新建会话
+              <button type="button" class="btn-new-session" title="新建会话" @click.stop="addSession">
+                <AppIcon name="plus" :size="15" />
+                <span class="btn-new-session-label">新建会话</span>
               </button>
               <button
                 type="button"
@@ -146,70 +171,73 @@
           </div>
 
           <div class="session-lines scrollbar-pill">
-            <div
-              v-for="session in sortedSessionsInConversation"
-              :key="session.id"
-              class="session-line"
-              :class="{
-                active: session.id === chatStore.activeSessionId,
-                'menu-open': sessionMenuOpenId === session.id,
-                'batch-mode': sessionBatchMode,
-                'batch-selected':
-                  sessionBatchMode && sessionBatchSelectedSet.has(normSessionId(session.id)),
-              }"
-              @click="onSessionRowClick(session, $event)"
-            >
-              <input
-                v-if="sessionBatchMode"
-                type="checkbox"
-                class="session-line-check"
-                :checked="sessionBatchSelectedSet.has(normSessionId(session.id))"
-                @click.prevent.stop="toggleSessionBatchSelection(session.id)"
-              />
-              <template v-if="renamingSessionId === session.id">
+            <template v-for="group in groupedSessionsInConversation" :key="group.key">
+              <div class="session-group-label">{{ group.label }}</div>
+              <div
+                v-for="session in group.sessions"
+                :key="session.id"
+                class="session-line"
+                :class="{
+                  active: session.id === chatStore.activeSessionId,
+                  'menu-open': sessionMenuOpenId === session.id,
+                  'batch-mode': sessionBatchMode,
+                  'batch-selected':
+                    sessionBatchMode && sessionBatchSelectedSet.has(normSessionId(session.id)),
+                }"
+                @click="onSessionRowClick(session, $event)"
+              >
                 <input
-                  v-model="renameSessionDraft"
-                  class="input session-line-input"
-                  @click.stop
-                  @blur="saveRenameSession"
-                  @keyup.enter="saveRenameSession"
-                  @keyup.esc="cancelRenameSession"
-                  ref="renameSessionInputRef"
+                  v-if="sessionBatchMode"
+                  type="checkbox"
+                  class="session-line-check"
+                  :checked="sessionBatchSelectedSet.has(normSessionId(session.id))"
+                  @click.prevent.stop="toggleSessionBatchSelection(session.id)"
                 />
-              </template>
-              <template v-else>
-                <span class="session-line-title" :title="session.title">{{ session.title }}</span>
-              </template>
-              <div v-if="!sessionBatchMode" class="session-line-actions" @click.stop>
-                <button
-                  type="button"
-                  class="session-line-more"
-                  :aria-expanded="sessionMenuOpenId === session.id"
-                  aria-label="会话操作"
-                  @click.stop="toggleSessionMenu(session.id)"
-                >
-                  <AppIcon name="more-vertical" :size="16" />
-                </button>
-                <div
-                  v-if="sessionMenuOpenId === session.id"
-                  class="session-line-menu"
-                  @click.stop
-                >
-                  <button type="button" class="session-line-menu-item" @click="onPinSession(session)">
-                    <AppIcon name="pin" :size="16" />
-                    置顶
+                <template v-if="renamingSessionId === session.id">
+                  <input
+                    v-model="renameSessionDraft"
+                    class="input session-line-input"
+                    @click.stop
+                    @blur="saveRenameSession"
+                    @keyup.enter="saveRenameSession"
+                    @keyup.esc="cancelRenameSession"
+                    ref="renameSessionInputRef"
+                  />
+                </template>
+                <template v-else>
+                  <span class="session-line-title" :title="session.title">{{ session.title }}</span>
+                </template>
+                <div v-if="!sessionBatchMode" class="session-line-actions" @click.stop>
+                  <button
+                    type="button"
+                    class="session-line-more"
+                    :aria-expanded="sessionMenuOpenId === session.id"
+                    aria-label="会话操作"
+                    @click.stop="toggleSessionMenu(session.id)"
+                  >
+                    <AppIcon name="more-vertical" :size="16" />
                   </button>
-                  <button type="button" class="session-line-menu-item" @click="onRenameSession(session)">
-                    <AppIcon name="pencil" :size="16" />
-                    重命名
-                  </button>
-                  <button type="button" class="session-line-menu-item danger" @click="onDeleteSessionFromMenu(session)">
-                    <AppIcon name="trash" :size="16" />
-                    删除
-                  </button>
+                  <div
+                    v-if="sessionMenuOpenId === session.id"
+                    class="session-line-menu"
+                    @click.stop
+                  >
+                    <button type="button" class="session-line-menu-item" @click="onPinSession(session)">
+                      <AppIcon name="pin" :size="16" />
+                      置顶
+                    </button>
+                    <button type="button" class="session-line-menu-item" @click="onRenameSession(session)">
+                      <AppIcon name="pencil" :size="16" />
+                      重命名
+                    </button>
+                    <button type="button" class="session-line-menu-item danger" @click="onDeleteSessionFromMenu(session)">
+                      <AppIcon name="trash" :size="16" />
+                      删除
+                    </button>
+                  </div>
                 </div>
               </div>
-            </div>
+            </template>
           </div>
         </aside>
 
@@ -308,29 +336,20 @@
                       <AppIcon name="trash" :size="16" />
                     </button>
                   </div>
-                  <div
-                    class="msg-text msg-text--assistant"
-                    :class="{ 'is-streaming': isMessageStreaming(message) }"
-                  >
-                    <template
-                      v-if="showCitationsEnabled && !isMessageStreaming(message)"
-                    >
-                      <template v-for="(seg, si) in assistantContentSegments(message.content)" :key="si">
-                        <span v-if="seg.k === 't'">{{ seg.v }}</span>
-                        <span
-                          v-else
-                          tabindex="0"
-                          role="button"
-                          class="msg-citation-badge"
-                          :title="citationRefTitle(seg.n, message) + '（点击查看切片）'"
-                          @click="openCitationDetailByRef(seg.n, message)"
-                          @keydown.enter.prevent="openCitationDetailByRef(seg.n, message)"
-                          @keydown.space.prevent="openCitationDetailByRef(seg.n, message)"
-                        >{{ seg.n }}</span>
-                      </template>
-                    </template>
-                    <template v-else>{{ message.content }}</template>
-                  </div>
+                  <AssistantMessageContent
+                    :content="message.content"
+                    :streaming="isMessageStreaming(message)"
+                    :show-citations="showCitationsEnabled"
+                    :message="message"
+                    :citation-title-for-ref="citationRefTitle"
+                    @citation-click="openCitationDetailByRef($event, message)"
+                  />
+                  <AgentTracePanel
+                    v-if="shouldShowAgentTrace(message)"
+                    :trace="messageAgentTrace(message)"
+                    :running="isMessageStreaming(message) && isAgenticConversation"
+                    :default-expanded="isMessageStreaming(message) && isAgenticConversation"
+                  />
                   <div
                     v-if="showAssistantCitationsFoot(message)"
                     class="msg-citations-block"
@@ -417,7 +436,7 @@
               <textarea
                 v-model="draftMessage"
                 class="textarea composer-textarea"
-                rows="4"
+                rows="2"
                 aria-label="消息内容"
                 placeholder="请输入问题..."
               />
@@ -469,8 +488,9 @@
             <div class="section-heading compact-heading">
               <div>
                 <h4>模型配置</h4>
-                <p class="section-subtext">本对话下所有会话共用此配置</p>
               </div>
+              <span v-if="activeConfig?.rag_mode === 'agentic'" class="chip chip-brand">Agentic RAG</span>
+              <span v-else-if="activeConfig" class="chip">普通 RAG</span>
             </div>
 
             <div style="display:flex; flex-direction: column; gap: 16px;">
@@ -820,6 +840,69 @@
             </div>
           </section>
 
+          <section v-if="activeConfig && isAgenticConversation" class="surface-card chat-agentic-settings-card">
+            <div class="section-heading compact-heading">
+              <div>
+                <h4>Agentic 检索</h4>
+                <p class="section-subtext">控制多轮检索、相关性评估与查询改写的停止条件</p>
+              </div>
+            </div>
+
+            <div class="chat-agentic-tuning">
+              <label class="field">
+                <span class="field-label chat-field-label-block">
+                  最大迭代轮数
+                  <span
+                    class="chat-field-hint-wrap"
+                    tabindex="0"
+                    role="button"
+                    aria-label="最大迭代轮数说明"
+                  >
+                    <span class="chat-topk-help">?</span>
+                  </span>
+                  <span class="chat-field-hint-tooltip" role="tooltip">{{ AGENTIC_MAX_ITERATIONS_HELP }}</span>
+                </span>
+                <input
+                  v-model.number="chatAgenticMaxIterations"
+                  class="input"
+                  type="number"
+                  min="1"
+                  max="5"
+                  step="1"
+                  aria-label="最大迭代轮数"
+                  @change="onAgenticMaxIterationsCommit"
+                  @blur="onAgenticMaxIterationsCommit"
+                />
+              </label>
+
+              <label class="field">
+                <span class="field-label chat-field-label-block">
+                  最少相关片段
+                  <span
+                    class="chat-field-hint-wrap"
+                    tabindex="0"
+                    role="button"
+                    aria-label="最少相关片段说明"
+                  >
+                    <span class="chat-topk-help">?</span>
+                  </span>
+                  <span class="chat-field-hint-tooltip" role="tooltip">{{ AGENTIC_MIN_RELEVANT_DOCS_HELP }}</span>
+                </span>
+                <input
+                  v-model.number="chatAgenticMinRelevantDocs"
+                  class="input"
+                  type="number"
+                  min="1"
+                  max="10"
+                  step="1"
+                  aria-label="最少相关片段"
+                  @change="onAgenticMinRelevantDocsCommit"
+                  @blur="onAgenticMinRelevantDocsCommit"
+                />
+              </label>
+            </div>
+          </section>
+
           <section class="surface-card">
             <div class="section-heading compact-heading">
               <div>
@@ -893,7 +976,7 @@
               />
             </div>
 
-            <div v-if="activeConfig" class="field chat-citation-toggle-field">
+            <div v-if="activeConfig && !isAgenticConversation" class="field chat-citation-toggle-field">
               <div class="chat-citation-toggle-head">
                 <span class="field-label chat-field-label-block">
                   多轮检索改写
@@ -1067,28 +1150,38 @@
         </div>
       </Teleport>
 
-      <!-- 引文 · 切片正文 -->
-      <div v-if="citationModalOpen" class="modal-overlay" role="presentation" @click.self="closeCitationModal">
-        <div class="modal-content citation-chunk-modal" @click.stop>
-          <div class="modal-header">
-            <h3>引文 · 召回切片</h3>
+      <!-- 引文 · 召回切片正文（与检索测试「入库切片正文」一致） -->
+      <div
+        v-if="citationModalOpen"
+        class="modal-overlay citation-chunk-modal-overlay"
+        role="presentation"
+        @click.self="closeCitationModal"
+      >
+        <div
+          class="modal-content citation-chunk-modal"
+          :class="{ 'citation-chunk-modal--wide': citationModalShowsTable }"
+          @click.stop
+        >
+          <div class="modal-header citation-chunk-modal-head">
+            <div>
+              <h3>引文 · 召回切片</h3>
+              <p v-if="citationModalCitation" class="citation-chunk-modal-sub">
+                {{ citationModalCitation.document_name
+                }}<template v-if="citationModalChunkLabel"> · {{ citationModalChunkLabel }}</template>
+              </p>
+            </div>
             <button type="button" class="btn btn-text" aria-label="关闭" @click="closeCitationModal">
               <AppIcon name="close" :size="20" />
             </button>
           </div>
           <div class="modal-body citation-chunk-modal-base">
-            <p v-if="citationModalCitation" class="citation-chunk-modal-meta">
-              <strong>{{ citationModalCitation.document_name }}</strong>
-              <template v-if="citationModalCitation.page_no != null">
-                · 第 {{ citationModalCitation.page_no }} 页</template
-              >
-              <template v-if="citationModalCitation.chunk_index != null">
-                · 片段 #{{ citationModalCitation.chunk_index + 1 }}</template
-              >
-            </p>
-            <div v-if="citationModalLoading" class="loading-inline">加载中…</div>
+            <div v-if="citationModalLoading" class="loading-inline">加载切片正文…</div>
             <p v-else-if="citationModalError" class="status-box error citation-chunk-modal-err">{{ citationModalError }}</p>
-            <pre v-else-if="citationModalContent" class="citation-chunk-modal-body">{{ citationModalContent }}</pre>
+            <InboundChunkBodyDisplay
+              v-else-if="citationModalDisplayChunk || citationModalFallbackContent"
+              :chunk="citationModalDisplayChunk"
+              :fallback-content="citationModalFallbackContent"
+            />
           </div>
           <div class="modal-footer citation-chunk-modal-footer">
             <button
@@ -1117,7 +1210,7 @@
 
       <!-- Create Chat Modal -->
       <div v-if="showCreateModal" class="modal-overlay" @click.self="showCreateModal = false">
-        <div class="modal-content" style="max-width: 460px;">
+        <div class="modal-content chat-create-modal" style="max-width: 560px;">
           <div class="modal-header">
             <h3>创建聊天</h3>
             <button class="btn btn-text" @click="showCreateModal = false">
@@ -1135,6 +1228,43 @@
                 @keyup.enter="handleCreate"
                 ref="createInputRef"
               />
+            </div>
+            <div class="field">
+              <span class="field-label">检索模式</span>
+              <div class="chat-rag-picker" role="radiogroup" aria-label="检索模式">
+                <button
+                  v-for="option in ragModeOptions"
+                  :key="option.value"
+                  type="button"
+                  class="chat-rag-option"
+                  :class="[option.tone, { 'is-active': newChatRagMode === option.value }]"
+                  :aria-pressed="newChatRagMode === option.value"
+                  @click="newChatRagMode = option.value"
+                >
+                  <span class="chat-rag-option-icon">
+                    <AppIcon :name="option.icon" :size="22" />
+                  </span>
+                  <span class="chat-rag-option-body">
+                    <strong>{{ option.title }}</strong>
+                    <span>{{ option.subtitle }}</span>
+                  </span>
+                  <span v-if="newChatRagMode === option.value" class="chat-rag-option-check" aria-hidden="true">
+                    <AppIcon name="check" :size="16" />
+                  </span>
+                </button>
+              </div>
+              <p class="chat-create-rag-hint">创建后不可更改检索模式。</p>
+            </div>
+
+            <div v-if="newChatRagMode === 'agentic'" class="chat-create-agentic-tuning">
+              <label class="field">
+                <span class="field-label">最大迭代轮数</span>
+                <input v-model.number="newChatAgenticMaxIterations" class="input" type="number" min="1" max="5" />
+              </label>
+              <label class="field">
+                <span class="field-label">最少相关片段</span>
+                <input v-model.number="newChatAgenticMinRelevantDocs" class="input" type="number" min="1" max="10" />
+              </label>
             </div>
           </div>
           <div class="modal-footer" style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 24px;">
@@ -1766,9 +1896,12 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 
+import AssistantMessageContent from '../components/chat/AssistantMessageContent.vue'
+import AgentTracePanel from '../components/chat/AgentTracePanel.vue'
 import AppIcon from '../components/AppIcon.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Layout from '../components/Layout.vue'
+import InboundChunkBodyDisplay from '../components/knowledge-base/InboundChunkBodyDisplay.vue'
 import KnowledgeBaseMultiSelect from '../components/knowledge-base/KnowledgeBaseMultiSelect.vue'
 
 import { useChatStore } from '../stores/chat'
@@ -1784,9 +1917,13 @@ import {
 import { modelApi, defaultModelApi, type DefaultModelOption, type ModelItem, type ProviderModelsGroup } from '../api/model-management'
 import {
   chatEmbedApiKeyApi,
+  type AgentTraceEvent,
   type ChatSession,
   type ChatMessage,
   type ChatCitation,
+  type ChatConversation,
+  type ChatConfiguration,
+  type RagMode,
 } from '../api/chat'
 import { useAuthStore } from '../stores/auth'
 import { useLayoutPageContext } from '../composables/useLayoutPageContext'
@@ -1808,8 +1945,8 @@ import {
   type ChatApiAccessContext,
 } from '../lib/chat-api-access'
 import { copyToClipboard } from '../lib/copy-to-clipboard'
-
-type AssistantSeg = { k: 't'; v: string } | { k: 'r'; n: number }
+import { groupSessionsByTime } from '../lib/sessionTimeGroups'
+import { isTableKnowledgeChunk } from '../lib/mineruContentDisplay'
 
 function normalizeCitations(raw: unknown): ChatCitation[] | undefined {
   if (!Array.isArray(raw) || raw.length === 0) {
@@ -1859,27 +1996,6 @@ function normalizeCitations(raw: unknown): ChatCitation[] | undefined {
   return out.length ? out : undefined
 }
 
-function assistantContentSegments(text: string): AssistantSeg[] {
-  const out: AssistantSeg[] = []
-  const re = /\[(\d+)\]/g
-  let last = 0
-  let m: RegExpExecArray | null
-  while ((m = re.exec(text)) !== null) {
-    if (m.index > last) {
-      out.push({ k: 't', v: text.slice(last, m.index) })
-    }
-    out.push({ k: 'r', n: parseInt(m[1], 10) })
-    last = m.index + m[0].length
-  }
-  if (last < text.length) {
-    out.push({ k: 't', v: text.slice(last) })
-  }
-  if (out.length === 0) {
-    out.push({ k: 't', v: text })
-  }
-  return out
-}
-
 function citationRefTitle(refNum: number, message: ChatMessage): string {
   const c = message.citations?.find((x) => x.ref === refNum)
   if (!c) {
@@ -1902,7 +2018,7 @@ function syncChatPageHeader() {
     setChatHomeHandler(() => chatStore.leaveConversation())
     return
   }
-  setPageContext({ title: '对话', breadcrumbTail: null })
+  setPageContext({ title: '聊天助手', breadcrumbTail: null })
   setChatHomeHandler(null)
 }
 
@@ -1921,9 +2037,35 @@ const isEmbedPanelMode = computed(() => {
 const citationModalOpen = ref(false)
 const citationModalCitation = ref<ChatCitation | null>(null)
 const citationModalChunk = ref<KnowledgeChunk | null>(null)
-const citationModalContent = ref('')
 const citationModalLoading = ref(false)
 const citationModalError = ref('')
+
+const citationModalChunkLabel = computed(() => {
+  const idx = citationModalCitation.value?.chunk_index
+  return idx != null ? `Chunk-${idx + 1}` : ''
+})
+
+const citationModalDisplayChunk = computed((): KnowledgeChunk | null => citationModalChunk.value)
+
+const citationModalFallbackContent = computed(() => {
+  if (citationModalChunk.value) {
+    return null
+  }
+  const raw = citationModalCitation.value?.content
+  return raw != null && String(raw).trim() ? String(raw) : null
+})
+
+const citationModalShowsTable = computed(() => {
+  const chunk = citationModalDisplayChunk.value
+  if (chunk) {
+    return isTableKnowledgeChunk(chunk)
+  }
+  const fallback = citationModalFallbackContent.value
+  if (!fallback) {
+    return false
+  }
+  return isTableKnowledgeChunk({ content: fallback, metadata: null })
+})
 
 function resolveCitationKbId(c: ChatCitation): number | null {
   if (c.knowledge_base_id != null && Number.isFinite(c.knowledge_base_id)) {
@@ -1937,21 +2079,42 @@ function closeCitationModal() {
   citationModalOpen.value = false
   citationModalCitation.value = null
   citationModalChunk.value = null
-  citationModalContent.value = ''
   citationModalError.value = ''
   citationModalLoading.value = false
+}
+
+function buildGraphCitationChunk(c: ChatCitation): KnowledgeChunk {
+  const content = String(c.content ?? '')
+  return {
+    id: typeof c.chunk_id === 'number' ? c.chunk_id : 0,
+    chunk_uid: '',
+    document_id: c.document_id ?? 0,
+    chunk_index: c.chunk_index ?? 0,
+    content,
+    content_preview: null,
+    char_count: content.length,
+    token_count: null,
+    start_offset: null,
+    end_offset: null,
+    page_no: c.page_no,
+    heading_path: null,
+    vector_status: '',
+    vector_id: null,
+    metadata: null,
+    created_at: '',
+    updated_at: '',
+  }
 }
 
 async function openCitationDetail(c: ChatCitation) {
   citationModalCitation.value = c
   citationModalChunk.value = null
-  citationModalContent.value = ''
   citationModalError.value = ''
   citationModalOpen.value = true
   // 图谱库引用：chunk_id 为 LightRAG 内部 ID，无法 getChunk，直接展示随附正文
   if (c.source === 'graph' || (typeof c.chunk_id !== 'number' && c.content != null)) {
     if (c.content != null && String(c.content).trim()) {
-      citationModalContent.value = String(c.content)
+      citationModalChunk.value = buildGraphCitationChunk(c)
     } else {
       citationModalError.value = '该图谱引用未携带正文，请点击「打开文档原文」查看。'
     }
@@ -1968,9 +2131,7 @@ async function openCitationDetail(c: ChatCitation) {
   }
   citationModalLoading.value = true
   try {
-    const chunk = await knowledgeBaseApi.getChunk(kbId, chunkId)
-    citationModalChunk.value = chunk
-    citationModalContent.value = chunk.content
+    citationModalChunk.value = await knowledgeBaseApi.getChunk(kbId, chunkId)
   } catch (e) {
     console.error(e)
     citationModalError.value = '加载切片正文失败，请稍后重试。'
@@ -2183,6 +2344,45 @@ const editGridChatId = ref<string | null>(null)
 const editGridChatTitle = ref('')
 
 const newChatTitle = ref('')
+const newChatRagMode = ref<RagMode>('classic')
+const newChatAgenticMaxIterations = ref(2)
+const newChatAgenticMinRelevantDocs = ref(1)
+
+const DEFAULT_AGENTIC_MAX_ITERATIONS = 2
+const DEFAULT_AGENTIC_MIN_RELEVANT_DOCS = 1
+
+const ragModeOptions = [
+  {
+    value: 'classic' as const,
+    title: '普通 RAG',
+    subtitle: '单次知识库检索 + 引用，适合日常问答',
+    icon: 'retrieval',
+    tone: 'chat-rag-option--classic',
+  },
+  {
+    value: 'agentic' as const,
+    title: 'Agentic RAG',
+    subtitle: '多轮检索 · 评估 · 改写，适合复杂问题',
+    icon: 'spark',
+    tone: 'chat-rag-option--agentic',
+  },
+]
+
+function resolveRagMode(chat: Pick<ChatConversation, 'rag_mode'>): RagMode {
+  return chat.rag_mode === 'agentic' ? 'agentic' : 'classic'
+}
+
+function ragModeMeta(mode: RagMode) {
+  return ragModeOptions.find((option) => option.value === mode) ?? ragModeOptions[0]
+}
+
+function formatGridDate(value: string) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return '--'
+  }
+  return date.toLocaleString('zh-CN', { hour12: false })
+}
 const createInputRef = ref<HTMLInputElement | null>(null)
 const showCreateModal = ref(false)
 
@@ -2379,6 +2579,33 @@ const activeMessages = computed(() => chatStore.messages)
 const messageListRef = ref<HTMLElement | null>(null)
 const showJumpToBottom = ref(false)
 const streamingAssistantTempId = ref<string | null>(null)
+const streamingAgentTrace = ref<AgentTraceEvent[]>([])
+
+const isAgenticConversation = computed(() => activeConfig.value?.rag_mode === 'agentic')
+
+function normalizeAgentTrace(raw: unknown): AgentTraceEvent[] {
+  if (!Array.isArray(raw)) {
+    return []
+  }
+  return raw.filter((row): row is AgentTraceEvent => Boolean(row) && typeof row === 'object' && typeof (row as AgentTraceEvent).step === 'string')
+}
+
+function messageAgentTrace(message: ChatMessage): AgentTraceEvent[] {
+  if (streamingAssistantTempId.value === message.id) {
+    return streamingAgentTrace.value
+  }
+  return message.agent_trace ?? []
+}
+
+function shouldShowAgentTrace(message: ChatMessage): boolean {
+  if (message.role !== 'assistant' || !isAgenticConversation.value) {
+    return false
+  }
+  if (streamingAssistantTempId.value === message.id) {
+    return streamingAgentTrace.value.length > 0 || chatStore.isGenerating
+  }
+  return (message.agent_trace?.length ?? 0) > 0
+}
 
 function onMessageListScroll() {
   const el = messageListRef.value
@@ -2418,12 +2645,22 @@ function handleChatWsPayload(raw: unknown) {
   }
   const d = raw as Record<string, unknown>
 
+  if (d.type === 'agent_step') {
+    const traceItem = d.trace
+    if (traceItem && typeof traceItem === 'object') {
+      streamingAgentTrace.value = [...streamingAgentTrace.value, traceItem as AgentTraceEvent]
+    }
+    scrollChatToBottom()
+    return
+  }
+
   if (d.type === 'error') {
     const tid = streamingAssistantTempId.value
     if (tid != null) {
       chatStore.appendMessageContent(tid, `\n\n【错误】${String((d as { message?: unknown }).message ?? '')}`)
     }
     streamingAssistantTempId.value = null
+    streamingAgentTrace.value = []
     chatStore.setGenerating(false)
     scrollChatToBottom()
     return
@@ -2444,6 +2681,7 @@ function handleChatWsPayload(raw: unknown) {
     const sid = chatStore.activeSessionId
     if (tid != null && sid != null) {
       const cites = normalizeCitations(d.citations)
+      const agentTrace = normalizeAgentTrace(d.agent_trace)
       chatStore.replaceMessage(tid, {
         id: String(d.id),
         session_id: String(d.session_id ?? sid),
@@ -2451,9 +2689,11 @@ function handleChatWsPayload(raw: unknown) {
         content: String(d.content ?? ''),
         created_at: String(d.created_at ?? new Date().toISOString()),
         ...(cites ? { citations: cites } : {}),
+        ...(agentTrace.length ? { agent_trace: agentTrace } : {}),
       })
     }
     streamingAssistantTempId.value = null
+    streamingAgentTrace.value = []
     scrollChatToBottom()
     return
   }
@@ -2546,6 +2786,12 @@ const MEMORY_TOKEN_HELP =
 
 const REFINE_MULTITURN_HELP =
   '开启后，结合最近对话将「它呢」「刚才那个」等省略问句改写成完整检索语句，再搜索知识库。仅影响检索 query，不改变对话记忆窗口。'
+
+const AGENTIC_MAX_ITERATIONS_HELP =
+  'Agentic 模式下检索-评估-改写循环的上限（1–5）。轮数越多越可能找到合适片段，但耗时与 token 消耗也会增加。'
+
+const AGENTIC_MIN_RELEVANT_DOCS_HELP =
+  '评估阶段判定「检索已足够」所需的最少相关片段数（1–10）。达到该数量后进入生成；否则在轮数上限内尝试改写查询后重检。'
 
 const SYSTEM_PROMPT_HELP =
   '定义助手的人设与回答规则。可用 {knowledge} 占位符，本轮检索到的知识库片段会自动插入该位置；留空保存后服务端会按是否绑定知识库选择默认模板。'
@@ -2660,6 +2906,37 @@ function clampChatRetrievalTopK(n: number): number {
   if (!Number.isFinite(n)) return DEFAULT_CHAT_TOP_K
   return Math.min(50, Math.max(1, Math.round(n)))
 }
+
+function clampAgenticMaxIterations(raw: unknown): number {
+  const n = Number(raw)
+  if (!Number.isFinite(n)) return DEFAULT_AGENTIC_MAX_ITERATIONS
+  return Math.min(5, Math.max(1, Math.round(n)))
+}
+
+function clampAgenticMinRelevantDocs(raw: unknown): number {
+  const n = Number(raw)
+  if (!Number.isFinite(n)) return DEFAULT_AGENTIC_MIN_RELEVANT_DOCS
+  return Math.min(10, Math.max(1, Math.round(n)))
+}
+
+const chatAgenticMaxIterations = ref(DEFAULT_AGENTIC_MAX_ITERATIONS)
+const chatAgenticMinRelevantDocs = ref(DEFAULT_AGENTIC_MIN_RELEVANT_DOCS)
+
+watch(
+  () => activeConfig.value?.agentic_max_iterations,
+  (v) => {
+    chatAgenticMaxIterations.value = clampAgenticMaxIterations(v ?? DEFAULT_AGENTIC_MAX_ITERATIONS)
+  },
+  { immediate: true },
+)
+
+watch(
+  () => activeConfig.value?.agentic_min_relevant_docs,
+  (v) => {
+    chatAgenticMinRelevantDocs.value = clampAgenticMinRelevantDocs(v ?? DEFAULT_AGENTIC_MIN_RELEVANT_DOCS)
+  },
+  { immediate: true },
+)
 
 const chatTopK = ref(DEFAULT_CHAT_TOP_K)
 const skipTopKFromKbWatch = ref(false)
@@ -3469,21 +3746,15 @@ watch(
   { deep: true },
 )
 
-const sortedSessionsInConversation = computed(() => {
-  const list = [...chatStore.sessionsInConversation]
-  const pinned = pinnedSessionIds.value
-  const pinnedSet = new Set(pinned)
-  const pinnedRows: ChatSession[] = []
-  for (const id of pinned) {
-    const row = list.find((s) => s.id === id)
-    if (row) {
-      pinnedRows.push(row)
-    }
-  }
-  const rest = list.filter((s) => !pinnedSet.has(s.id))
-  rest.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())
-  return [...pinnedRows, ...rest]
-})
+const groupedSessionsInConversation = computed(() =>
+  groupSessionsByTime(chatStore.sessionsInConversation, {
+    pinnedIds: pinnedSessionIds.value,
+  }),
+)
+
+const sortedSessionsInConversation = computed(() =>
+  groupedSessionsInConversation.value.flatMap((group) => group.sessions),
+)
 
 function exitSessionBatchMode() {
   sessionBatchMode.value = false
@@ -3750,6 +4021,7 @@ watch(() => chatStore.activeSessionId, (newId, oldId) => {
   settingsDrawerOpen.value = false
   kbDropdownOpen.value = false
   streamingAssistantTempId.value = null
+  streamingAgentTrace.value = []
   suggestedQuestions.value = []
   chatStore.setGenerating(false)
   streamAbort.value?.abort()
@@ -3760,6 +4032,9 @@ watch(() => chatStore.activeSessionId, (newId, oldId) => {
 
 const openCreateChatModal = async () => {
   newChatTitle.value = ''
+  newChatRagMode.value = 'classic'
+  newChatAgenticMaxIterations.value = DEFAULT_AGENTIC_MAX_ITERATIONS
+  newChatAgenticMinRelevantDocs.value = DEFAULT_AGENTIC_MIN_RELEVANT_DOCS
   showCreateModal.value = true
   await nextTick()
   createInputRef.value?.focus()
@@ -3771,7 +4046,12 @@ const handleCreate = async () => {
     return
   }
   try {
-    await chatStore.createConversation(title)
+    const configuration: Partial<ChatConfiguration> = { rag_mode: newChatRagMode.value }
+    if (newChatRagMode.value === 'agentic') {
+      configuration.agentic_max_iterations = clampAgenticMaxIterations(newChatAgenticMaxIterations.value)
+      configuration.agentic_min_relevant_docs = clampAgenticMinRelevantDocs(newChatAgenticMinRelevantDocs.value)
+    }
+    await chatStore.createConversation(title, configuration)
     showCreateModal.value = false
   } catch (e: unknown) {
     console.error('Create conversation failed', e)
@@ -3830,6 +4110,7 @@ const handleSend = async () => {
     created_at: new Date().toISOString(),
   })
   streamingAssistantTempId.value = tempAssistantId
+  streamingAgentTrace.value = []
   chatStore.setGenerating(true)
   suggestedQuestions.value = []
 
@@ -3894,6 +4175,28 @@ const updateConfig = async (key: string, value: any) => {
   }
 }
 
+function onAgenticMaxIterationsCommit() {
+  if (!activeConfig.value) return
+  const v = clampAgenticMaxIterations(chatAgenticMaxIterations.value)
+  chatAgenticMaxIterations.value = v
+  const prev = clampAgenticMaxIterations(
+    activeConfig.value.agentic_max_iterations ?? DEFAULT_AGENTIC_MAX_ITERATIONS,
+  )
+  if (v === prev) return
+  void updateConfig('agentic_max_iterations', v)
+}
+
+function onAgenticMinRelevantDocsCommit() {
+  if (!activeConfig.value) return
+  const v = clampAgenticMinRelevantDocs(chatAgenticMinRelevantDocs.value)
+  chatAgenticMinRelevantDocs.value = v
+  const prev = clampAgenticMinRelevantDocs(
+    activeConfig.value.agentic_min_relevant_docs ?? DEFAULT_AGENTIC_MIN_RELEVANT_DOCS,
+  )
+  if (v === prev) return
+  void updateConfig('agentic_min_relevant_docs', v)
+}
+
 function onChatChunkTopKCommit() {
   if (!activeConfig.value) return
   const raw = chatChunkTopK.value
@@ -3940,26 +4243,30 @@ function onChatTopKCommit() {
 <style scoped>
 .rail-back-nav {
   display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
   align-items: center;
-  justify-content: flex-start;
-  gap: 8px;
-  flex-wrap: wrap;
-  padding: 8px 0 12px;
-  margin: 0 0 10px;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px 4px 10px;
+  margin: 4px 0 6px;
   border-bottom: 1px solid var(--border-color);
 }
 
 .rail-back-btn {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  flex-shrink: 0;
+  gap: 5px;
   padding: 6px 10px;
+  min-height: 32px;
   border: none;
   border-radius: 10px;
   background: var(--brand-primary-light);
   color: var(--brand-primary);
-  font-size: 0.9rem;
+  font-size: 0.88rem;
   font-weight: 600;
+  line-height: 1.25;
   cursor: pointer;
   transition: background 0.15s ease, color 0.15s ease;
 }
@@ -3969,16 +4276,19 @@ function onChatTopKCommit() {
 }
 
 .rail-bc-sep {
+  flex-shrink: 0;
   color: var(--text-tertiary);
   font-size: 0.9rem;
   user-select: none;
 }
 
 .rail-bc-title {
+  flex: 1;
+  min-width: 0;
   font-size: 0.9rem;
   font-weight: 600;
   color: var(--text-primary);
-  max-width: 160px;
+  line-height: 1.35;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3986,19 +4296,20 @@ function onChatTopKCommit() {
 
 .session-rail-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  margin: 0 0 10px;
-  padding: 8px 0 12px;
+  gap: 6px 8px;
+  margin: 0 0 6px;
+  padding: 4px 0 8px;
   border-bottom: 1px solid var(--border-color);
 }
 
 .session-rail-title {
   margin: 0;
-  flex: 1;
-  min-width: 0;
-  font-size: 1rem;
+  flex: 1 1 auto;
+  min-width: 2.5em;
+  font-size: 0.92rem;
   font-weight: 600;
   color: var(--text-primary);
   line-height: 1.2;
@@ -4009,6 +4320,7 @@ function onChatTopKCommit() {
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
+  margin-left: auto;
 }
 
 .btn-session-batch {
@@ -4084,17 +4396,24 @@ function onChatTopKCommit() {
 .btn-new-session {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 4px 10px;
-  font-size: 0.8125rem;
+  justify-content: center;
+  gap: 5px;
+  min-height: 32px;
+  min-width: 96px;
+  padding: 6px 14px;
+  font-size: 0.84rem;
   font-weight: 600;
-  border-radius: 8px;
+  border-radius: 10px;
   border: none;
   background: var(--brand-primary);
   color: #fff;
   cursor: pointer;
   flex-shrink: 0;
   white-space: nowrap;
+}
+
+.btn-new-session-label {
+  line-height: 1.2;
 }
 
 .btn-new-session:hover {
@@ -4104,40 +4423,64 @@ function onChatTopKCommit() {
 .session-lines {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
+}
+
+.session-group-label {
+  padding: 12px 8px 4px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  line-height: 1.2;
+  user-select: none;
+}
+
+.session-group-label:first-child {
+  padding-top: 2px;
 }
 
 .session-line {
   position: relative;
   display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 40px;
-  padding: 8px 10px;
-  border-radius: 10px;
+  align-items: flex-start;
+  gap: 6px;
+  min-height: 36px;
+  padding: 7px 6px 7px 8px;
+  border-radius: 8px;
   cursor: pointer;
   transition: background 0.15s ease;
 }
 
 .session-line:hover,
-.session-line.active,
 .session-line.batch-selected {
   background: var(--bg-tertiary);
 }
 
+.session-line.active {
+  background: var(--brand-primary-light, rgba(37, 99, 235, 0.1));
+}
+
 .session-line.active,
 .session-line.batch-selected {
-  box-shadow: inset 0 0 0 1px var(--border-color);
+  box-shadow: none;
 }
 
 .session-line-title {
   flex: 1;
   min-width: 0;
-  font-size: 0.9rem;
+  padding-top: 2px;
+  font-size: 0.84rem;
   color: var(--text-primary);
+  line-height: 1.38;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  word-break: normal;
+}
+
+.session-line.active .session-line-title {
+  color: var(--brand-primary);
+  font-weight: 600;
 }
 
 .session-line-input {
@@ -4151,21 +4494,22 @@ function onChatTopKCommit() {
 .session-line-actions {
   position: relative;
   flex-shrink: 0;
+  margin-top: 0;
 }
 
 .session-line-more {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   border: none;
   border-radius: 6px;
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
-  opacity: 0;
+  opacity: 0.45;
   transition: opacity 0.12s ease, background 0.12s ease;
 }
 
@@ -5135,7 +5479,8 @@ function onChatTopKCommit() {
 .page-shell.chat-view {
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  gap: 12px;
+  margin-left: 0;
   flex: 1 1 0%;
   min-height: 0;
   height: 100%;
@@ -5169,8 +5514,8 @@ function onChatTopKCommit() {
 
 .chat-layout {
   display: grid;
-  grid-template-columns: 320px minmax(0, 1fr);
-  gap: 24px;
+  grid-template-columns: 252px minmax(0, 1fr);
+  gap: 12px;
   align-items: stretch;
   flex: 1 1 0%;
   min-height: 0;
@@ -5181,7 +5526,7 @@ function onChatTopKCommit() {
 }
 
 .chat-layout.chat-layout--settings-open {
-  grid-template-columns: 320px minmax(0, 1fr) minmax(300px, 380px);
+  grid-template-columns: 252px minmax(0, 1fr) minmax(280px, 360px);
 }
 
 .chat-layout > .conversation-rail,
@@ -5207,10 +5552,12 @@ function onChatTopKCommit() {
 .conversation-rail {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 12px;
   min-height: 0;
   max-height: 100%;
   overflow: hidden;
+  padding: 20px 12px 14px 16px;
+  box-sizing: border-box;
 }
 
 .conversation-rail .session-lines {
@@ -5268,7 +5615,8 @@ function onChatTopKCommit() {
   max-height: 100%;
   align-self: stretch;
   overflow: hidden;
-  gap: 18px;
+  gap: 14px;
+  padding: 18px 20px;
 }
 
 .chat-main-header {
@@ -6075,7 +6423,7 @@ function onChatTopKCommit() {
 .msg-stack--assistant {
   flex: 1;
   min-width: 0;
-  max-width: min(720px, 100%);
+  max-width: min(820px, 100%);
 }
 
 .msg-stack--user {
@@ -6127,9 +6475,7 @@ function onChatTopKCommit() {
 .msg-text--assistant {
   margin: 0;
   color: var(--text-primary);
-  line-height: 1.75;
   font-size: 0.95rem;
-  white-space: pre-wrap;
   word-break: break-word;
 }
 
@@ -6202,7 +6548,7 @@ function onChatTopKCommit() {
 
 .composer {
   flex-shrink: 0;
-  padding-top: 16px;
+  padding-top: 10px;
   border-top: 1px solid var(--border-color);
   background: var(--bg-secondary);
 }
@@ -6216,20 +6562,23 @@ function onChatTopKCommit() {
   display: block;
   width: 100%;
   box-sizing: border-box;
-  padding: 12px 118px 52px 14px;
-  min-height: 120px;
+  padding: 8px 104px 40px 12px;
+  min-height: 56px;
+  max-height: 160px;
   resize: vertical;
+  line-height: 1.45;
 }
 
 .composer-send {
   position: absolute;
-  right: 10px;
-  bottom: 10px;
+  right: 8px;
+  bottom: 8px;
   z-index: 1;
   flex-shrink: 0;
-  padding: 8px 14px;
-  min-height: 38px;
-  border-radius: 12px;
+  padding: 6px 12px;
+  min-height: 32px;
+  font-size: 0.8125rem;
+  border-radius: 10px;
 }
 
 .compact-heading {
@@ -6540,18 +6889,25 @@ function onChatTopKCommit() {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 1.35em;
-  margin: 0 1px;
-  padding: 0 6px;
-  border-radius: 6px;
-  font-size: 0.72rem;
+  min-width: 1.25em;
+  height: 1.25em;
+  margin: 0 2px;
+  padding: 0 4px;
+  border-radius: 999px;
+  font-size: 0.68rem;
   font-weight: 700;
-  line-height: 1.5;
-  vertical-align: 0.15em;
+  line-height: 1;
+  vertical-align: super;
+  text-decoration: none;
   background: rgba(100, 116, 139, 0.16);
   color: var(--text-secondary);
   border: 1px solid rgba(100, 116, 139, 0.35);
   cursor: pointer;
+  white-space: nowrap;
+}
+
+.msg-citation-badge + .msg-citation-badge {
+  margin-left: 3px;
 }
 
 .msg-citation-badge:hover {
@@ -6668,43 +7024,47 @@ function onChatTopKCommit() {
   border: 1px solid rgba(168, 85, 247, 0.32);
 }
 
+.citation-chunk-modal-overlay {
+  z-index: 1200;
+}
+
 .citation-chunk-modal {
-  max-width: 640px;
-  width: min(96vw, 640px);
+  width: min(760px, calc(100vw - 32px));
+  max-width: none;
+  max-height: min(88vh, 900px);
+  display: flex;
+  flex-direction: column;
+}
+
+.citation-chunk-modal--wide {
+  width: min(1040px, calc(100vw - 32px));
+}
+
+.citation-chunk-modal-head {
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.citation-chunk-modal-head h3 {
+  margin: 0;
+}
+
+.citation-chunk-modal-sub {
+  margin: 6px 0 0;
+  font-size: 0.86rem;
+  color: var(--text-secondary);
+  line-height: 1.45;
 }
 
 .citation-chunk-modal-base {
-  max-height: min(58vh, 520px);
+  flex: 1;
+  min-height: 0;
+  max-height: none;
   overflow: auto;
-}
-
-.citation-chunk-modal-meta {
-  margin: 0 0 12px;
-  font-size: 0.88rem;
-  color: var(--text-secondary);
-  line-height: 1.5;
-}
-
-.citation-chunk-modal-meta strong {
-  color: var(--text-primary);
 }
 
 .citation-chunk-modal-err {
   margin: 0;
-}
-
-.citation-chunk-modal-body {
-  margin: 0;
-  padding: 12px 14px;
-  border-radius: 12px;
-  border: 1px solid var(--border-color);
-  background: var(--bg-secondary);
-  font-family: inherit;
-  font-size: 0.84rem;
-  line-height: 1.55;
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--text-primary);
 }
 
 .citation-chunk-modal-footer {
@@ -6804,30 +7164,145 @@ function onChatTopKCommit() {
 
 .chat-cards-container {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 20px;
+  grid-template-columns: repeat(auto-fill, minmax(268px, 1fr));
+  gap: 16px;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   align-content: start;
 }
 
-.chat-grid-card {
-  display: flex;
-  align-items: flex-start;
-  gap: 16px;
-  padding: 16px 20px;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background: var(--bg-tertiary);
-  cursor: pointer;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+.chat-tile {
   position: relative;
+  border: 1px solid var(--border-color);
+  border-radius: 18px;
+  background: var(--bg-tertiary);
+  padding: 18px;
+  box-shadow: var(--card-shadow-xs);
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-height: 190px;
+  cursor: pointer;
+  transition: border-color 0.2s ease, transform 0.2s ease, background 0.2s ease;
 }
 
-.chat-grid-card:hover {
+.chat-tile:hover {
   border-color: var(--brand-primary);
-  box-shadow: var(--card-shadow-sm);
+  background: var(--bg-secondary);
+  transform: translateY(-1px);
+}
+
+.chat-tile:focus-visible {
+  box-shadow: 0 0 0 4px var(--brand-primary-light);
+}
+
+.chat-tile-top {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.chat-tile-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+
+.chat-tile-avatar--classic {
+  background: linear-gradient(135deg, #1d4ed8 0%, #3b82f6 100%);
+  color: #eff6ff;
+}
+
+.chat-tile-avatar--agentic {
+  background: linear-gradient(135deg, #6d28d9 0%, #8b5cf6 100%);
+  color: #f5f3ff;
+}
+
+.chat-tile-title {
+  margin: 0;
+  font-size: 1.06rem;
+  font-weight: 600;
+  line-height: 1.4;
+  word-break: break-word;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  color: var(--text-primary);
+}
+
+.chat-tile-title-input {
+  padding: 4px 8px;
+  font-size: 1rem;
+  margin: 0;
+  width: 100%;
+}
+
+.chat-tile-desc {
+  margin: 0;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  font-size: 0.88rem;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.chat-tile-tags {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.chat-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 5px 10px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  font-size: 0.76rem;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-tag--classic {
+  border-color: rgba(59, 130, 246, 0.28);
+  background: rgba(59, 130, 246, 0.06);
+  color: #1d4ed8;
+}
+
+.chat-tag--agentic {
+  border-color: rgba(124, 58, 237, 0.35);
+  background: rgba(124, 58, 237, 0.1);
+  color: #7c3aed;
+}
+
+.chat-tile-meta-row {
+  margin-top: auto;
+  padding-top: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.chat-tile-date {
+  color: var(--text-tertiary);
+  font-size: 0.82rem;
 }
 
 .chat-grid-card-menu-container {
@@ -6840,9 +7315,9 @@ function onChatTopKCommit() {
 .tile-menu-trigger {
   width: 30px;
   height: 30px;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-secondary);
   color: var(--text-secondary);
   font-size: 20px;
   line-height: 1;
@@ -6854,9 +7329,10 @@ function onChatTopKCommit() {
   transition: all 0.2s ease;
 }
 
-.tile-menu-trigger:hover, .chat-grid-card-menu-container:has(.tile-menu) .tile-menu-trigger {
-  border-color: var(--border-color);
-  background: var(--bg-secondary);
+.tile-menu-trigger:hover,
+.chat-grid-card-menu-container:has(.tile-menu) .tile-menu-trigger {
+  border-color: var(--brand-primary);
+  background: var(--bg-tertiary);
 }
 
 .tile-menu {
@@ -6893,51 +7369,13 @@ function onChatTopKCommit() {
   color: var(--danger-color);
 }
 
-.chat-grid-card-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border-radius: 6px;
-  background: var(--brand-primary-light);
-  color: var(--brand-primary);
-  flex-shrink: 0;
-}
-
-.chat-grid-card-content {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-width: 0; /* allows text truncation */
-}
-
-.chat-grid-card-content h4 {
-  margin: 0;
-  font-size: 1rem;
-  color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  word-break: break-all;
-  line-height: 1.4;
-}
-
-.chat-grid-card-content span {
-  font-size: 0.85rem;
-  color: var(--text-tertiary);
-  margin-top: 4px;
-}
-
 @media (max-width: 1360px) {
   .chat-layout {
-    grid-template-columns: 280px minmax(0, 1fr);
+    grid-template-columns: 220px minmax(0, 1fr);
   }
 
   .chat-layout.chat-layout--settings-open {
-    grid-template-columns: 280px minmax(0, 1fr) minmax(280px, 340px);
+    grid-template-columns: 200px minmax(0, 1fr) minmax(260px, 320px);
   }
 
   .chat-layout.chat-layout--embed-panel:not(.chat-layout--settings-open) {
@@ -6946,6 +7384,128 @@ function onChatTopKCommit() {
 
   .chat-layout.chat-layout--embed-panel.chat-layout--settings-open {
     grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+  }
+}
+
+.chat-create-rag-hint {
+  margin: 8px 0 0;
+  font-size: 0.82rem;
+  color: var(--text-tertiary);
+  line-height: 1.5;
+}
+
+.chat-create-agentic-tuning,
+.chat-agentic-tuning {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+@media (max-width: 560px) {
+  .chat-create-agentic-tuning,
+  .chat-agentic-tuning {
+    grid-template-columns: 1fr;
+  }
+}
+
+.chat-rag-picker {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.chat-rag-option {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px;
+  border: 1.5px solid var(--border-color);
+  border-radius: 14px;
+  background: var(--bg-tertiary);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+}
+
+.chat-rag-option:hover {
+  border-color: var(--brand-primary);
+  background: var(--bg-secondary);
+}
+
+.chat-rag-option.is-active {
+  box-shadow: 0 0 0 3px var(--brand-primary-light);
+}
+
+.chat-rag-option--classic.is-active {
+  border-color: rgba(59, 130, 246, 0.55);
+  background: rgba(59, 130, 246, 0.06);
+}
+
+.chat-rag-option--agentic.is-active {
+  border-color: rgba(124, 58, 237, 0.5);
+  background: rgba(124, 58, 237, 0.06);
+}
+
+.chat-rag-option-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  flex-shrink: 0;
+}
+
+.chat-rag-option--classic .chat-rag-option-icon {
+  background: linear-gradient(135deg, #1d4ed8 0%, #3b82f6 100%);
+  color: #eff6ff;
+}
+
+.chat-rag-option--agentic .chat-rag-option-icon {
+  background: linear-gradient(135deg, #6d28d9 0%, #8b5cf6 100%);
+  color: #f5f3ff;
+}
+
+.chat-rag-option-body {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding-right: 18px;
+}
+
+.chat-rag-option-body strong {
+  color: var(--text-primary);
+  font-size: 0.92rem;
+}
+
+.chat-rag-option-body span {
+  color: var(--text-tertiary);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.chat-rag-option-check {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--brand-primary);
+  color: #fff;
+}
+
+.chat-rag-option--agentic.is-active .chat-rag-option-check {
+  background: #7c3aed;
+}
+
+@media (max-width: 560px) {
+  .chat-rag-picker {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -7001,6 +7561,10 @@ function onChatTopKCommit() {
 }
 
 @media (max-width: 960px) {
+  .page-shell.chat-view {
+    margin-left: 0;
+  }
+
   .chat-layout {
     grid-template-columns: 1fr;
   }

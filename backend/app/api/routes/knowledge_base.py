@@ -105,6 +105,7 @@ from app.services.knowledge_document_service import (
     process_document,
     reindex_document,
     resolve_original_file_path,
+    resolve_word_preview_docx_path,
     update_document_chunking_config,
     upload_document,
 )
@@ -807,6 +808,31 @@ def get_document_parse_log_endpoint(
     return get_document_parse_log(db, space_id=current_space.id, kb_id=kb_id, document_id=document_id)
 
 
+@router.get("/{kb_id}/documents/{document_id}/word-preview")
+def get_document_word_preview(
+    kb_id: int,
+    document_id: int,
+    current_space: CurrentSpace,
+    membership: RequireMembership,
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    """返回 Word 预览用 docx（.docx 为原文件；.doc 经 LibreOffice 转换并缓存）。"""
+    document = get_document_or_error(db, space_id=current_space.id, kb_id=kb_id, document_id=document_id)
+    if document.status == KnowledgeDocumentStatus.DELETED.value:
+        raise AppError(status_code=404, code="DOCUMENT_NOT_FOUND", message="文档不存在")
+    path = resolve_word_preview_docx_path(document)
+    download_name = document.file_name
+    ext = (document.file_ext or "").strip().lower().lstrip(".")
+    if ext == "doc" and download_name.lower().endswith(".doc"):
+        download_name = f"{download_name[:-4]}.docx"
+    return FileResponse(
+        path,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename=download_name,
+        content_disposition_type="inline",
+    )
+
+
 @router.get("/{kb_id}/documents/{document_id}/file")
 def get_document_original_file(
     kb_id: int,
@@ -1058,6 +1084,10 @@ def cancel_document_process_endpoint(
     current_user: CurrentUser,
     membership: RequireMembership,
     db: Session = Depends(get_db),
+    preserve_partial: bool = Query(
+        default=False,
+        description="是否保留已切片/已向量化内容以便后续继续解析（续传）",
+    ),
 ) -> dict:
     """取消进行中的文档解析/重建任务。"""
     return cancel_document_process(
@@ -1066,6 +1096,7 @@ def cancel_document_process_endpoint(
         kb_id=kb_id,
         document_id=document_id,
         user_id=current_user.id,
+        preserve_partial=preserve_partial,
     )
 
 

@@ -65,6 +65,7 @@ services:
       COMMON_STORAGETYPE: local
     volumes:
       - milvus_data:/var/lib/milvus
+      - ./configs/milvus-user.yaml:/milvus/configs/user.yaml:ro
     depends_on:
       postgres:
         condition: service_healthy

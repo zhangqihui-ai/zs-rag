@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import httpx
 
+from app.core import embedding_cache
 from app.core.config import get_settings
 from app.core.errors import AppError
 from app.core.provider_adapter import ProviderResponse, embed_texts
@@ -46,6 +50,10 @@ EMBEDDING_RETRYABLE_MARKERS = (
     "Connection refused",
     "RemoteProtocolError",
 )
+
+_QUERY_EMBEDDING_CACHE_MAX = 256
+_query_embedding_cache: OrderedDict[tuple[int, str], list[float]] = OrderedDict()
+_query_embedding_cache_lock = threading.Lock()
 
 
 def _ensure_embedding_model(model: AIModel) -> None:
@@ -211,22 +219,171 @@ def _generate_embeddings_for_batch(model: AIModel, texts: list[str]) -> list[lis
     _raise_embedding_failed(result.message)
 
 
+EMBEDDING_CONCURRENCY_HARD_LIMIT = 16
+
+
+def resolve_embedding_concurrency(config: object) -> int:
+    """解析知识库级 embedding 并发度（embedding concurrency）。
+
+    优先读取 ``config["embedding_concurrency"]``（知识库配置页可覆盖），
+    缺省回落到全局 ``settings.embedding_max_concurrency``。结果统一夹在
+    ``[1, EMBEDDING_CONCURRENCY_HARD_LIMIT]`` 区间，避免并发过高拖垮后端。
+    """
+    settings = get_settings()
+    fallback = max(
+        1, min(int(settings.embedding_max_concurrency), EMBEDDING_CONCURRENCY_HARD_LIMIT)
+    )
+    if isinstance(config, dict):
+        raw = config.get("embedding_concurrency")
+        if raw is not None:
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                return fallback
+            return max(1, min(value, EMBEDDING_CONCURRENCY_HARD_LIMIT))
+    return fallback
+
+
 def generate_embeddings(
     model: AIModel,
     texts: list[str],
     *,
     batch_size: int | None = None,
+    max_concurrency: int | None = None,
     on_batch_start: Callable[[int, int, int, int], None] | None = None,
     on_progress: Callable[[int, int, float | None], None] | None = None,
+    on_cache_stats: Callable[[int, int], None] | None = None,
 ) -> list[list[float]]:
+    """生成向量；命中持久化 embedding 缓存的段不再调用 GPU 计算。
+
+    ``on_cache_stats(hit_count, total)`` 在使用缓存时回调，便于上层展示复用进度。
+    """
     _ensure_embedding_model(model)
     if not texts:
         return []
 
     total = len(texts)
+    use_cache = bool(getattr(get_settings(), "embedding_cache_enabled", True)) and embedding_cache.is_enabled()
+
+    cached_vectors: list[list[float] | None] = [None] * total
+    text_hashes: list[str | None] = [None] * total
+    miss_indices: list[int]
+    if use_cache:
+        prepared = [prepare_text_for_embedding(t) for t in texts]
+        hashes = [embedding_cache.make_hash(model.model_name, p) for p in prepared]
+        hits = embedding_cache.get_many(model.id, hashes)
+        miss_indices = []
+        for i, h in enumerate(hashes):
+            text_hashes[i] = h
+            vec = hits.get(h)
+            if vec is not None:
+                cached_vectors[i] = vec
+            else:
+                miss_indices.append(i)
+        if hits:
+            logger.info(
+                "embedding cache hit %s/%s (model_id=%s)", len(hits), total, model.id
+            )
+    else:
+        miss_indices = list(range(total))
+
+    hit_count = total - len(miss_indices)
+    if on_cache_stats is not None and use_cache:
+        on_cache_stats(hit_count, total)
+
+    # 全部命中：直接返回，进度直接补满
+    if not miss_indices:
+        if on_progress is not None:
+            on_progress(total, total, 0.0)
+        return [vec for vec in cached_vectors if vec is not None]
+
+    miss_texts = [texts[i] for i in miss_indices]
+
+    wrapped_progress: Callable[[int, int, float | None], None] | None = None
+    if on_progress is not None:
+        def wrapped_progress(done_miss: int, _total_miss: int, elapsed: float | None) -> None:
+            on_progress(min(hit_count + done_miss, total), total, elapsed)
+
+    miss_vectors = _compute_embeddings(
+        model,
+        miss_texts,
+        batch_size=batch_size,
+        max_concurrency=max_concurrency,
+        on_batch_start=on_batch_start,
+        on_progress=wrapped_progress,
+    )
+
+    if use_cache and miss_vectors:
+        dim = len(miss_vectors[0]) if miss_vectors[0] else None
+        to_put: dict[str, list[float]] = {}
+        for local_idx, global_idx in enumerate(miss_indices):
+            h = text_hashes[global_idx]
+            if h is not None and local_idx < len(miss_vectors):
+                to_put[h] = miss_vectors[local_idx]
+        embedding_cache.put_many(model.id, to_put, dim=dim)
+
+    result: list[list[float]] = []
+    miss_iter = iter(miss_vectors)
+    for i in range(total):
+        cached = cached_vectors[i]
+        result.append(cached if cached is not None else next(miss_iter))
+    return result
+
+
+def _compute_embeddings(
+    model: AIModel,
+    texts: list[str],
+    *,
+    batch_size: int | None,
+    max_concurrency: int | None,
+    on_batch_start: Callable[[int, int, int, int], None] | None,
+    on_progress: Callable[[int, int, float | None], None] | None,
+) -> list[list[float]]:
+    """实际计算向量（不经缓存）：根据并发度走串行或有界并发批处理。"""
+    total = len(texts)
     chunk_size = batch_size if batch_size is not None else get_settings().embedding_batch_size
     chunk_size = max(1, min(int(chunk_size), 128))
     total_batches = (total + chunk_size - 1) // chunk_size
+
+    if max_concurrency is None:
+        concurrency = max(1, min(int(get_settings().embedding_max_concurrency), EMBEDDING_CONCURRENCY_HARD_LIMIT))
+    else:
+        concurrency = max(1, min(int(max_concurrency), EMBEDDING_CONCURRENCY_HARD_LIMIT))
+    concurrency = min(concurrency, total_batches)
+
+    if concurrency <= 1:
+        return _generate_embeddings_serial(
+            model,
+            texts,
+            chunk_size=chunk_size,
+            total=total,
+            total_batches=total_batches,
+            on_batch_start=on_batch_start,
+            on_progress=on_progress,
+        )
+
+    return _generate_embeddings_concurrent(
+        model,
+        texts,
+        chunk_size=chunk_size,
+        total=total,
+        total_batches=total_batches,
+        concurrency=concurrency,
+        on_batch_start=on_batch_start,
+        on_progress=on_progress,
+    )
+
+
+def _generate_embeddings_serial(
+    model: AIModel,
+    texts: list[str],
+    *,
+    chunk_size: int,
+    total: int,
+    total_batches: int,
+    on_batch_start: Callable[[int, int, int, int], None] | None,
+    on_progress: Callable[[int, int, float | None], None] | None,
+) -> list[list[float]]:
     vectors: list[list[float]] = []
     for batch_index, start in enumerate(range(0, total, chunk_size), start=1):
         batch = texts[start : start + chunk_size]
@@ -250,11 +407,97 @@ def generate_embeddings(
     return vectors
 
 
+def _generate_embeddings_concurrent(
+    model: AIModel,
+    texts: list[str],
+    *,
+    chunk_size: int,
+    total: int,
+    total_batches: int,
+    concurrency: int,
+    on_batch_start: Callable[[int, int, int, int], None] | None,
+    on_progress: Callable[[int, int, float | None], None] | None,
+) -> list[list[float]]:
+    """多实例 Embedding 后端下的有界并发向量化；保持返回顺序与原文一致。"""
+    batches = [texts[start : start + chunk_size] for start in range(0, total, chunk_size)]
+    results: list[list[list[float]] | None] = [None] * len(batches)
+    done_lock = threading.Lock()
+    done_count = 0
+
+    # 并发模式下逐批播报开始信息会刷屏，这里仅在首批播报一次以提示"请求已发出"。
+    if on_batch_start is not None:
+        on_batch_start(1, total_batches, len(batches[0]), 0)
+
+    def _work(index: int) -> tuple[int, list[list[float]], float, int]:
+        started = time.monotonic()
+        vecs = _generate_embeddings_for_batch(model, batches[index])
+        return index, vecs, time.monotonic() - started, len(batches[index])
+
+    logger.info(
+        "embedding concurrent start: %s texts in %s batches, concurrency=%s",
+        total,
+        total_batches,
+        concurrency,
+    )
+    executor = ThreadPoolExecutor(max_workers=concurrency)
+    try:
+        futures = [executor.submit(_work, i) for i in range(len(batches))]
+        for future in as_completed(futures):
+            index, vecs, batch_elapsed, batch_len = future.result()
+            results[index] = vecs
+            with done_lock:
+                done_count += batch_len
+                done_now = done_count
+            if on_progress is not None:
+                on_progress(done_now, total, batch_elapsed)
+            logger.info(
+                "embedding batch done (%s/%s texts, %.1fs)",
+                done_now,
+                total,
+                batch_elapsed,
+            )
+    except BaseException:
+        # 取消或异常：尽快放弃尚未开始的批次，避免无谓的 GPU 调用。
+        for pending in futures:
+            pending.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        executor.shutdown(wait=True)
+
+    vectors: list[list[float]] = []
+    for batch_vecs in results:
+        if batch_vecs is None:
+            raise AppError(
+                status_code=502,
+                code="EMBEDDING_RESPONSE_INVALID",
+                message="并发向量化存在缺失批次",
+            )
+        vectors.extend(batch_vecs)
+    return vectors
+
+
 def generate_query_embedding(model: AIModel, text: str) -> list[float]:
+    """检索用查询向量；同模型 + 同文本在进程内缓存，避免重复调用慢速 Embedding API。"""
+    _ensure_embedding_model(model)
+    prepared = prepare_text_for_embedding(text)
+    cache_key = (int(model.id), prepared)
+    with _query_embedding_cache_lock:
+        cached = _query_embedding_cache.get(cache_key)
+        if cached is not None:
+            _query_embedding_cache.move_to_end(cache_key)
+            return cached
+
     vectors = generate_embeddings(model, [text])
     if not vectors:
         raise AppError(status_code=502, code="EMBEDDING_RESPONSE_INVALID", message="未返回查询向量")
-    return vectors[0]
+    vector = vectors[0]
+    with _query_embedding_cache_lock:
+        _query_embedding_cache[cache_key] = vector
+        _query_embedding_cache.move_to_end(cache_key)
+        while len(_query_embedding_cache) > _QUERY_EMBEDDING_CACHE_MAX:
+            _query_embedding_cache.popitem(last=False)
+    return vector
 
 
 def probe_embedding_dimension(model: AIModel) -> int:

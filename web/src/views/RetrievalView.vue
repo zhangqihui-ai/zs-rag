@@ -1,10 +1,5 @@
 <template>
-  <Layout>
-    <div class="page-shell retrieval-page">
-      <div class="page-intro">
-        <h1 class="page-intro-title">知识检索</h1>
-      </div>
-
+  <div class="retrieval-page">
       <section
         class="surface-card content-card retrieval-card"
         :class="{ 'retrieval-card--kb-open': retrievalKbDropdownOpen }"
@@ -99,8 +94,7 @@
           </div>
         </div>
       </section>
-    </div>
-  </Layout>
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -115,7 +109,6 @@ import {
 } from '../api/knowledge-base'
 import AppIcon from '../components/AppIcon.vue'
 import EmptyState from '../components/EmptyState.vue'
-import Layout from '../components/Layout.vue'
 import RetrievalConfigForm from '../components/knowledge-base/RetrievalConfigForm.vue'
 import RetrievalSearchResultList from '../components/knowledge-base/RetrievalSearchResultList.vue'
 import KnowledgeBaseMultiSelect from '../components/knowledge-base/KnowledgeBaseMultiSelect.vue'
@@ -240,13 +233,6 @@ onMounted(() => {
 })
 
 watch(
-  () => [authStore.currentSpace?.id, authStore.currentSpaceSlug] as const,
-  () => {
-    void loadKnowledgeBases()
-  },
-)
-
-watch(
   selectedKbIds,
   (ids) => {
     if (!retrievalKbListReady.value || knowledgeBases.value.length === 0) {
@@ -263,18 +249,7 @@ watch(
 .retrieval-page {
   display: flex;
   flex-direction: column;
-  gap: 20px;
-}
-
-.page-intro {
-  margin-bottom: 4px;
-}
-
-.page-intro-title {
-  margin: 0 0 8px;
-  font-size: 1.35rem;
-  font-weight: 700;
-  color: var(--text-primary);
+  gap: 16px;
 }
 
 .retrieval-section-head {

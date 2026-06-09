@@ -43,7 +43,7 @@ export default defineConfig({
     },
   ],
   optimizeDeps: {
-    include: ['mammoth', 'xlsx', 'pdfjs-dist'],
+    include: ['mammoth', 'xlsx', 'pdfjs-dist', 'marked'],
   },
   server: {
     port: 5173,

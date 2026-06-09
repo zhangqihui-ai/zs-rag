@@ -785,3 +785,226 @@ body.chat-settings-floating-open .app-content.app-content--chat,
 body.chat-settings-floating-open .app-content-inner.app-content-inner--chat {
   overflow: visible;
 }
+
+/* 切片/检索表格：WPS 式固定行高，长单元格单行省略，悬停 title 看全文 */
+.chunk-data-table-compact {
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.chunk-data-table-compact table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: auto;
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.chunk-data-table-compact tr {
+  height: 32px;
+}
+
+.chunk-data-table-compact th,
+.chunk-data-table-compact td {
+  height: 32px;
+  max-height: 32px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-color);
+  vertical-align: middle;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  word-break: keep-all;
+  max-width: 200px;
+  min-width: 3em;
+  box-sizing: border-box;
+  cursor: pointer;
+}
+
+.chunk-data-table-compact th.is-cell-selected,
+.chunk-data-table-compact td.is-cell-selected {
+  outline: 2px solid var(--brand-primary);
+  outline-offset: -2px;
+  background: color-mix(in srgb, var(--brand-primary) 14%, var(--bg-primary)) !important;
+  position: relative;
+  z-index: 1;
+}
+
+.chunk-data-table-compact thead th,
+.chunk-data-table-compact tbody th {
+  background: var(--bg-secondary);
+  font-weight: 600;
+  text-align: center;
+}
+
+.chunk-data-table-compact tbody tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--accent-soft, #eef4ff) 35%, transparent);
+}
+
+.chunk-data-table-compact tbody td {
+  text-align: left;
+}
+
+.chunk-data-table-compact tbody th {
+  text-align: left;
+  max-width: 11em;
+  font-weight: 600;
+  background: color-mix(in srgb, var(--bg-secondary) 80%, var(--bg-primary));
+}
+
+.chunk-data-table-compact tbody td:last-child {
+  max-width: 280px;
+}
+
+/* 对话助手消息：Markdown 排版（标题/列表/表格/代码块） */
+.chat-markdown-body {
+  line-height: 1.75;
+  color: var(--text-primary);
+}
+
+.chat-markdown-body > :first-child {
+  margin-top: 0;
+}
+
+.chat-markdown-body > :last-child {
+  margin-bottom: 0;
+}
+
+.chat-markdown-body h1 {
+  margin: 1.1em 0 0.55em;
+  font-size: 1.35rem;
+  font-weight: 700;
+  line-height: 1.35;
+  color: var(--text-primary);
+}
+
+.chat-markdown-body h2 {
+  margin: 1em 0 0.5em;
+  font-size: 1.2rem;
+  font-weight: 700;
+  line-height: 1.35;
+  color: var(--text-primary);
+}
+
+.chat-markdown-body h3 {
+  margin: 0.85em 0 0.45em;
+  font-size: 1.05rem;
+  font-weight: 700;
+  line-height: 1.4;
+  color: var(--text-primary);
+}
+
+.chat-markdown-body h4,
+.chat-markdown-body h5,
+.chat-markdown-body h6 {
+  margin: 0.75em 0 0.4em;
+  font-size: 0.98rem;
+  font-weight: 700;
+  line-height: 1.4;
+  color: var(--text-primary);
+}
+
+.chat-markdown-body p {
+  margin: 0.55em 0;
+}
+
+.chat-markdown-body strong {
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.chat-markdown-body ul,
+.chat-markdown-body ol {
+  margin: 0.5em 0 0.65em;
+  padding-left: 1.35em;
+}
+
+.chat-markdown-body li {
+  margin: 0.25em 0;
+}
+
+.chat-markdown-body li > p {
+  margin: 0.2em 0;
+}
+
+.chat-markdown-body blockquote {
+  margin: 0.65em 0;
+  padding: 0.45em 0.85em;
+  border-left: 3px solid color-mix(in srgb, var(--brand-primary) 45%, var(--border-color));
+  background: color-mix(in srgb, var(--bg-tertiary) 65%, transparent);
+  color: var(--text-secondary);
+  border-radius: 0 8px 8px 0;
+}
+
+.chat-markdown-body hr {
+  margin: 1em 0;
+  border: none;
+  border-top: 1px solid var(--border-color);
+}
+
+.chat-markdown-body code {
+  padding: 0.12em 0.35em;
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  font-size: 0.88em;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.chat-markdown-body pre {
+  margin: 0.65em 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+  overflow-x: auto;
+}
+
+.chat-markdown-body pre code {
+  padding: 0;
+  background: transparent;
+  font-size: 0.84rem;
+}
+
+.chat-markdown-body a {
+  color: var(--brand-primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.chat-markdown-table-wrap {
+  margin: 0.65em 0;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.chat-markdown-body table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.chat-markdown-body th,
+.chat-markdown-body td {
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  vertical-align: top;
+  text-align: left;
+}
+
+.chat-markdown-body thead th {
+  background: var(--bg-secondary);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.chat-markdown-body tbody tr:nth-child(even) td {
+  background: color-mix(in srgb, var(--bg-tertiary) 55%, transparent);
+}
+
+.chat-markdown-body .msg-citation-badge {
+  margin: 0 2px;
+}

@@ -1,8 +1,12 @@
 <template>
-  <div class="document-original-preview">
+  <div class="document-original-preview" :class="{ 'document-original-preview--spreadsheet': mode === 'spreadsheet' }">
     <div v-if="loading" class="document-original-preview-loading">正在加载原文…</div>
     <div v-else-if="error" class="status-box error">{{ error }}</div>
     <iframe v-else-if="mode === 'iframe' && iframeUrl" class="document-original-iframe" title="原文预览" :src="iframeUrl" />
+    <SpreadsheetOriginalPreview
+      v-else-if="mode === 'spreadsheet' && spreadsheetSheets.length"
+      :sheets="spreadsheetSheets"
+    />
     <div
       v-else-if="mode === 'html'"
       ref="htmlRootRef"
@@ -18,6 +22,8 @@
 import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import { getKnowledgeBaseErrorMessage, knowledgeBaseApi } from '../api/knowledge-base'
+import SpreadsheetOriginalPreview from './SpreadsheetOriginalPreview.vue'
+import type { SpreadsheetSheet } from '../lib/officePreview'
 import {
   clearHtmlHighlights,
   highlightAndScrollHtmlText,
@@ -50,9 +56,10 @@ const emit = defineEmits<{
 
 const loading = ref(true)
 const error = ref('')
-const mode = ref<'html' | 'iframe' | 'text'>('text')
+const mode = ref<'html' | 'iframe' | 'text' | 'spreadsheet'>('text')
 const html = ref('')
 const text = ref('')
+const spreadsheetSheets = ref<SpreadsheetSheet[]>([])
 const iframeUrl = ref<string | null>(null)
 const htmlRootRef = ref<HTMLElement | null>(null)
 
@@ -134,23 +141,29 @@ async function load() {
   loading.value = true
   error.value = ''
   currentVisiblePage = null
+  spreadsheetSheets.value = []
   if (iframeUrl.value) {
     URL.revokeObjectURL(iframeUrl.value)
     iframeUrl.value = null
   }
   const ext = (props.fileExt || '').toLowerCase()
   try {
-    const blob = await knowledgeBaseApi.fetchDocumentFileBlob(props.kbId, props.documentId)
-    if (ext === 'docx') {
+    if (ext === 'docx' || ext === 'doc') {
       const { docxBlobToHtml } = await import('../lib/officePreview')
+      const blob =
+        ext === 'doc'
+          ? await knowledgeBaseApi.fetchDocumentWordPreviewBlob(props.kbId, props.documentId)
+          : await knowledgeBaseApi.fetchDocumentFileBlob(props.kbId, props.documentId)
       html.value = await docxBlobToHtml(blob)
       mode.value = 'html'
       return
     }
+    const blob = await knowledgeBaseApi.fetchDocumentFileBlob(props.kbId, props.documentId)
     if (['xlsx', 'xlsm', 'xls', 'csv'].includes(ext)) {
-      const { spreadsheetBlobToHtml } = await import('../lib/officePreview')
-      html.value = await spreadsheetBlobToHtml(blob, props.fileName)
-      mode.value = 'html'
+      const { parseSpreadsheetBlob } = await import('../lib/officePreview')
+      const parsed = await parseSpreadsheetBlob(blob, props.fileName)
+      spreadsheetSheets.value = parsed.sheets
+      mode.value = 'spreadsheet'
       return
     }
     if (ext === 'pdf') {
@@ -231,6 +244,10 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   overflow: auto;
+}
+
+.document-original-preview--spreadsheet {
+  overflow: hidden;
 }
 
 .document-original-preview-loading {

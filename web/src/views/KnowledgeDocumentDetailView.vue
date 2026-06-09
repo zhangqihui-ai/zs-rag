@@ -54,7 +54,7 @@
                 @ready="onPdfViewerReady"
               />
               <DocumentOriginalPreview
-                v-else-if="isDocxDocument"
+                v-else-if="isWordDocument"
                 ref="docxOriginalPreviewRef"
                 :kb-id="kbId"
                 :document-id="document.id"
@@ -300,7 +300,7 @@
                       <span>表格 · 块 #{{ item.block_index + 1 }}</span>
                       <span v-if="item.heading_path" class="doc-docx-table-path">{{ item.heading_path }}</span>
                     </header>
-                    <div class="doc-chunk-table-wrap" v-html="tableBlockPreviewHtml(item)" />
+                    <ChunkDataTableDisplay :html="tableBlockPreviewHtml(item)" />
                     <pre class="doc-mineru-block-text">{{ docxBlockPlainText(item) }}</pre>
                   </article>
                 </div>
@@ -395,7 +395,7 @@
                             <p v-if="chunkTableContextForDisplay(chunk)" class="doc-chunk-context">
                               {{ chunkTableContextForDisplay(chunk) }}
                             </p>
-                            <div class="doc-chunk-table-wrap" v-html="chunkTableHtmlForDisplay(chunk)" />
+                            <ChunkDataTableDisplay :html="chunkTableHtmlForDisplay(chunk)" />
                           </template>
                           <p v-else class="doc-chunk-body">{{ chunkDisplayText(chunk) }}</p>
                         </article>
@@ -435,6 +435,7 @@ import {
   type KnowledgeDocument,
 } from '../api/knowledge-base'
 import AppIcon from '../components/AppIcon.vue'
+import ChunkDataTableDisplay from '../components/knowledge-base/ChunkDataTableDisplay.vue'
 import ChunkEnrichmentEditModal from '../components/ChunkEnrichmentEditModal.vue'
 import DocumentOriginalPreview from '../components/DocumentOriginalPreview.vue'
 const DocumentPdfMineruLayout = defineAsyncComponent(() => import('../components/DocumentPdfMineruLayout.vue'))
@@ -670,20 +671,24 @@ const isPdfDocument = computed(() => {
   return (d.file_ext || '').toLowerCase() === 'pdf'
 })
 
-const isDocxDocument = computed(() => {
+const isWordDocument = computed(() => {
   const d = document.value
   if (!d) {
     return false
   }
-  return (d.file_ext || '').toLowerCase() === 'docx'
+  const ext = (d.file_ext || '').toLowerCase()
+  return ext === 'docx' || ext === 'doc'
 })
 
-/** python-docx 解析：侧车 docx_content_list.json */
-const docxViewEnabled = computed(() => isDocxDocument.value && docxContentList.value.length > 0)
+/** @deprecated 别名，涵盖 .doc / .docx */
+const isDocxDocument = isWordDocument
 
-/** docx 走 MinerU 引擎：侧车 mineru_content_list.json，Markdown/JSON 走 MinerU 接口 */
+/** python-docx 解析：侧车 docx_content_list.json（.doc / .docx） */
+const docxViewEnabled = computed(() => isWordDocument.value && docxContentList.value.length > 0)
+
+/** Word 走 MinerU 引擎：侧车 mineru_content_list.json */
 const docxMineruViewEnabled = computed(
-  () => isDocxDocument.value && mineruContentList.value.length > 0 && !docxViewEnabled.value,
+  () => isWordDocument.value && mineruContentList.value.length > 0 && !docxViewEnabled.value,
 )
 
 const docxTableBlocks = computed(() => docxContentList.value.filter(isDocxTableBlock))
@@ -1097,7 +1102,7 @@ function resetMineruViewCache() {
 }
 
 async function loadDocxContentList() {
-  if (!isDocxDocument.value) {
+  if (!isWordDocument.value) {
     docxContentList.value = []
     return
   }
@@ -1514,6 +1519,7 @@ async function loadPage() {
     const isParseViewDoc =
       d?.parser_type === 'mineru' ||
       d?.parser_type === 'pdf' ||
+      d?.parser_type === 'doc' ||
       meta?.parser_backend === 'mineru' ||
       meta?.parser_backend === 'opendataloader'
     if (d && isParseViewDoc) {
@@ -1524,7 +1530,7 @@ async function loadPage() {
         mineruContentList.value = []
       }
     }
-    if (d && (d.file_ext || '').toLowerCase() === 'docx') {
+    if (d && isWordDocument.value) {
       await loadDocxContentList()
     }
     if (hasChunksAvailable.value) {
@@ -2226,14 +2232,24 @@ watch(isPdfDocument, (pdf) => {
 .doc-chunk-table-wrap :deep(th),
 .doc-chunk-table-wrap :deep(td) {
   border: 1px solid var(--border-color);
-  padding: 8px 10px;
+  padding: 4px 8px;
+  height: 32px;
+  max-height: 32px;
   vertical-align: middle;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   word-break: keep-all;
   overflow-wrap: normal;
   hyphens: none;
   min-width: 2.8em;
-  max-width: 240px;
+  max-width: 200px;
+  box-sizing: border-box;
+}
+
+.doc-mineru-table-wrap :deep(tr),
+.doc-chunk-table-wrap :deep(tr) {
+  height: 32px;
 }
 
 .doc-mineru-table-wrap :deep(th),
@@ -2241,7 +2257,6 @@ watch(isPdfDocument, (pdf) => {
   background: var(--bg-secondary);
   font-weight: 600;
   text-align: center;
-  white-space: normal;
   line-height: 1.35;
   min-width: 3.2em;
 }
@@ -2297,7 +2312,6 @@ watch(isPdfDocument, (pdf) => {
   background: var(--bg-secondary);
   font-weight: 600;
   text-align: center;
-  white-space: normal;
   line-height: 1.35;
 }
 
