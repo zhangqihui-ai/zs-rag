@@ -69,7 +69,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref } from 'vue'
 
 import {
   defaultModelApi,
@@ -88,6 +88,7 @@ import {
 } from '../api/model-management'
 import AppIcon from '../components/AppIcon.vue'
 import Layout from '../components/Layout.vue'
+import { useSpaceReadyLoader } from '../composables/useSpaceReady'
 import DefaultModelsPanel from '../components/model-management/DefaultModelsPanel.vue'
 import ProviderConfigModal from '../components/model-management/ProviderConfigModal.vue'
 import ProvidersPanel from '../components/model-management/ProvidersPanel.vue'
@@ -368,7 +369,7 @@ const handleToggleModel = async ({ modelId, enabled }: { modelId: number; enable
   }
 }
 
-onMounted(loadPageData)
+useSpaceReadyLoader(loadPageData)
 onBeforeUnmount(() => {
   if (noticeTimer) {
     window.clearTimeout(noticeTimer)

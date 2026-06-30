@@ -9,11 +9,16 @@
     "build:deploy": "vite build",
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit",
-    "test:markdown": "tsx --test src/lib/chatMarkdown.test.ts"
+    "test:markdown": "tsx --test src/lib/chatMarkdown.test.ts",
+    "test:citation-preview": "tsx --test src/lib/citationPreview.test.ts",
+    "test:citation-detail": "tsx --test src/lib/citationDetail.test.ts",
+    "test:agent-trace": "tsx --test src/lib/agentTraceDisplay.test.ts",
+    "test:citation-source": "tsx --test src/lib/citationSource.test.ts"
   },
   "dependencies": {
     "@antv/g6": "^5.1.1",
     "axios": "^1.8.4",
+    "echarts": "^6.1.0",
     "mammoth": "^1.9.0",
     "marked": "^18.0.5",
     "pdfjs-dist": "^4.10.38",

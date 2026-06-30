@@ -1,5 +1,6 @@
 import axios from 'axios'
 
+import { buildApiRequestHeaders } from '../lib/apiRequestHeaders'
 import { resolveApiBaseUrl } from '../lib/apiBaseUrl'
 import { http, longRequestTimeoutMs, documentRequestTimeoutMs, searchRequestTimeoutMs, resolveEnterpriseSpaceSlug } from '../lib/http'
 
@@ -408,8 +409,8 @@ export const getKnowledgeBaseErrorMessage = (error: unknown, fallback = '操作�
 }
 
 export const knowledgeBaseApi = {
-  list() {
-    return unwrap<KnowledgeBase[]>(http.get('/knowledge-bases'))
+  list(options?: { signal?: AbortSignal }) {
+    return unwrap<KnowledgeBase[]>(http.get('/knowledge-bases', { signal: options?.signal }))
   },
   get(kbId: number) {
     return unwrap<KnowledgeBase>(http.get(`/knowledge-bases/${kbId}`, { timeout: documentRequestTimeoutMs }))
@@ -488,7 +489,6 @@ export const knowledgeBaseApi = {
       formData.append('skip_if_duplicate', 'true')
     }
 
-    const token = localStorage.getItem('auth_token')
     const enterpriseSpace = resolveEnterpriseSpaceSlug()
     const base = resolveApiBaseUrl().replace(/\/$/, '')
     const url = `${base}/knowledge-bases/${kbId}/documents/upload`
@@ -499,10 +499,9 @@ export const knowledgeBaseApi = {
       const res = await fetch(url, {
         method: 'POST',
         signal: controller.signal,
-        headers: {
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        headers: buildApiRequestHeaders({
           'X-Enterprise-Space': enterpriseSpace,
-        },
+        }),
         body: formData,
       })
       if (!res.ok) {
@@ -771,7 +770,6 @@ export async function streamDocumentProcess(
     onCancelled?: (document: KnowledgeDocument) => void
   },
 ): Promise<KnowledgeDocument> {
-  const token = localStorage.getItem('auth_token')
   const enterpriseSpace = resolveEnterpriseSpaceSlug()
   const base = resolveApiBaseUrl().replace(/\/$/, '')
   const path =
@@ -794,11 +792,10 @@ export async function streamDocumentProcess(
   const res = await fetch(url, {
     method: 'POST',
     signal: options.signal,
-    headers: {
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    headers: buildApiRequestHeaders({
       'X-Enterprise-Space': enterpriseSpace,
       Accept: 'text/event-stream',
-    },
+    }),
   })
 
   if (!res.ok) {

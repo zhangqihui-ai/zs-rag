@@ -21,10 +21,16 @@ from app.core.openai_compat import (
     validate_messages_last_role_is_user,
 )
 from app.core.provider_adapter import get_provider
+from app.core.knowledge_retrieval_defaults import (
+    DEFAULT_LIGHTRAG_RETRIEVAL_TOP_K,
+    DEFAULT_MERGE_TOP_K,
+    DEFAULT_TOP_K,
+    DEFAULT_VECTOR_RETRIEVAL_TOP_K,
+)
 from app.models.chat import ChatConversation, ChatMessage, ChatSession
 from app.models.knowledge_base import KnowledgeBase
 from app.models.model_management import AIModel, AIModelDefault, AIModelProvider
-from app.core.knowledge_retrieval_defaults import DEFAULT_TOP_K
+from app.services.usage_metrics_service import record_usage_event
 from app.schemas.chat import (
     DEFAULT_OPENING_GREETING,
     ChatConfigurationResponse,
@@ -53,13 +59,56 @@ DEFAULT_CHAT_SYSTEM_PROMPT_GENERAL = (
     "回复请用 Markdown 排版：用 ##/### 作小节标题，条目用列表，对比/材料类信息优先用表格，重点用 **加粗**。"
 )
 
+DEFAULT_CHAT_SYSTEM_PROMPT_BOUND_DIRECT = (
+    "你是一个乐于助人的智能助手。请结合聊天历史自然回答用户问题。\n"
+    "{kb_binding}\n"
+    "回复请用 Markdown 排版：用 ##/### 作小节标题，条目用列表，对比/材料类信息优先用表格，重点用 **加粗**。"
+)
+
 # 兼容旧代码与文档中的名称：默认 GENERAL 作为「未自定义且未注入片段」时的基线说明长度参考
 DEFAULT_CHAT_SYSTEM_PROMPT = DEFAULT_CHAT_SYSTEM_PROMPT_GENERAL
 
 _CITATION_HINT_SUFFIX = (
     "\n\n（请在回答中引用上述片段时，在对应句末使用角标 [1]、[2] 等与编号对应；"
-    "综合多条时可写 [1][2]。未用到的编号勿标注。）"
+    "综合多条时可写 [1][2]；勿改用 ①② 等圆圈序号代替方括号编号。未用到的编号勿标注。）"
 )
+
+_CITATION_REF_RE = re.compile(
+    r"\[(\d+)\]|［(\d+)］|([①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳])"
+)
+_CIRCLED_CHAR_TO_REF = {ch: idx for idx, ch in enumerate("⓪①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳")}
+
+
+def extract_citation_refs_from_text(text: str) -> list[int]:
+    seen: set[int] = set()
+    ordered: list[int] = []
+    for match in _CITATION_REF_RE.finditer(text or ""):
+        raw_ascii = match.group(1)
+        raw_fullwidth = match.group(2)
+        circled = match.group(3)
+        if circled:
+            ref = _CIRCLED_CHAR_TO_REF.get(circled, 0)
+        else:
+            try:
+                ref = int(raw_ascii or raw_fullwidth or "0")
+            except (TypeError, ValueError):
+                continue
+        if ref <= 0 or ref in seen:
+            continue
+        seen.add(ref)
+        ordered.append(ref)
+    return ordered
+
+
+def filter_citations_by_answer(
+    citations: list[dict[str, Any]],
+    answer: str,
+) -> tuple[list[dict[str, Any]], int]:
+    refs = set(extract_citation_refs_from_text(answer))
+    if not refs:
+        return [], 0
+    filtered = [item for item in citations if int(item.get("ref") or 0) in refs]
+    return filtered, len(filtered)
 
 DEFAULT_MAX_HISTORY_MESSAGES = 20
 
@@ -294,6 +343,8 @@ def _retrieve_for_user_turn(
         knowledge_base_ids=list(conv.knowledge_base_ids or []) if conv else [],
         query=retrieval_query,
         merge_top_k=_merge_top_k_for_conversation(conv),
+        vector_top_k=_vector_top_k_for_conversation(conv),
+        lightrag_top_k=_lightrag_retrieval_top_k_for_conversation(conv),
         lightrag_query_mode=str(getattr(conv, "lightrag_query_mode", None) or "mix"),
         lightrag_chunk_top_k=_clamp_chunk_top_k(getattr(conv, "lightrag_chunk_top_k", None)),
     )
@@ -305,11 +356,29 @@ def _retrieve_for_user_turn(
 
 def _clamp_retrieval_top_k(raw: Any) -> int:
     if raw is None:
-        return DEFAULT_TOP_K
+        return DEFAULT_MERGE_TOP_K
     try:
         return max(1, min(50, int(raw)))
     except (TypeError, ValueError):
-        return DEFAULT_TOP_K
+        return DEFAULT_MERGE_TOP_K
+
+
+def _clamp_vector_retrieval_top_k(raw: Any) -> int:
+    if raw is None:
+        return DEFAULT_VECTOR_RETRIEVAL_TOP_K
+    try:
+        return max(1, min(50, int(raw)))
+    except (TypeError, ValueError):
+        return DEFAULT_VECTOR_RETRIEVAL_TOP_K
+
+
+def _clamp_lightrag_retrieval_top_k(raw: Any) -> int:
+    if raw is None:
+        return DEFAULT_LIGHTRAG_RETRIEVAL_TOP_K
+    try:
+        return max(1, min(50, int(raw)))
+    except (TypeError, ValueError):
+        return DEFAULT_LIGHTRAG_RETRIEVAL_TOP_K
 
 
 def _clamp_chunk_top_k(raw: Any) -> int | None:
@@ -347,6 +416,15 @@ def _clamp_agentic_min_relevant_docs(raw: Any) -> int:
         return max(1, min(10, int(default)))
 
 
+def _clamp_agentic_context_user_turns(raw: Any) -> int:
+    if raw is None:
+        return 3
+    try:
+        return max(1, min(10, int(raw)))
+    except (TypeError, ValueError):
+        return 3
+
+
 def _default_top_k_for_kb_ids(db: Session, *, enterprise_space_id: int, kb_ids: list[int]) -> int:
     if not kb_ids:
         return DEFAULT_TOP_K
@@ -364,8 +442,20 @@ def _default_top_k_for_kb_ids(db: Session, *, enterprise_space_id: int, kb_ids: 
 
 def _merge_top_k_for_conversation(conv: ChatConversation | None) -> int:
     if conv is None:
-        return DEFAULT_TOP_K
+        return DEFAULT_MERGE_TOP_K
     return _clamp_retrieval_top_k(getattr(conv, "retrieval_top_k", None))
+
+
+def _vector_top_k_for_conversation(conv: ChatConversation | None) -> int:
+    if conv is None:
+        return DEFAULT_VECTOR_RETRIEVAL_TOP_K
+    return _clamp_vector_retrieval_top_k(getattr(conv, "vector_retrieval_top_k", None))
+
+
+def _lightrag_retrieval_top_k_for_conversation(conv: ChatConversation | None) -> int:
+    if conv is None:
+        return DEFAULT_LIGHTRAG_RETRIEVAL_TOP_K
+    return _clamp_lightrag_retrieval_top_k(getattr(conv, "lightrag_retrieval_top_k", None))
 
 
 def _retrieve_knowledge_block_and_citations(
@@ -374,7 +464,9 @@ def _retrieve_knowledge_block_and_citations(
     enterprise_space_id: int,
     knowledge_base_ids: list[int],
     query: str,
-    merge_top_k: int = 8,
+    merge_top_k: int = 5,
+    vector_top_k: int = 8,
+    lightrag_top_k: int = 8,
     lightrag_query_mode: str = "mix",
     lightrag_chunk_top_k: int | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
@@ -401,113 +493,70 @@ def _retrieve_knowledge_block_and_citations(
 
     from app.core.kb_type import is_lightrag_kb
     from app.schemas.retrieval import KnowledgeSearchRequest
-    from app.services.lightrag_engine import query_graph_kb
     from app.services.retrieval_service import search_knowledge_bases_multi
 
-    cap = _clamp_retrieval_top_k(merge_top_k)
-    classic_ids = [kid for kid in ordered_existing if not is_lightrag_kb(kb_by_id[kid])]
-    lightrag_ids = [kid for kid in ordered_existing if is_lightrag_kb(kb_by_id[kid])]
+    mode = lightrag_query_mode if lightrag_query_mode in ("naive", "local", "global", "hybrid", "mix") else "mix"
+    primary_kb = kb_by_id[ordered_existing[0]]
+    stored = (primary_kb.config or {}).get("retrieval") if isinstance(primary_kb.config, dict) else {}
+    include_image_ocr = None
+    if isinstance(stored, dict) and "include_image_ocr" in stored:
+        include_image_ocr = bool(stored.get("include_image_ocr"))
+
+    try:
+        data = search_knowledge_bases_multi(
+            db,
+            space_id=enterprise_space_id,
+            knowledge_base_ids=ordered_existing,
+            payload=KnowledgeSearchRequest(
+                query=q[:2000],
+                top_k=_clamp_retrieval_top_k(merge_top_k),
+                include_image_ocr=include_image_ocr,
+            ),
+            vector_top_k=_clamp_vector_retrieval_top_k(vector_top_k),
+            lightrag_top_k=_clamp_lightrag_retrieval_top_k(lightrag_top_k),
+            merge_top_k=_clamp_retrieval_top_k(merge_top_k),
+            lightrag_query_mode=mode,
+            lightrag_chunk_top_k=lightrag_chunk_top_k,
+        )
+    except AppError:
+        return "", []
 
     parts: list[str] = []
     citations: list[dict[str, Any]] = []
-    ref = 0
-
-    if classic_ids:
-        primary_kb = kb_by_id[classic_ids[0]]
-        stored = (primary_kb.config or {}).get("retrieval") if isinstance(primary_kb.config, dict) else {}
-        include_image_ocr = None
-        if isinstance(stored, dict) and "include_image_ocr" in stored:
-            include_image_ocr = bool(stored.get("include_image_ocr"))
-        try:
-            data = search_knowledge_bases_multi(
-                db,
-                space_id=enterprise_space_id,
-                knowledge_base_ids=classic_ids,
-                payload=KnowledgeSearchRequest(
-                    query=q[:2000],
-                    top_k=cap,
-                    include_image_ocr=include_image_ocr,
-                ),
-            )
-            for item in data.get("results") or []:
-                raw_kb = item.get("knowledge_base_id")
-                if raw_kb is None:
-                    continue
-                ref += 1
-                src_kb_id = int(raw_kb)
-                cite_raw = item.get("citation")
-                cite: dict[str, Any] = cite_raw if isinstance(cite_raw, dict) else {}
-                doc = str(item.get("document_name") or cite.get("document_name") or "文献")
-                page = cite.get("page_no")
-                page_bit = f" 第{int(page)}页" if isinstance(page, (int, float)) else ""
-                header = f"[{ref}] 《{doc}》{page_bit}"
-                body = str(item.get("content") or "").strip()
-                parts.append(f"{header}\n{body}")
-                pn: int | None = int(page) if isinstance(page, (int, float)) else None
-                citations.append(
-                    {
-                        "ref": ref,
-                        "document_name": doc,
-                        "page_no": pn,
-                        "chunk_id": item.get("chunk_id"),
-                        "document_id": item.get("document_id"),
-                        "chunk_index": item.get("chunk_index"),
-                        "knowledge_base_id": int(src_kb_id),
-                        "score": round(float(item.get("score") or 0), 4),
-                        "source": "vector",
-                    }
-                )
-        except AppError:
-            pass
-
-    mode = lightrag_query_mode if lightrag_query_mode in ("naive", "local", "global", "hybrid", "mix") else "mix"
-    per_kb_top_k = max(1, cap // max(len(lightrag_ids), 1)) if lightrag_ids else cap
-    for kb_id in lightrag_ids:
-        kb = kb_by_id[kb_id]
-        try:
-            graph_data = query_graph_kb(
-                db,
-                knowledge_base=kb,
-                query=q[:2000],
-                mode=mode,
-                top_k=per_kb_top_k,
-                chunk_top_k=lightrag_chunk_top_k,
-                include_references=True,
-            )
-        except AppError:
+    for ref, item in enumerate(data.get("results") or [], start=1):
+        raw_kb = item.get("knowledge_base_id")
+        if raw_kb is None:
             continue
-        # 图谱库内部引用从 1 起编号；统一加上当前已有的 ref 偏移，避免与经典库/其它库撞号。
-        base = ref
-        block = str(graph_data.get("answer_context") or "").strip()
-        if block:
-            # 同步偏移块内 "[n] 《" 角标，使正文角标与全局连续编号一一对应。
-            block = re.sub(
-                r"\[(\d+)\]\s*《",
-                lambda m: f"[{int(m.group(1)) + base}] 《",
-                block,
-            )
-            parts.append(block)
-        for cite in graph_data.get("citations") or []:
-            if not isinstance(cite, dict):
-                continue
-            local = cite.get("ref")
-            new_ref = base + int(local) if local is not None else ref + 1
-            ref = max(ref, new_ref)
-            citations.append(
-                {
-                    "ref": new_ref,
-                    "document_name": cite.get("document_name"),
-                    "page_no": None,
-                    "chunk_id": cite.get("chunk_id"),
-                    "document_id": cite.get("document_id"),
-                    "chunk_index": None,
-                    "knowledge_base_id": kb_id,
-                    "score": None,
-                    "source": "graph",
-                    # 图谱库切片正文随引用下发，前端直接展示（无法用 getChunk）
-                    "content": cite.get("content"),
-                }
-            )
+        src_kb_id = int(raw_kb)
+        cite_raw = item.get("citation")
+        cite: dict[str, Any] = cite_raw if isinstance(cite_raw, dict) else {}
+        doc = str(item.get("document_name") or cite.get("document_name") or "文献")
+        page = cite.get("page_no")
+        page_bit = f" 第{int(page)}页" if isinstance(page, (int, float)) else ""
+        header = f"[{ref}] 《{doc}》{page_bit}"
+        body = str(item.get("content") or "").strip()
+        parts.append(f"{header}\n{body}")
+        meta = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        source = str(meta.get("source") or item.get("source") or "vector")
+        if source == "lightrag" or is_lightrag_kb(kb_by_id.get(src_kb_id) or primary_kb):
+            cite_source = "graph"
+        else:
+            cite_source = "vector"
+        pn: int | None = int(page) if isinstance(page, (int, float)) else None
+        citations.append(
+            {
+                "ref": ref,
+                "document_name": doc,
+                "page_no": pn,
+                "chunk_id": item.get("chunk_id"),
+                "document_id": item.get("document_id"),
+                "chunk_index": item.get("chunk_index"),
+                "knowledge_base_id": src_kb_id,
+                "score": round(float(item.get("score") or 0), 4),
+                "source": cite_source,
+                "content": body or None,
+            }
+        )
 
     if not parts:
         return "", []
@@ -515,7 +564,12 @@ def _retrieve_knowledge_block_and_citations(
     return "\n\n---\n\n".join(parts), citations
 
 
-def _effective_system_prompt(conv: ChatConversation | None, *, knowledge_block: str = "") -> str:
+def _effective_system_prompt(
+    conv: ChatConversation | None,
+    *,
+    knowledge_block: str = "",
+    kb_binding_context: str = "",
+) -> str:
     kb_nonempty = bool((knowledge_block or "").strip())
     custom: str | None = None
     if conv is not None and conv.system_prompt is not None:
@@ -525,6 +579,9 @@ def _effective_system_prompt(conv: ChatConversation | None, *, knowledge_block: 
     if custom is None:
         if kb_nonempty:
             return DEFAULT_CHAT_SYSTEM_PROMPT_RAG.strip().replace("{knowledge}", knowledge_block.strip())
+        binding = _format_kb_binding_for_generate(kb_binding_context)
+        if binding:
+            return DEFAULT_CHAT_SYSTEM_PROMPT_BOUND_DIRECT.strip().replace("{kb_binding}", binding)
         return DEFAULT_CHAT_SYSTEM_PROMPT_GENERAL.strip()
     if "{knowledge}" in custom:
         kb_subst = knowledge_block.strip() if kb_nonempty else "（本轮尚未注入检索片段）"
@@ -532,13 +589,40 @@ def _effective_system_prompt(conv: ChatConversation | None, *, knowledge_block: 
     return custom
 
 
+def _format_kb_binding_for_generate(kb_context: str) -> str:
+    from app.services.agentic_rag.kb_route_context import format_kb_binding_for_generate
+
+    return format_kb_binding_for_generate(kb_context)
+
+
 def inject_system_into_messages(
     messages: list[dict[str, str]],
     conv: ChatConversation | None,
     *,
     knowledge_block: str = "",
+    db: Session | None = None,
+    enterprise_space_id: int | None = None,
 ) -> list[dict[str, str]]:
-    content = _effective_system_prompt(conv, knowledge_block=knowledge_block)
+    kb_binding_context = ""
+    if (
+        db is not None
+        and enterprise_space_id is not None
+        and not (knowledge_block or "").strip()
+        and conv is not None
+        and list(conv.knowledge_base_ids or [])
+    ):
+        from app.services.agentic_rag.kb_route_context import build_kb_route_context
+
+        kb_binding_context = build_kb_route_context(
+            db,
+            enterprise_space_id=enterprise_space_id,
+            knowledge_base_ids=list(conv.knowledge_base_ids or []),
+        )
+    content = _effective_system_prompt(
+        conv,
+        knowledge_block=knowledge_block,
+        kb_binding_context=kb_binding_context,
+    )
     if not content.strip():
         return messages
     if messages and str(messages[0].get("role")) == "system":
@@ -599,6 +683,8 @@ def _config_response(conv: ChatConversation) -> ChatConfigurationResponse:
         knowledge_base_ids=list(conv.knowledge_base_ids or []),
         show_citations=bool(getattr(conv, "show_citations", True)),
         retrieval_top_k=_merge_top_k_for_conversation(conv),
+        vector_retrieval_top_k=_vector_top_k_for_conversation(conv),
+        lightrag_retrieval_top_k=_lightrag_retrieval_top_k_for_conversation(conv),
         lightrag_query_mode=str(getattr(conv, "lightrag_query_mode", None) or "mix"),
         lightrag_chunk_top_k=getattr(conv, "lightrag_chunk_top_k", None),
         temperature=float(conv.temperature),
@@ -622,6 +708,9 @@ def _config_response(conv: ChatConversation) -> ChatConfigurationResponse:
         rag_mode=_normalize_rag_mode(getattr(conv, "rag_mode", None)),
         agentic_max_iterations=_clamp_agentic_max_iterations(getattr(conv, "agentic_max_iterations", None)),
         agentic_min_relevant_docs=_clamp_agentic_min_relevant_docs(getattr(conv, "agentic_min_relevant_docs", None)),
+        agentic_context_user_turns=_clamp_agentic_context_user_turns(
+            getattr(conv, "agentic_context_user_turns", None)
+        ),
     )
 
 
@@ -636,6 +725,30 @@ def _llm_sampling_kwargs(conv: ChatConversation | None) -> dict[str, float | int
     if bool(getattr(conv, "top_p_enabled", False)):
         out["top_p"] = float(conv.top_p)
     return out
+
+
+def _record_llm_usage(
+    db: Session,
+    *,
+    enterprise_space_id: int,
+    user_id: int | None,
+    conv: ChatConversation | None,
+    prompt_messages: list[dict[str, str]],
+    completion_text: str,
+    source: str,
+) -> None:
+    usage = estimate_usage(prompt_messages=prompt_messages, completion_text=completion_text)
+    record_usage_event(
+        db,
+        enterprise_space_id=enterprise_space_id,
+        event_type="llm_call",
+        model_type="llm",
+        model_id=getattr(conv, "selected_llm_model_id", None) if conv else None,
+        source=source,
+        tokens_in=int(usage.get("prompt_tokens") or 0),
+        tokens_out=int(usage.get("completion_tokens") or 0),
+        user_id=user_id,
+    )
 
 
 def _resolve_chat_llm(
@@ -882,6 +995,12 @@ def create_chat_conversation(
         knowledge_base_ids=kb_ids,
         show_citations=bool(config_data.get("show_citations", True)),
         retrieval_top_k=_clamp_retrieval_top_k(top_k_raw),
+        vector_retrieval_top_k=_clamp_vector_retrieval_top_k(
+            config_data.get("vector_retrieval_top_k")
+        ),
+        lightrag_retrieval_top_k=_clamp_lightrag_retrieval_top_k(
+            config_data.get("lightrag_retrieval_top_k")
+        ),
         lightrag_query_mode=str(config_data.get("lightrag_query_mode") or "mix"),
         lightrag_chunk_top_k=_clamp_chunk_top_k(config_data.get("lightrag_chunk_top_k")),
         temperature=float(config_data.get("temperature", 0.7)),
@@ -903,6 +1022,9 @@ def create_chat_conversation(
         rag_mode=_normalize_rag_mode(config_data.get("rag_mode")),
         agentic_max_iterations=_clamp_agentic_max_iterations(config_data.get("agentic_max_iterations")),
         agentic_min_relevant_docs=_clamp_agentic_min_relevant_docs(config_data.get("agentic_min_relevant_docs")),
+        agentic_context_user_turns=_clamp_agentic_context_user_turns(
+            config_data.get("agentic_context_user_turns")
+        ),
     )
     db.add(conv)
     db.flush()
@@ -1074,6 +1196,22 @@ def update_chat_configuration(
         update_data["agentic_min_relevant_docs"] = _clamp_agentic_min_relevant_docs(
             update_data["agentic_min_relevant_docs"]
         )
+    if "agentic_context_user_turns" in update_data:
+        update_data["agentic_context_user_turns"] = _clamp_agentic_context_user_turns(
+            update_data["agentic_context_user_turns"]
+        )
+    if "retrieval_top_k" in update_data:
+        update_data["retrieval_top_k"] = _clamp_retrieval_top_k(update_data["retrieval_top_k"])
+    if "vector_retrieval_top_k" in update_data:
+        update_data["vector_retrieval_top_k"] = _clamp_vector_retrieval_top_k(
+            update_data["vector_retrieval_top_k"]
+        )
+    if "lightrag_retrieval_top_k" in update_data:
+        update_data["lightrag_retrieval_top_k"] = _clamp_lightrag_retrieval_top_k(
+            update_data["lightrag_retrieval_top_k"]
+        )
+    if "lightrag_chunk_top_k" in update_data:
+        update_data["lightrag_chunk_top_k"] = _clamp_chunk_top_k(update_data["lightrag_chunk_top_k"])
     mid = update_data.pop("model_id", None)
     if mid is not None:
         conv.selected_llm_model_id = mid
@@ -1274,6 +1412,15 @@ def _iter_agentic_chat_turn(
                 user_content=user_content,
                 assistant_content=assistant_content,
             )
+            _record_llm_usage(
+                db,
+                enterprise_space_id=session_obj.enterprise_space_id,
+                user_id=session_obj.user_id,
+                conv=conv,
+                prompt_messages=messages,
+                completion_text=assistant_content,
+                source="agentic",
+            )
             return
 
     if not assistant_content:
@@ -1296,6 +1443,15 @@ def _iter_agentic_chat_turn(
         "citations": list(saved.citations or []),
         "agent_trace": list(saved.agent_trace or []),
     }
+    _record_llm_usage(
+        db,
+        enterprise_space_id=session_obj.enterprise_space_id,
+        user_id=session_obj.user_id,
+        conv=conv,
+        prompt_messages=messages,
+        completion_text=assistant_content,
+        source="agentic",
+    )
 
 
 def iter_chat_stream_events(
@@ -1389,7 +1545,13 @@ def iter_chat_stream_events(
                     assistant_content=assistant_content,
                 )
                 return
-            messages = inject_system_into_messages(messages, conv, knowledge_block=kb_block)
+            messages = inject_system_into_messages(
+                messages,
+                conv,
+                knowledge_block=kb_block,
+                db=db,
+                enterprise_space_id=session_obj.enterprise_space_id,
+            )
 
             provider = get_provider(provider_cfg)
             sampling = _llm_sampling_kwargs(conv)
@@ -1402,6 +1564,15 @@ def iter_chat_stream_events(
                 parts.append(piece)
                 yield {"type": "assistant_delta", "content": piece}
             assistant_content = "".join(parts)
+            _record_llm_usage(
+                db,
+                enterprise_space_id=session_obj.enterprise_space_id,
+                user_id=user_id,
+                conv=conv,
+                prompt_messages=messages,
+                completion_text=assistant_content,
+                source="chat",
+            )
         except Exception as e:
             tail = f"\n\n【错误】{e!s}"
             assistant_content = "".join(parts) + (tail if parts else f"Exception: {e!s}")
@@ -1515,7 +1686,18 @@ def build_completion_messages(
         )
         if empty_reply is not None:
             return normalized, user_text, [], empty_reply
-        return inject_system_into_messages(normalized, conv, knowledge_block=kb_block), user_text, cites, None
+        return (
+            inject_system_into_messages(
+                normalized,
+                conv,
+                knowledge_block=kb_block,
+                db=db,
+                enterprise_space_id=session.enterprise_space_id,
+            ),
+            user_text,
+            cites,
+            None,
+        )
     q = (question or "").strip()
     if not q:
         raise AppError(
@@ -1534,7 +1716,18 @@ def build_completion_messages(
     merged = [*hist_dicts, {"role": "user", "content": q}]
     if empty_reply is not None:
         return merged, q, [], empty_reply
-    return inject_system_into_messages(merged, conv, knowledge_block=kb_block), q, cites, None
+    return (
+        inject_system_into_messages(
+            merged,
+            conv,
+            knowledge_block=kb_block,
+            db=db,
+            enterprise_space_id=session.enterprise_space_id,
+        ),
+        q,
+        cites,
+        None,
+    )
 
 
 def iter_openai_completion_events(
@@ -1653,6 +1846,15 @@ def iter_openai_completion_events(
                     usage=None,
                 )
             assistant_content = "".join(parts)
+            _record_llm_usage(
+                db,
+                enterprise_space_id=enterprise_space_id,
+                user_id=user_id,
+                conv=conv,
+                prompt_messages=llm_messages,
+                completion_text=assistant_content,
+                source="openai_compat",
+            )
         except Exception as e:
             tail = f"\n\n【错误】{e!s}"
             assistant_content = "".join(parts) + (tail if parts else f"Exception: {e!s}")
@@ -1758,6 +1960,15 @@ def run_chat_completion_blocking(
             assistant_content = f"【错误】{resp.message}"
         else:
             assistant_content = _extract_assistant_from_openai_completion(resp.data) or ""
+            _record_llm_usage(
+                db,
+                enterprise_space_id=enterprise_space_id,
+                user_id=user_id,
+                conv=conv,
+                prompt_messages=llm_messages,
+                completion_text=assistant_content,
+                source="openai_compat",
+            )
     else:
         assistant_content = f"Echo: {user_content_to_persist} (No model configured)"
 

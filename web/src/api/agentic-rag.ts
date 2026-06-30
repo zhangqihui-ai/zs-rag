@@ -1,6 +1,7 @@
+import { buildApiRequestHeaders } from '../lib/apiRequestHeaders'
 import { resolveApiBaseUrl } from '../lib/apiBaseUrl'
 import { resolveEnterpriseSpaceSlug } from '../lib/http'
-import type { ChatCitation } from './chat'
+import type { AgentTraceEvent, ChatCitation } from './chat'
 import type { RetrievalMode } from './knowledge-base'
 
 export interface AgenticRAGQueryRequest {
@@ -20,20 +21,7 @@ export interface AgenticRAGQueryRequest {
   top_p?: number | null
 }
 
-export interface AgenticRAGTraceEvent {
-  step: string
-  elapsed_ms?: number | null
-  decision?: string | null
-  reason?: string | null
-  query?: string | null
-  total?: number | null
-  iteration?: number | null
-  relevant_count?: number | null
-  from?: string | null
-  to?: string | null
-  citation_count?: number | null
-  answer_chars?: number | null
-}
+export type AgenticRAGTraceEvent = AgentTraceEvent
 
 export interface AgenticRAGCompleteResponse {
   answer: string
@@ -56,15 +44,13 @@ export async function streamAgenticRAG(
   onEvent: (event: AgenticRAGStreamEvent) => void,
   options?: { signal?: AbortSignal },
 ): Promise<void> {
-  const token = localStorage.getItem('auth_token') || ''
   const enterpriseSpace = resolveEnterpriseSpaceSlug()
   const res = await fetch(`${resolveApiBaseUrl()}/api/v1/agentic-rag/query`, {
     method: 'POST',
-    headers: {
+    headers: buildApiRequestHeaders({
       'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       'X-Enterprise-Space': enterpriseSpace,
-    },
+    }),
     body: JSON.stringify(payload),
     signal: options?.signal,
   })

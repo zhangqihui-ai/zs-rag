@@ -26,11 +26,15 @@ class AgenticRAGState(TypedDict, total=False):
     max_iterations: int
     min_relevant_docs: int
     top_k: int
+    vector_top_k: int
+    lightrag_top_k: int
     retrieval_mode: str | None
     score_threshold: float | None
     vector_weight: float | None
     fusion_method: str | None
     include_image_ocr: bool | None
+    lightrag_query_mode: str | None
+    lightrag_chunk_top_k: int | None
     llm_provider: Any
     llm_model_name: str
     temperature: float | None
@@ -40,3 +44,5 @@ class AgenticRAGState(TypedDict, total=False):
     kb_context: str
     pre_retrieval_candidates: list[dict[str, Any]]
     route_pre_retrieve_enabled: bool
+    context_user_turns: int
+    resolved_query: str

@@ -53,6 +53,12 @@
   --sidebar-collapsed-width: 80px;
   --header-height: 84px;
   --content-max-width: 100%;
+
+  --citation-badge-bg: #eceef2;
+  --citation-badge-text: #8b919a;
+  --citation-badge-border: rgba(15, 23, 42, 0.1);
+  --citation-badge-hover-bg: #e2e5ea;
+  --citation-badge-hover-text: #6b7280;
 }
 
 :root[data-theme='dark'] {
@@ -100,6 +106,12 @@
   --card-shadow-xs: 0 10px 22px rgba(2, 6, 23, 0.34);
   --card-shadow-sm: 0 16px 36px rgba(2, 6, 23, 0.38);
   --card-shadow: 0 24px 48px rgba(2, 6, 23, 0.42);
+
+  --citation-badge-bg: rgba(148, 163, 184, 0.2);
+  --citation-badge-text: #94a3b8;
+  --citation-badge-border: rgba(148, 163, 184, 0.24);
+  --citation-badge-hover-bg: rgba(148, 163, 184, 0.32);
+  --citation-badge-hover-text: #cbd5e1;
 }
 
 * {
@@ -1006,5 +1018,42 @@ body.chat-settings-floating-open .app-content-inner.app-content-inner--chat {
 }
 
 .chat-markdown-body .msg-citation-badge {
-  margin: 0 2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.15em;
+  height: 1.15em;
+  margin: 0 1px;
+  padding: 0 3px;
+  border-radius: 999px;
+  font-size: 0.72em;
+  font-weight: 500;
+  line-height: 1;
+  vertical-align: super;
+  text-decoration: none;
+  cursor: pointer;
+  white-space: nowrap;
+  background: var(--citation-badge-bg);
+  color: var(--citation-badge-text);
+  border: 1px solid var(--citation-badge-border);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05);
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.chat-markdown-body .msg-citation-badge + .msg-citation-badge {
+  margin-left: 2px;
+}
+
+.chat-markdown-body .msg-citation-badge:hover {
+  background: var(--citation-badge-hover-bg);
+  color: var(--citation-badge-hover-text);
+  border-color: color-mix(in srgb, var(--citation-badge-border) 70%, var(--citation-badge-hover-text));
+}
+
+.chat-markdown-body .msg-citation-badge:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--citation-badge-text) 55%, transparent);
+  outline-offset: 2px;
 }

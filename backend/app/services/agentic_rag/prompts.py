@@ -20,9 +20,28 @@ GRADE_PROMPT = (
 
 REWRITE_PROMPT = (
     "你是 RAG 查询改写器。当前检索结果不足，请把用户问题改写成更适合企业知识库检索的查询。\n"
-    "要求：保留用户真实意图，补充关键实体、流程、材料、政策等检索词；不要编造事实；只输出改写后的查询文本。"
+    "要求：\n"
+    "1）保留用户真实意图，补充关键实体、流程、材料、政策等检索词；不要编造事实\n"
+    "2）若最新问题是对上一轮追问、补充或省略主语/宾语，必须结合「最近用户问题」还原完整检索意图\n"
+    "3）输出应为可独立理解的完整问句，不得丢弃上一轮核心主题\n"
+    "只输出改写后的查询文本。"
+)
+
+CONTEXTUALIZE_QUERY_PROMPT = (
+    "根据下面的 prior 用户问题与当前最新问题，将当前问题改写为完整、可独立理解的检索查询。"
+    "若当前问题已完整，可轻微润色但不得改变意图；若当前问题是补充/追问，必须合并 prior 用户问题中的核心主题。"
+    "只输出改写后的查询文本，不要解释或加引号。"
 )
 
 GENERAL_DIRECT_PROMPT = (
-    "你是一个企业知识助手。当前问题不需要检索知识库，请结合常识与对话目标直接、简洁地回答。"
+    "你是一个企业知识助手。当前问题不需要检索知识库文档内容，请结合常识与对话目标直接、简洁地回答。"
 )
+
+
+def build_direct_generate_system_prompt(*, kb_context: str) -> str:
+    from app.services.agentic_rag.kb_route_context import format_kb_binding_for_generate
+
+    binding = format_kb_binding_for_generate(kb_context)
+    if binding:
+        return f"{GENERAL_DIRECT_PROMPT}\n\n{binding}"
+    return GENERAL_DIRECT_PROMPT

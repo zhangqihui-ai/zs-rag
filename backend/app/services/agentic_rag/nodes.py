@@ -10,11 +10,19 @@ from app.schemas.retrieval import KnowledgeSearchRequest
 from app.services.chat_service import (
     DEFAULT_CHAT_SYSTEM_PROMPT_GENERAL,
     DEFAULT_CHAT_SYSTEM_PROMPT_RAG,
+    _CITATION_HINT_SUFFIX,
+    filter_citations_by_answer,
     should_skip_knowledge_retrieval,
 )
 from app.services.retrieval_service import search_knowledge_bases_multi
 
-from .prompts import GENERAL_DIRECT_PROMPT, GRADE_PROMPT, REWRITE_PROMPT, ROUTE_PROMPT
+from .prompts import (
+    CONTEXTUALIZE_QUERY_PROMPT,
+    GRADE_PROMPT,
+    REWRITE_PROMPT,
+    ROUTE_PROMPT,
+    build_direct_generate_system_prompt,
+)
 from .state import AgenticRAGState
 
 settings = get_settings()
@@ -102,7 +110,20 @@ def _parse_route_response(content: str) -> tuple[str, str, str]:
     return decision, reason, confidence
 
 
-def _format_chat_history_for_route(state: AgenticRAGState, *, max_turns: int = 2, max_chars: int = 200) -> str:
+def _context_user_turns(state: AgenticRAGState) -> int:
+    try:
+        return max(1, min(10, int(state.get("context_user_turns") or 3)))
+    except (TypeError, ValueError):
+        return 3
+
+
+def _format_chat_history_block(
+    state: AgenticRAGState,
+    *,
+    max_turns: int = 2,
+    max_chars: int = 200,
+    roles: tuple[str, ...] = ("user", "assistant"),
+) -> str:
     history = list(state.get("chat_history") or [])
     if not history:
         return ""
@@ -110,12 +131,92 @@ def _format_chat_history_for_route(state: AgenticRAGState, *, max_turns: int = 2
     for item in history[-max_turns * 2 :]:
         role = str(item.get("role") or "").strip()
         content = str(item.get("content") or "").strip()
-        if role not in {"user", "assistant"} or not content:
+        if role not in roles or not content:
             continue
         label = "用户" if role == "user" else "助手"
         snippet = content if len(content) <= max_chars else content[: max_chars - 1] + "…"
         tail.append(f"{label}：{snippet}")
     return "\n".join(tail)
+
+
+def _format_chat_history_for_route(state: AgenticRAGState, *, max_turns: int = 2, max_chars: int = 200) -> str:
+    return _format_chat_history_block(state, max_turns=max_turns, max_chars=max_chars)
+
+
+def _format_user_questions_block(state: AgenticRAGState, *, max_chars: int = 300) -> str:
+    history = list(state.get("chat_history") or [])
+    if not history:
+        return ""
+    limit = _context_user_turns(state)
+    user_messages: list[str] = []
+    for item in history:
+        role = str(item.get("role") or "").strip()
+        content = str(item.get("content") or "").strip()
+        if role != "user" or not content:
+            continue
+        snippet = content if len(content) <= max_chars else content[: max_chars - 1] + "…"
+        user_messages.append(snippet)
+    if not user_messages:
+        return ""
+    selected = user_messages[-limit:]
+    return "\n".join(f"- {text}" for text in selected)
+
+
+def _build_contextualize_user_message(state: AgenticRAGState, *, question: str | None = None) -> str:
+    current = (question or state.get("question") or "").strip()
+    user_block = _format_user_questions_block(state)
+    parts = [f"当前问题：{current}"]
+    if user_block:
+        parts.append(f"最近用户问题：\n{user_block}")
+    return "\n\n".join(parts)
+
+
+def _contextualize_query_with_history(state: AgenticRAGState) -> str:
+    question = (state.get("question") or "").strip()
+    if not _format_user_questions_block(state):
+        return question
+    rewritten = _chat_once(
+        state,
+        [
+            {"role": "system", "content": CONTEXTUALIZE_QUERY_PROMPT},
+            {"role": "user", "content": _build_contextualize_user_message(state)},
+        ],
+        timeout=30.0,
+    ).strip()
+    rewritten = re.sub(r"^['\"“”]+|['\"“”]+$", "", rewritten).strip()
+    return rewritten or question
+
+
+def _resolve_query_for_retrieval(state: AgenticRAGState) -> str:
+    cached = str(state.get("resolved_query") or "").strip()
+    if cached:
+        return cached
+    question = (state.get("question") or "").strip()
+    if not _format_user_questions_block(state):
+        return question
+    return _contextualize_query_with_history(state)
+
+
+def _build_rewrite_user_message(state: AgenticRAGState, *, question: str, current_query: str, snippets: str) -> str:
+    parts = [
+        f"原始问题：{question}",
+        f"当前查询：{current_query}",
+    ]
+    user_block = _format_user_questions_block(state)
+    if user_block:
+        parts.append(f"最近用户问题：\n{user_block}")
+    parts.append(f"上一轮弱相关片段：\n{snippets or '无'}")
+    return "\n\n".join(parts)
+
+
+def _grade_question_text(state: AgenticRAGState) -> str:
+    current_query = str(state.get("current_query") or "").strip()
+    question = (state.get("question") or "").strip()
+    base = current_query or question
+    user_block = _format_user_questions_block(state)
+    if not user_block or user_block in base:
+        return base
+    return f"{base}\n\n最近用户问题：\n{user_block}"
 
 
 def _build_route_user_message(
@@ -161,14 +262,143 @@ def _format_pre_retrieval_summary(candidates: list[dict[str, Any]]) -> str:
     return "\n\n".join(lines)
 
 
-def _run_pre_retrieve(state: AgenticRAGState) -> list[dict[str, Any]]:
+def _trace_item_locator_fields(item: dict[str, Any]) -> dict[str, Any]:
+    cite_raw = item.get("citation")
+    cite = cite_raw if isinstance(cite_raw, dict) else {}
+    metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+    page = cite.get("page_no")
+    page_no = int(page) if isinstance(page, (int, float)) else None
+    chunk_index = item.get("chunk_index")
+    kb_id = item.get("knowledge_base_id")
+    doc_id = item.get("document_id")
+    chunk_id = item.get("chunk_id")
+    return {
+        "document_name": str(item.get("document_name") or cite.get("document_name") or "文献"),
+        "knowledge_base_name": str(item.get("knowledge_base_name") or ""),
+        "knowledge_base_id": int(kb_id) if isinstance(kb_id, (int, float)) and kb_id else None,
+        "document_id": int(doc_id) if isinstance(doc_id, (int, float)) and doc_id else None,
+        "chunk_id": chunk_id,
+        "source": str(metadata.get("source") or item.get("source") or "vector"),
+        "page_no": page_no,
+        "chunk_index": int(chunk_index) if isinstance(chunk_index, (int, float)) else None,
+    }
+
+
+def _trace_item_content_fields(
+    item: dict[str, Any],
+    *,
+    preview_chars: int = 220,
+    content_chars: int | None = None,
+    include_full_content: bool = False,
+) -> dict[str, Any]:
+    content = str(item.get("content") or item.get("content_preview") or "").strip()
+    preview = content if len(content) <= preview_chars else content[: preview_chars - 1] + "…"
+    fields: dict[str, Any] = {"preview": preview}
+    if include_full_content and content:
+        fields["content"] = content
+    elif content_chars is not None and content:
+        fields["content"] = (
+            content if len(content) <= content_chars else content[: content_chars - 1] + "…"
+        )
+    return fields
+
+
+def _trace_candidate_summaries(
+    candidates: list[dict[str, Any]],
+    *,
+    limit: int = 8,
+    preview_chars: int = 220,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for idx, item in enumerate(candidates[:limit], start=1):
+        rows.append(
+            {
+                "index": idx,
+                **_trace_item_locator_fields(item),
+                "score": round(float(item.get("score") or 0), 4),
+                "merge_score": round(float(item.get("merge_score") or item.get("score") or 0), 4),
+                **_trace_item_content_fields(item, preview_chars=preview_chars),
+            }
+        )
+    return rows
+
+
+def _trace_kb_breakdown(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
+    for item in candidates:
+        name = str(item.get("knowledge_base_name") or "").strip() or "未知知识库"
+        counts[name] = counts.get(name, 0) + 1
+    return [{"knowledge_base_name": name, "count": count} for name, count in sorted(counts.items())]
+
+
+def _trace_grade_summaries(
+    graded_docs: list[dict[str, Any]],
+    *,
+    limit: int = 8,
+    reason_chars: int = 240,
+    preview_chars: int = 220,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for idx, item in enumerate(graded_docs[:limit], start=1):
+        grade = item.get("agentic_grade")
+        grade_obj = grade if isinstance(grade, dict) else {}
+        reason = str(grade_obj.get("reason") or "").strip()
+        if len(reason) > reason_chars:
+            reason = reason[: reason_chars - 1] + "…"
+        rows.append(
+            {
+                "index": idx,
+                **_trace_item_locator_fields(item),
+                "retrieval_score": round(float(item.get("score") or 0), 4),
+                "relevant": bool(grade_obj.get("relevant")),
+                "grade_score": int(grade_obj.get("score") or 0),
+                "reason": reason,
+                **_trace_item_content_fields(
+                    item,
+                    preview_chars=preview_chars,
+                    include_full_content=True,
+                ),
+            }
+        )
+    return rows
+
+
+def _search_kwargs_from_state(state: AgenticRAGState) -> dict[str, Any]:
+    merge_top_k = int(state.get("top_k") or 8)
+    return {
+        "vector_top_k": int(state.get("vector_top_k") or 8),
+        "lightrag_top_k": int(state.get("lightrag_top_k") or 8),
+        "merge_top_k": merge_top_k,
+        **_lightrag_search_kwargs(state),
+    }
+
+
+def _lightrag_search_kwargs(state: AgenticRAGState) -> dict[str, Any]:
+    raw_chunk_top_k = state.get("lightrag_chunk_top_k")
+    chunk_top_k: int | None
+    try:
+        chunk_top_k = int(raw_chunk_top_k) if raw_chunk_top_k is not None else None
+    except (TypeError, ValueError):
+        chunk_top_k = None
+    if chunk_top_k is not None and chunk_top_k <= 0:
+        chunk_top_k = None
+    mode = str(state.get("lightrag_query_mode") or "mix").strip()
+    if mode not in {"naive", "local", "global", "hybrid", "mix"}:
+        mode = "mix"
+    return {
+        "lightrag_query_mode": mode,
+        "lightrag_chunk_top_k": chunk_top_k,
+    }
+
+
+def _run_pre_retrieve(state: AgenticRAGState, *, query: str | None = None) -> list[dict[str, Any]]:
     kb_ids = list(state.get("knowledge_base_ids") or [])
     if not kb_ids:
         return []
-    query = (state.get("question") or "").strip()
+    resolved = (query or _resolve_query_for_retrieval(state)).strip()
     top_k = int(settings.agentic_route_pre_retrieve_top_k)
     payload = KnowledgeSearchRequest(
-        query=query[:2000],
+        query=resolved[:2000],
         mode=state.get("retrieval_mode"),
         top_k=top_k,
         score_threshold=state.get("score_threshold"),
@@ -176,11 +406,14 @@ def _run_pre_retrieve(state: AgenticRAGState) -> list[dict[str, Any]]:
         fusion_method=state.get("fusion_method"),
         include_image_ocr=state.get("include_image_ocr"),
     )
+    search_kwargs = _search_kwargs_from_state(state)
+    search_kwargs["merge_top_k"] = top_k
     data = search_knowledge_bases_multi(
         state["db"],
         space_id=int(state["enterprise_space_id"]),
         knowledge_base_ids=kb_ids,
         payload=payload,
+        **search_kwargs,
     )
     return [dict(item) for item in data.get("results") or []]
 
@@ -271,10 +504,12 @@ def route_node(state: AgenticRAGState) -> dict[str, Any]:
     pre_candidates: list[dict[str, Any]] = []
     pre_enabled = bool(state.get("route_pre_retrieve_enabled", settings.agentic_route_pre_retrieve_enabled))
     need_pre = pre_enabled and decision == "retrieve"
+    resolved_query = ""
 
     if need_pre:
         pre_started = time.perf_counter()
-        pre_candidates = _run_pre_retrieve(state)
+        resolved_query = _resolve_query_for_retrieval(state)
+        pre_candidates = _run_pre_retrieve(state, query=resolved_query)
         pre_summary = _format_pre_retrieval_summary(pre_candidates)
         pass2_started = time.perf_counter()
         decision, reason, confidence = _call_route_llm(
@@ -294,19 +529,27 @@ def route_node(state: AgenticRAGState) -> dict[str, Any]:
             }
         )
 
-    return {
+    result: dict[str, Any] = {
         "route_decision": decision,
         "route_reason": reason,
         "pre_retrieval_candidates": pre_candidates,
         "trace": trace_rows,
     }
+    if resolved_query:
+        result["resolved_query"] = resolved_query
+        result["current_query"] = resolved_query
+    return result
 
 
 def retrieve_node(state: AgenticRAGState) -> dict[str, Any]:
     started = time.perf_counter()
-    query = (state.get("current_query") or state.get("question") or "").strip()
+    iterations_before = int(state.get("iterations") or 0)
+    if iterations_before == 0:
+        query = _resolve_query_for_retrieval(state)
+    else:
+        query = (state.get("current_query") or state.get("question") or "").strip()
     kb_ids = list(state.get("knowledge_base_ids") or [])
-    iterations = int(state.get("iterations") or 0) + 1
+    iterations = iterations_before + 1
     if not kb_ids:
         return {
             "current_query": query,
@@ -332,18 +575,31 @@ def retrieve_node(state: AgenticRAGState) -> dict[str, Any]:
         fusion_method=state.get("fusion_method"),
         include_image_ocr=state.get("include_image_ocr"),
     )
+    search_kwargs = _search_kwargs_from_state(state)
     data = search_knowledge_bases_multi(
         state["db"],
         space_id=int(state["enterprise_space_id"]),
         knowledge_base_ids=list(state.get("knowledge_base_ids") or []),
         payload=payload,
+        **search_kwargs,
     )
     candidates = [dict(item) for item in data.get("results") or []]
+    merge_meta = data.get("merge_meta") if isinstance(data.get("merge_meta"), dict) else {}
+    path_results = list(data.get("path_results") or [])
+    pre_retrieve_merge: dict[str, Any] | None = None
     if iterations == 1:
         pre_candidates = list(state.get("pre_retrieval_candidates") or [])
         if pre_candidates:
+            before = len(candidates)
             candidates = _merge_candidates_by_chunk_id(candidates, pre_candidates)
-    return {
+            pre_retrieve_merge = {
+                "from_main_retrieve": before,
+                "from_pre_retrieve": len(pre_candidates),
+                "merged_total": len(candidates),
+            }
+    merge_top_k = int(search_kwargs.get("merge_top_k") or 8)
+    trace_limit = min(max(merge_top_k, 1), 20)
+    result: dict[str, Any] = {
         "current_query": query,
         "candidates": candidates,
         "iterations": iterations,
@@ -355,14 +611,29 @@ def retrieve_node(state: AgenticRAGState) -> dict[str, Any]:
                 "query": query,
                 "total": len(candidates),
                 "iteration": iterations,
+                "top_k": merge_top_k,
+                "merge_top_k": merge_top_k,
+                "vector_top_k": int(search_kwargs.get("vector_top_k") or 8),
+                "lightrag_top_k": int(search_kwargs.get("lightrag_top_k") or 8),
+                "lightrag_query_mode": state.get("lightrag_query_mode"),
+                "lightrag_chunk_top_k": state.get("lightrag_chunk_top_k"),
+                "kb_breakdown": _trace_kb_breakdown(candidates),
+                "path_results": path_results,
+                "merge_meta": merge_meta,
+                "merge_phases": list(merge_meta.get("merge_phases") or []),
+                "pre_retrieve_merge": pre_retrieve_merge,
+                "candidates": _trace_candidate_summaries(candidates, limit=trace_limit),
             },
         ),
     }
+    if iterations_before == 0 and _format_user_questions_block(state):
+        result["resolved_query"] = query
+    return result
 
 
 def grade_node(state: AgenticRAGState) -> dict[str, Any]:
     started = time.perf_counter()
-    question = (state.get("question") or "").strip()
+    question = _grade_question_text(state)
     candidates = list(state.get("candidates") or [])
     if not candidates:
         return {
@@ -432,6 +703,8 @@ def grade_node(state: AgenticRAGState) -> dict[str, Any]:
                 "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
                 "relevant_count": len(relevant_docs),
                 "total": len(candidates),
+                "evaluated_question": question[:320],
+                "grades": _trace_grade_summaries(graded_docs),
             },
         ),
     }
@@ -452,9 +725,11 @@ def rewrite_node(state: AgenticRAGState) -> dict[str, Any]:
             {"role": "system", "content": REWRITE_PROMPT},
             {
                 "role": "user",
-                "content": (
-                    f"原始问题：{question}\n当前查询：{current_query}\n"
-                    f"上一轮弱相关片段：\n{snippets or '无'}"
+                "content": _build_rewrite_user_message(
+                    state,
+                    question=question,
+                    current_query=current_query,
+                    snippets=snippets,
                 ),
             },
         ],
@@ -478,11 +753,22 @@ def rewrite_node(state: AgenticRAGState) -> dict[str, Any]:
     }
 
 
+def _citation_source_from_item(item: dict[str, Any]) -> str:
+    meta = item.get("metadata")
+    if isinstance(meta, dict) and str(meta.get("source") or "").strip().lower() == "lightrag":
+        return "graph"
+    raw = str(item.get("source") or "").strip().lower()
+    if raw in {"graph", "lightrag"}:
+        return "graph"
+    return "vector"
+
+
 def _build_citations(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     citations: list[dict[str, Any]] = []
     for ref, item in enumerate(docs, start=1):
         cite_raw = item.get("citation")
         cite = cite_raw if isinstance(cite_raw, dict) else {}
+        meta = item.get("metadata")
         citations.append(
             {
                 "ref": ref,
@@ -492,9 +778,11 @@ def _build_citations(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "document_id": item.get("document_id"),
                 "chunk_index": item.get("chunk_index"),
                 "knowledge_base_id": item.get("knowledge_base_id"),
+                "knowledge_base_name": item.get("knowledge_base_name"),
                 "score": round(float(item.get("score") or 0), 4),
-                "source": "agentic",
+                "source": _citation_source_from_item(item),
                 "content": item.get("content"),
+                "metadata": meta if isinstance(meta, dict) else None,
                 "agentic_grade": item.get("agentic_grade"),
             }
         )
@@ -518,10 +806,13 @@ def generate_node(state: AgenticRAGState) -> dict[str, Any]:
     question = (state.get("question") or "").strip()
     if knowledge:
         system_prompt = DEFAULT_CHAT_SYSTEM_PROMPT_RAG.strip().replace("{knowledge}", knowledge)
+        system_prompt += _CITATION_HINT_SUFFIX
     elif not list(state.get("knowledge_base_ids") or []):
         system_prompt = DEFAULT_CHAT_SYSTEM_PROMPT_GENERAL.strip()
     else:
-        system_prompt = GENERAL_DIRECT_PROMPT
+        system_prompt = build_direct_generate_system_prompt(
+            kb_context=str(state.get("kb_context") or ""),
+        )
     messages: list[dict[str, str]] = [{"role": "system", "content": system_prompt}]
     for item in list(state.get("chat_history") or []):
         role = str(item.get("role") or "").strip()
@@ -541,6 +832,7 @@ def generate_node(state: AgenticRAGState) -> dict[str, Any]:
     ):
         parts.append(str(chunk))
     answer = "".join(parts).strip()
+    citations, citation_count = filter_citations_by_answer(citations, answer)
     return {
         "answer": answer,
         "citations": citations,
@@ -549,7 +841,7 @@ def generate_node(state: AgenticRAGState) -> dict[str, Any]:
             "generate",
             {
                 "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
-                "citation_count": len(citations),
+                "citation_count": citation_count,
                 "answer_chars": len(answer),
             },
         ),

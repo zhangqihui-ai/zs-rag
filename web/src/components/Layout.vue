@@ -25,7 +25,13 @@
       <div class="sidebar-section">
         <p class="sidebar-caption">平台导航</p>
         <nav class="sidebar-nav">
-          <router-link v-for="item in navItems" :key="item.to" :to="item.to" class="nav-link">
+          <router-link
+            v-for="item in navItems"
+            :key="item.to"
+            :to="item.to"
+            class="nav-link"
+            :class="{ 'router-link-active': isNavItemActive(item.to) }"
+          >
             <span class="nav-icon">
               <AppIcon :name="item.icon" :size="18" />
             </span>
@@ -113,6 +119,7 @@
           'app-content--chat': isChatRoute,
           'app-content--chat-embed-panel': isChatEmbedPanel,
           'app-content--flush': isFillPage,
+          'app-content--kb-detail': route.name === 'knowledge-base-detail',
           'app-content--flush-kb-detail': isFillPage && route.name === 'knowledge-base-detail',
         }"
       >
@@ -194,7 +201,7 @@ const breadcrumbs = computed(() => {
     return items
   }
 
-  if (route.name === 'chat') {
+  if (route.name === 'chat' || route.name === 'chat-session') {
     const tail = layoutBreadcrumbTailOverride.value
     const chatHome = layoutChatHomeHandler.value
     if (tail && chatHome) {
@@ -210,8 +217,12 @@ const breadcrumbs = computed(() => {
   return items
 })
 
+const CHAT_ROUTE_NAMES = new Set(['chat', 'chat-session'])
+
 const userInitial = computed(() => (authStore.currentUser?.username || 'U').charAt(0).toUpperCase())
-const isChatRoute = computed(() => route.name === 'chat')
+const isChatRoute = computed(
+  () => typeof route.name === 'string' && CHAT_ROUTE_NAMES.has(route.name),
+)
 /** 铺满型页面：内容区收小上下留白，便于子内容撑满一屏 */
 const isFillPage = computed(
   () => route.name === 'knowledge-document-detail' || layoutFillPageOverride.value === true,
@@ -221,10 +232,20 @@ const isKbDetailFillPage = computed(
 )
 /** iframe 嵌入：仅保留对话主区域，隐藏侧栏与顶栏 */
 const isChatEmbedPanel = computed(() => {
-  if (route.name !== 'chat') return false
+  if (!isChatRoute.value) return false
   const ep = route.query.embed_panel
   return ep === '1' || ep === 'true'
 })
+
+function isNavItemActive(path: string): boolean {
+  if (path === '/chat') {
+    return (
+      route.path === '/chat' ||
+      (route.path.startsWith('/chat/') && !route.path.startsWith('/chat/embed'))
+    )
+  }
+  return route.path === path || route.path.startsWith(`${path}/`)
+}
 const spaceScopedDetailRoutes = new Set(['knowledge-base-detail', 'knowledge-document-detail'])
 
 useEnterpriseSpaceChange(() => {
@@ -627,12 +648,16 @@ button.app-breadcrumb-link {
 }
 
 .app-content.app-content--flush-kb-detail {
-  padding: 0 40px 10px;
+  padding: 0 40px 10px 16px;
+}
+
+.app-content.app-content--kb-detail:not(.app-content--flush) {
+  padding-left: 16px;
 }
 
 .app-header.app-header--kb-fill {
   min-height: 52px;
-  padding: 6px 40px;
+  padding: 6px 40px 6px 16px;
 }
 
 .app-content-inner.app-content-inner--fill {

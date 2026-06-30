@@ -10,6 +10,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import httpx
 
+from sqlalchemy.orm import Session
+
 from app.core import embedding_cache
 from app.core.config import get_settings
 from app.core.errors import AppError
@@ -244,6 +246,45 @@ def resolve_embedding_concurrency(config: object) -> int:
     return fallback
 
 
+def _estimate_embedding_tokens(texts: list[str]) -> int:
+    total = 0
+    for text in texts:
+        s = text or ""
+        if not s.strip():
+            continue
+        total += max(1, len(s) // 4)
+    return total
+
+
+def _record_embedding_batch_usage(
+    model: AIModel,
+    *,
+    usage_db: Session | None,
+    batch: list[str],
+    usage_source: str | None,
+    usage_user_id: int | None,
+) -> None:
+    batch_len = len(batch)
+    if usage_db is None or batch_len <= 0:
+        return
+    space_id = getattr(model, "enterprise_space_id", None)
+    if space_id is None:
+        return
+    from app.services.usage_metrics_service import record_usage_event
+
+    record_usage_event(
+        usage_db,
+        enterprise_space_id=int(space_id),
+        event_type="embedding_call",
+        model_type="embedding",
+        model_id=model.id,
+        source=usage_source or "embedding",
+        user_id=usage_user_id,
+        tokens_in=_estimate_embedding_tokens(batch),
+        result_count=batch_len,
+    )
+
+
 def generate_embeddings(
     model: AIModel,
     texts: list[str],
@@ -253,6 +294,9 @@ def generate_embeddings(
     on_batch_start: Callable[[int, int, int, int], None] | None = None,
     on_progress: Callable[[int, int, float | None], None] | None = None,
     on_cache_stats: Callable[[int, int], None] | None = None,
+    usage_db: Session | None = None,
+    usage_source: str | None = None,
+    usage_user_id: int | None = None,
 ) -> list[list[float]]:
     """生成向量；命中持久化 embedding 缓存的段不再调用 GPU 计算。
 
@@ -311,6 +355,9 @@ def generate_embeddings(
         max_concurrency=max_concurrency,
         on_batch_start=on_batch_start,
         on_progress=wrapped_progress,
+        usage_db=usage_db,
+        usage_source=usage_source,
+        usage_user_id=usage_user_id,
     )
 
     if use_cache and miss_vectors:
@@ -338,6 +385,9 @@ def _compute_embeddings(
     max_concurrency: int | None,
     on_batch_start: Callable[[int, int, int, int], None] | None,
     on_progress: Callable[[int, int, float | None], None] | None,
+    usage_db: Session | None = None,
+    usage_source: str | None = None,
+    usage_user_id: int | None = None,
 ) -> list[list[float]]:
     """实际计算向量（不经缓存）：根据并发度走串行或有界并发批处理。"""
     total = len(texts)
@@ -360,6 +410,9 @@ def _compute_embeddings(
             total_batches=total_batches,
             on_batch_start=on_batch_start,
             on_progress=on_progress,
+            usage_db=usage_db,
+            usage_source=usage_source,
+            usage_user_id=usage_user_id,
         )
 
     return _generate_embeddings_concurrent(
@@ -371,6 +424,9 @@ def _compute_embeddings(
         concurrency=concurrency,
         on_batch_start=on_batch_start,
         on_progress=on_progress,
+        usage_db=usage_db,
+        usage_source=usage_source,
+        usage_user_id=usage_user_id,
     )
 
 
@@ -383,6 +439,9 @@ def _generate_embeddings_serial(
     total_batches: int,
     on_batch_start: Callable[[int, int, int, int], None] | None,
     on_progress: Callable[[int, int, float | None], None] | None,
+    usage_db: Session | None = None,
+    usage_source: str | None = None,
+    usage_user_id: int | None = None,
 ) -> list[list[float]]:
     vectors: list[list[float]] = []
     for batch_index, start in enumerate(range(0, total, chunk_size), start=1):
@@ -391,6 +450,13 @@ def _generate_embeddings_serial(
             on_batch_start(batch_index, total_batches, len(batch), start)
         batch_started = time.monotonic()
         vectors.extend(_generate_embeddings_for_batch(model, batch))
+        _record_embedding_batch_usage(
+            model,
+            usage_db=usage_db,
+            batch=batch,
+            usage_source=usage_source,
+            usage_user_id=usage_user_id,
+        )
         batch_elapsed = time.monotonic() - batch_started
         done = min(start + len(batch), total)
         if on_progress is not None:
@@ -417,6 +483,9 @@ def _generate_embeddings_concurrent(
     concurrency: int,
     on_batch_start: Callable[[int, int, int, int], None] | None,
     on_progress: Callable[[int, int, float | None], None] | None,
+    usage_db: Session | None = None,
+    usage_source: str | None = None,
+    usage_user_id: int | None = None,
 ) -> list[list[float]]:
     """多实例 Embedding 后端下的有界并发向量化；保持返回顺序与原文一致。"""
     batches = [texts[start : start + chunk_size] for start in range(0, total, chunk_size)]
@@ -445,6 +514,13 @@ def _generate_embeddings_concurrent(
         for future in as_completed(futures):
             index, vecs, batch_elapsed, batch_len = future.result()
             results[index] = vecs
+            _record_embedding_batch_usage(
+                model,
+                usage_db=usage_db,
+                batch=batches[index],
+                usage_source=usage_source,
+                usage_user_id=usage_user_id,
+            )
             with done_lock:
                 done_count += batch_len
                 done_now = done_count

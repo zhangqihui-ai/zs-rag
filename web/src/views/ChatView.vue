@@ -125,7 +125,7 @@
         >
           <aside v-if="!isEmbedPanelMode" class="surface-card conversation-rail">
           <div class="rail-back-nav">
-            <button type="button" class="rail-back-btn" @click="chatStore.leaveConversation()">
+            <button type="button" class="rail-back-btn" @click="onChatHomeNavigate">
               <AppIcon name="chat" :size="16" />
               <span>聊天</span>
             </button>
@@ -342,6 +342,7 @@
                     :show-citations="showCitationsEnabled"
                     :message="message"
                     :citation-title-for-ref="citationRefTitle"
+                    :resolve-citation-kb-id="resolveCitationKbId"
                     @citation-click="openCitationDetailByRef($event, message)"
                   />
                   <AgentTracePanel
@@ -349,6 +350,7 @@
                     :trace="messageAgentTrace(message)"
                     :running="isMessageStreaming(message) && isAgenticConversation"
                     :default-expanded="isMessageStreaming(message) && isAgenticConversation"
+                    :resolve-kb-id="resolveTraceChunkKbId"
                   />
                   <div
                     v-if="showAssistantCitationsFoot(message)"
@@ -363,12 +365,15 @@
                           class="msg-citation-row-btn"
                           @click="openCitationDetail(c)"
                         >
-                          <span class="msg-citation-ref">{{ c.ref }}</span>
+                          <span class="msg-citation-ref">{{ formatCitationDisplayRef(c.ref) }}</span>
                           <span class="msg-citation-meta">
                             <span class="msg-citation-doc">{{ c.document_name }}</span>
-                            <span v-if="c.source === 'graph'" class="msg-citation-graph-badge">
+                            <span v-if="isGraphCitation(c)" class="msg-citation-graph-badge">
                               <AppIcon name="graph" :size="11" />
                               图检索
+                            </span>
+                            <span v-else-if="isVectorCitation(c)" class="msg-citation-vector-badge">
+                              向量检索
                             </span>
                             <span v-if="c.page_no != null" class="msg-citation-page">第 {{ c.page_no }} 页</span>
                             <span v-if="c.chunk_index != null" class="msg-citation-chunk"
@@ -438,7 +443,8 @@
                 class="textarea composer-textarea"
                 rows="2"
                 aria-label="消息内容"
-                placeholder="请输入问题..."
+                placeholder="请输入问题…（Enter 发送，Shift+Enter / Ctrl+Enter 换行）"
+                @keydown="onComposerKeydown"
               />
               <button
                 class="btn btn-primary composer-send"
@@ -731,42 +737,107 @@
             </div>
             <div v-else class="kb-settings-loading">加载配置中…</div>
 
-            <div v-if="activeConfig" class="field chat-retrieval-topk-field">
-              <span class="chat-topk-field-label chat-field-label-block">
-                Top K
-                <span
-                  class="chat-field-hint-wrap"
-                  tabindex="0"
-                  role="button"
-                  aria-label="Top K 说明"
-                >
-                  <span class="chat-topk-help">?</span>
+            <div v-if="activeConfig && chatKnowledgeBaseIds.length" class="field chat-retrieval-topk-group">
+              <div v-if="hasClassicKbSelected" class="field chat-retrieval-topk-field">
+                <span class="chat-topk-field-label chat-field-label-block">
+                  向量库 Top K
+                  <span class="chat-field-hint-wrap" tabindex="0" role="button" aria-label="向量库 Top K 说明">
+                    <span class="chat-topk-help">?</span>
+                  </span>
+                  <span class="chat-field-hint-tooltip" role="tooltip">{{ VECTOR_RETRIEVAL_TOP_K_HELP }}</span>
                 </span>
-                <span class="chat-field-hint-tooltip" role="tooltip">{{ RETRIEVAL_TOP_K_HELP }}</span>
-              </span>
-              <div class="chat-topk-slider-row">
-                <input
-                  v-model.number="chatTopK"
-                  class="input chat-topk-number-input"
-                  type="number"
-                  min="1"
-                  max="50"
-                  step="1"
-                  aria-label="Top K"
-                  @change="onChatTopKCommit"
-                  @blur="onChatTopKCommit"
-                />
-                <input
-                  v-model.number="chatTopK"
-                  class="chat-topk-progress-range"
-                  type="range"
-                  min="1"
-                  max="50"
-                  step="1"
-                  :style="chatTopKSliderStyle"
-                  aria-label="Top K 滑动条"
-                  @change="onChatTopKCommit"
-                />
+                <div class="chat-topk-slider-row">
+                  <input
+                    v-model.number="chatVectorTopK"
+                    class="input chat-topk-number-input"
+                    type="number"
+                    min="1"
+                    max="50"
+                    step="1"
+                    aria-label="向量库 Top K"
+                    @change="onChatVectorTopKCommit"
+                    @blur="onChatVectorTopKCommit"
+                  />
+                  <input
+                    v-model.number="chatVectorTopK"
+                    class="chat-topk-progress-range"
+                    type="range"
+                    min="1"
+                    max="50"
+                    step="1"
+                    :style="chatVectorTopKSliderStyle"
+                    aria-label="向量库 Top K 滑动条"
+                    @change="onChatVectorTopKCommit"
+                  />
+                </div>
+              </div>
+
+              <div v-if="hasLightragKbSelected" class="field chat-retrieval-topk-field">
+                <span class="chat-topk-field-label chat-field-label-block">
+                  图库 Top K
+                  <span class="chat-field-hint-wrap" tabindex="0" role="button" aria-label="图库 Top K 说明">
+                    <span class="chat-topk-help">?</span>
+                  </span>
+                  <span class="chat-field-hint-tooltip" role="tooltip">{{ LIGHTRAG_RETRIEVAL_TOP_K_HELP }}</span>
+                </span>
+                <div class="chat-topk-slider-row">
+                  <input
+                    v-model.number="chatLightragTopK"
+                    class="input chat-topk-number-input"
+                    type="number"
+                    min="1"
+                    max="50"
+                    step="1"
+                    aria-label="图库 Top K"
+                    @change="onChatLightragTopKCommit"
+                    @blur="onChatLightragTopKCommit"
+                  />
+                  <input
+                    v-model.number="chatLightragTopK"
+                    class="chat-topk-progress-range"
+                    type="range"
+                    min="1"
+                    max="50"
+                    step="1"
+                    :style="chatLightragTopKSliderStyle"
+                    aria-label="图库 Top K 滑动条"
+                    @change="onChatLightragTopKCommit"
+                  />
+                </div>
+              </div>
+
+              <div class="field chat-retrieval-topk-field">
+                <span class="chat-topk-field-label chat-field-label-block">
+                  合并最终 Top K
+                  <span class="chat-field-hint-wrap" tabindex="0" role="button" aria-label="合并最终 Top K 说明">
+                    <span class="chat-topk-help">?</span>
+                  </span>
+                  <span class="chat-field-hint-tooltip" role="tooltip">{{ MERGE_RETRIEVAL_TOP_K_HELP }}</span>
+                </span>
+                <div class="chat-topk-slider-row">
+                  <input
+                    v-model.number="chatTopK"
+                    class="input chat-topk-number-input"
+                    type="number"
+                    min="1"
+                    max="50"
+                    step="1"
+                    aria-label="合并最终 Top K"
+                    @change="onChatTopKCommit"
+                    @blur="onChatTopKCommit"
+                  />
+                  <input
+                    v-model.number="chatTopK"
+                    class="chat-topk-progress-range"
+                    type="range"
+                    min="1"
+                    max="50"
+                    step="1"
+                    :style="chatTopKSliderStyle"
+                    aria-label="合并最终 Top K 滑动条"
+                    @change="onChatTopKCommit"
+                  />
+                </div>
               </div>
             </div>
 
@@ -900,6 +971,32 @@
                   @blur="onAgenticMinRelevantDocsCommit"
                 />
               </label>
+
+              <label class="field">
+                <span class="field-label chat-field-label-block">
+                  上下文用户问题条数
+                  <span
+                    class="chat-field-hint-wrap"
+                    tabindex="0"
+                    role="button"
+                    aria-label="上下文用户问题条数说明"
+                  >
+                    <span class="chat-topk-help">?</span>
+                  </span>
+                  <span class="chat-field-hint-tooltip" role="tooltip">{{ AGENTIC_CONTEXT_USER_TURNS_HELP }}</span>
+                </span>
+                <input
+                  v-model.number="chatAgenticContextUserTurns"
+                  class="input"
+                  type="number"
+                  min="1"
+                  max="10"
+                  step="1"
+                  aria-label="上下文用户问题条数"
+                  @change="onAgenticContextUserTurnsCommit"
+                  @blur="onAgenticContextUserTurnsCommit"
+                />
+              </label>
             </div>
           </section>
 
@@ -907,7 +1004,7 @@
             <div class="section-heading compact-heading">
               <div>
                 <h4>对话记忆</h4>
-                <p class="section-subtext">控制发给大模型的多轮历史；不影响知识库检索（仍仅用本轮问题）</p>
+                <p class="section-subtext">控制发给大模型的多轮历史；Classic 模式检索仍仅用本轮问题，Agentic 模式会使用上方「上下文用户问题条数」</p>
               </div>
             </div>
 
@@ -1264,6 +1361,10 @@
               <label class="field">
                 <span class="field-label">最少相关片段</span>
                 <input v-model.number="newChatAgenticMinRelevantDocs" class="input" type="number" min="1" max="10" />
+              </label>
+              <label class="field">
+                <span class="field-label">上下文用户问题条数</span>
+                <input v-model.number="newChatAgenticContextUserTurns" class="input" type="number" min="1" max="10" />
               </label>
             </div>
           </div>
@@ -1945,6 +2046,14 @@ import {
   type ChatApiAccessContext,
 } from '../lib/chat-api-access'
 import { copyToClipboard } from '../lib/copy-to-clipboard'
+import { formatCitationDisplayRef } from '../lib/chatMarkdown'
+import { isGraphCitation, isVectorCitation } from '../lib/citationSource'
+import {
+  buildInlineCitationChunk,
+  hasInlineCitationContent,
+  resolveNumericChunkId,
+  shouldUseInlineCitationContent,
+} from '../lib/citationDetail'
 import { groupSessionsByTime } from '../lib/sessionTimeGroups'
 import { isTableKnowledgeChunk } from '../lib/mineruContentDisplay'
 
@@ -1971,8 +2080,33 @@ function normalizeCitations(raw: unknown): ChatCitation[] | undefined {
       chunk_id = Number.isFinite(asNum) && String(asNum) === rawChunkId.trim() ? asNum : rawChunkId.trim()
     }
     const rawSource = r.source
-    const source =
-      typeof rawSource === 'string' && rawSource.trim() ? rawSource.trim() : undefined
+    let source: string | undefined
+    if (typeof rawSource === 'string' && rawSource.trim()) {
+      const normalized = rawSource.trim().toLowerCase()
+      if (normalized === 'agentic') {
+        const meta = r.metadata
+        const metaSource =
+          meta && typeof meta === 'object' && typeof (meta as { source?: string }).source === 'string'
+            ? String((meta as { source?: string }).source).trim().toLowerCase()
+            : ''
+        if (metaSource === 'lightrag') {
+          source = 'graph'
+        } else if (typeof rawChunkId === 'string' && rawChunkId.trim()) {
+          source = 'graph'
+        } else {
+          source = 'vector'
+        }
+      } else if (normalized === 'lightrag') {
+        source = 'graph'
+      } else {
+        source = normalized
+      }
+    }
+    const rawMeta = r.metadata
+    const metadata =
+      rawMeta && typeof rawMeta === 'object' && !Array.isArray(rawMeta)
+        ? (rawMeta as { source?: string })
+        : undefined
     const rawContent = r.content
     const content =
       rawContent == null || rawContent === ''
@@ -1985,11 +2119,14 @@ function normalizeCitations(raw: unknown): ChatCitation[] | undefined {
       document_name: String(r.document_name ?? ''),
       page_no: r.page_no == null ? null : Number(r.page_no),
       knowledge_base_id: r.knowledge_base_id != null ? Number(r.knowledge_base_id) : undefined,
+      knowledge_base_name:
+        r.knowledge_base_name != null ? String(r.knowledge_base_name) : undefined,
       chunk_id,
       document_id: r.document_id != null ? Number(r.document_id) : undefined,
       chunk_index: r.chunk_index != null ? Number(r.chunk_index) : undefined,
       score: r.score != null ? Number(r.score) : undefined,
       source,
+      metadata,
       content,
     })
   }
@@ -2015,11 +2152,63 @@ function syncChatPageHeader() {
   const conv = chatStore.activeConversation
   if (chatStore.activeConversationId && conv?.title) {
     setPageContext({ title: conv.title, breadcrumbTail: conv.title })
-    setChatHomeHandler(() => chatStore.leaveConversation())
+    setChatHomeHandler(onChatHomeNavigate)
     return
   }
   setPageContext({ title: '聊天助手', breadcrumbTail: null })
   setChatHomeHandler(null)
+}
+
+function preservedChatQuery(): Record<string, string> {
+  const nextQuery: Record<string, string> = {}
+  const ep = route.query.embed_panel
+  if (ep === '1' || ep === 'true') {
+    nextQuery.embed_panel = '1'
+  }
+  return nextQuery
+}
+
+const restoringSessionFromRoute = ref(false)
+
+async function syncRouteToActiveSession() {
+  if (restoringSessionFromRoute.value) {
+    return
+  }
+  const sessionId = chatStore.activeSessionId
+  const routeSessionId = typeof route.params.sessionId === 'string' ? route.params.sessionId : ''
+  if (sessionId) {
+    if (route.name === 'chat-session' && routeSessionId === sessionId) {
+      return
+    }
+    await router.replace({
+      name: 'chat-session',
+      params: { sessionId },
+      query: preservedChatQuery(),
+    })
+    return
+  }
+  if (route.name === 'chat' && !routeSessionId) {
+    return
+  }
+  await router.replace({ name: 'chat', query: preservedChatQuery() })
+}
+
+async function restoreSessionFromRoute(sessionId: string) {
+  restoringSessionFromRoute.value = true
+  try {
+    await chatStore.openSessionById(sessionId)
+  } catch (e) {
+    console.error('Failed to restore chat session from route', e)
+    chatStore.leaveConversation()
+    await router.replace({ name: 'chat', query: preservedChatQuery() })
+  } finally {
+    restoringSessionFromRoute.value = false
+  }
+}
+
+function onChatHomeNavigate() {
+  chatStore.leaveConversation()
+  void router.replace({ name: 'chat', query: preservedChatQuery() })
 }
 
 watch(
@@ -2075,6 +2264,13 @@ function resolveCitationKbId(c: ChatCitation): number | null {
   return ids.length === 1 ? ids[0]! : null
 }
 
+function resolveTraceChunkKbId(row: { knowledge_base_id?: number | null }): number | null {
+  if (row.knowledge_base_id != null && Number.isFinite(row.knowledge_base_id)) {
+    return row.knowledge_base_id
+  }
+  return resolveCitationKbId({ ref: 0, document_name: '', page_no: null })
+}
+
 function closeCitationModal() {
   citationModalOpen.value = false
   citationModalCitation.value = null
@@ -2083,57 +2279,45 @@ function closeCitationModal() {
   citationModalLoading.value = false
 }
 
-function buildGraphCitationChunk(c: ChatCitation): KnowledgeChunk {
-  const content = String(c.content ?? '')
-  return {
-    id: typeof c.chunk_id === 'number' ? c.chunk_id : 0,
-    chunk_uid: '',
-    document_id: c.document_id ?? 0,
-    chunk_index: c.chunk_index ?? 0,
-    content,
-    content_preview: null,
-    char_count: content.length,
-    token_count: null,
-    start_offset: null,
-    end_offset: null,
-    page_no: c.page_no,
-    heading_path: null,
-    vector_status: '',
-    vector_id: null,
-    metadata: null,
-    created_at: '',
-    updated_at: '',
-  }
-}
-
 async function openCitationDetail(c: ChatCitation) {
   citationModalCitation.value = c
   citationModalChunk.value = null
   citationModalError.value = ''
   citationModalOpen.value = true
-  // 图谱库引用：chunk_id 为 LightRAG 内部 ID，无法 getChunk，直接展示随附正文
-  if (c.source === 'graph' || (typeof c.chunk_id !== 'number' && c.content != null)) {
-    if (c.content != null && String(c.content).trim()) {
-      citationModalChunk.value = buildGraphCitationChunk(c)
-    } else {
-      citationModalError.value = '该图谱引用未携带正文，请点击「打开文档原文」查看。'
-    }
+
+  if (isGraphCitation(c) && !hasInlineCitationContent(c)) {
+    citationModalError.value = '该图谱引用未携带正文，请点击「打开文档原文」查看。'
     return
   }
+
+  if (shouldUseInlineCitationContent(c)) {
+    citationModalChunk.value = buildInlineCitationChunk(c)
+    return
+  }
+
   const kbId = resolveCitationKbId(c)
-  const chunkId = c.chunk_id
+  const chunkId = resolveNumericChunkId(c)
   if (kbId == null || chunkId == null) {
+    if (hasInlineCitationContent(c)) {
+      citationModalChunk.value = buildInlineCitationChunk(c)
+      return
+    }
     citationModalError.value =
       kbId == null
         ? '无法确定所属知识库（多库对话请在设置中暂只选一个，或重新对话以生成含知识库信息的引文）。'
         : '该引文缺少切片 ID，无法加载正文。'
     return
   }
+
   citationModalLoading.value = true
   try {
     citationModalChunk.value = await knowledgeBaseApi.getChunk(kbId, chunkId)
   } catch (e) {
     console.error(e)
+    if (hasInlineCitationContent(c)) {
+      citationModalChunk.value = buildInlineCitationChunk(c)
+      return
+    }
     citationModalError.value = '加载切片正文失败，请稍后重试。'
   } finally {
     citationModalLoading.value = false
@@ -2347,9 +2531,11 @@ const newChatTitle = ref('')
 const newChatRagMode = ref<RagMode>('classic')
 const newChatAgenticMaxIterations = ref(2)
 const newChatAgenticMinRelevantDocs = ref(1)
+const newChatAgenticContextUserTurns = ref(3)
 
 const DEFAULT_AGENTIC_MAX_ITERATIONS = 2
 const DEFAULT_AGENTIC_MIN_RELEVANT_DOCS = 1
+const DEFAULT_AGENTIC_CONTEXT_USER_TURNS = 3
 
 const ragModeOptions = [
   {
@@ -2767,13 +2953,24 @@ const hasLightragKbSelected = computed(() => {
   return kbs.value.some((kb) => ids.has(kb.id) && kb.kb_type === 'lightrag')
 })
 
+const hasClassicKbSelected = computed(() => {
+  const ids = new Set(chatKnowledgeBaseIds.value)
+  return kbs.value.some((kb) => ids.has(kb.id) && kb.kb_type !== 'lightrag')
+})
+
 async function onLightragModeChange(evt: Event) {
   const value = (evt.target as HTMLSelectElement).value as 'naive' | 'local' | 'global' | 'hybrid' | 'mix'
   await updateConfig('lightrag_query_mode', value)
 }
 
-const RETRIEVAL_TOP_K_HELP =
-  '与知识库「检索设置 / 检索测试」中的 Top K 相同：单库时召回条数一致；多库时为合并排序后写入上下文的上限。修改后会同步保存到已选知识库。'
+const VECTOR_RETRIEVAL_TOP_K_HELP =
+  '每个经典/向量知识库单路召回的片段数上限；多库绑定时各路先按此预算检索，再参与合并。'
+
+const LIGHTRAG_RETRIEVAL_TOP_K_HELP =
+  '图知识库 LightRAG 的 top_k（实体/关系/片段预算），与下方 chunk_top_k（图片段数）相互独立。'
+
+const MERGE_RETRIEVAL_TOP_K_HELP =
+  '多路检索结果经公平合并、去重后写入助手上下文的上限。修改合并 Top K 后会同步保存到已选知识库 default_top_k。'
 
 const SHOW_CITATIONS_HELP =
   '开启后，助手回复中的 [1]、[2] 等会显示为角标，并在消息下方列出对应知识库文档与页码；仅在选择知识库并命中检索片段时生效。'
@@ -2792,6 +2989,9 @@ const AGENTIC_MAX_ITERATIONS_HELP =
 
 const AGENTIC_MIN_RELEVANT_DOCS_HELP =
   '评估阶段判定「检索已足够」所需的最少相关片段数（1–10）。达到该数量后进入生成；否则在轮数上限内尝试改写查询后重检。'
+
+const AGENTIC_CONTEXT_USER_TURNS_HELP =
+  '检索、改写与相关性评估时，从 prior 对话中取最近 N 条用户问题参与 query 补全（1–10）。仅含用户问题，不含助手回复；默认 3。'
 
 const SYSTEM_PROMPT_HELP =
   '定义助手的人设与回答规则。可用 {knowledge} 占位符，本轮检索到的知识库片段会自动插入该位置；留空保存后服务端会按是否绑定知识库选择默认模板。'
@@ -2901,6 +3101,8 @@ function applySuggestedQuestion(q: string) {
 }
 
 const DEFAULT_CHAT_TOP_K = defaultRetrievalFormState().top_k
+const DEFAULT_VECTOR_TOP_K = 8
+const DEFAULT_LIGHTRAG_RETRIEVAL_TOP_K = 8
 
 function clampChatRetrievalTopK(n: number): number {
   if (!Number.isFinite(n)) return DEFAULT_CHAT_TOP_K
@@ -2919,8 +3121,15 @@ function clampAgenticMinRelevantDocs(raw: unknown): number {
   return Math.min(10, Math.max(1, Math.round(n)))
 }
 
+function clampAgenticContextUserTurns(raw: unknown): number {
+  const n = Number(raw)
+  if (!Number.isFinite(n)) return DEFAULT_AGENTIC_CONTEXT_USER_TURNS
+  return Math.min(10, Math.max(1, Math.round(n)))
+}
+
 const chatAgenticMaxIterations = ref(DEFAULT_AGENTIC_MAX_ITERATIONS)
 const chatAgenticMinRelevantDocs = ref(DEFAULT_AGENTIC_MIN_RELEVANT_DOCS)
+const chatAgenticContextUserTurns = ref(DEFAULT_AGENTIC_CONTEXT_USER_TURNS)
 
 watch(
   () => activeConfig.value?.agentic_max_iterations,
@@ -2938,7 +3147,17 @@ watch(
   { immediate: true },
 )
 
+watch(
+  () => activeConfig.value?.agentic_context_user_turns,
+  (v) => {
+    chatAgenticContextUserTurns.value = clampAgenticContextUserTurns(v ?? DEFAULT_AGENTIC_CONTEXT_USER_TURNS)
+  },
+  { immediate: true },
+)
+
 const chatTopK = ref(DEFAULT_CHAT_TOP_K)
+const chatVectorTopK = ref(DEFAULT_VECTOR_TOP_K)
+const chatLightragTopK = ref(DEFAULT_LIGHTRAG_RETRIEVAL_TOP_K)
 const skipTopKFromKbWatch = ref(false)
 let prevKbIdsKey = ''
 
@@ -2949,6 +3168,22 @@ watch(
       return
     }
     chatTopK.value = clampChatRetrievalTopK(v ?? DEFAULT_CHAT_TOP_K)
+  },
+  { immediate: true },
+)
+
+watch(
+  () => activeConfig.value?.vector_retrieval_top_k,
+  (v) => {
+    chatVectorTopK.value = clampChatRetrievalTopK(v ?? DEFAULT_VECTOR_TOP_K)
+  },
+  { immediate: true },
+)
+
+watch(
+  () => activeConfig.value?.lightrag_retrieval_top_k,
+  (v) => {
+    chatLightragTopK.value = clampChatRetrievalTopK(v ?? DEFAULT_LIGHTRAG_RETRIEVAL_TOP_K)
   },
   { immediate: true },
 )
@@ -2988,14 +3223,18 @@ watch(
   { immediate: true },
 )
 
-const chatTopKSliderStyle = computed(() => {
+const chatTopKSliderStyle = computed(() => topKSliderStyle(chatTopK.value))
+const chatVectorTopKSliderStyle = computed(() => topKSliderStyle(chatVectorTopK.value))
+const chatLightragTopKSliderStyle = computed(() => topKSliderStyle(chatLightragTopK.value))
+
+function topKSliderStyle(value: number): Record<string, string> {
   const min = 1
   const max = 50
-  const raw = Number.isFinite(chatTopK.value) ? chatTopK.value : min
+  const raw = Number.isFinite(value) ? value : min
   const clamped = Math.min(Math.max(raw, min), max)
   const pct = ((clamped - min) / (max - min)) * 100
-  return { '--progress': `${pct.toFixed(2)}%` } as Record<string, string>
-})
+  return { '--progress': `${pct.toFixed(2)}%` }
+}
 
 /** 与后端 `DEFAULT_CHAT_SYSTEM_PROMPT_GENERAL` 一致；未保存自定义时后端按本轮是否有检索片段在通用/RAG 模板间选择 */
 const DEFAULT_CHAT_SYSTEM_PROMPT =
@@ -3942,21 +4181,50 @@ onMounted(async () => {
     fetchEmbeddingModels(),
     fetchEmbeddingSpaceDefault(),
   ])
+  const routeSessionId =
+    route.name === 'chat-session' && typeof route.params.sessionId === 'string'
+      ? route.params.sessionId.trim()
+      : ''
+  if (routeSessionId) {
+    await restoreSessionFromRoute(routeSessionId)
+    return
+  }
   const q = route.query.conversation_id
   const cid = typeof q === 'string' ? q : Array.isArray(q) && typeof q[0] === 'string' ? q[0] : ''
   if (cid) {
     const exists = chatStore.conversations.some((c) => c.id === cid)
     if (exists) {
       await chatStore.selectConversation(cid)
+      await syncRouteToActiveSession()
     }
     const nextQuery: Record<string, string> = {}
     const ep = route.query.embed_panel
     if (ep === '1' || ep === 'true') {
       nextQuery.embed_panel = '1'
     }
-    await router.replace({ path: '/chat', query: nextQuery })
+    if (Object.keys(nextQuery).length > 0) {
+      await router.replace({ name: route.name ?? 'chat', query: nextQuery })
+    }
   }
 })
+
+watch(
+  () => chatStore.activeSessionId,
+  () => {
+    void syncRouteToActiveSession()
+  },
+)
+
+watch(
+  () => (route.name === 'chat-session' ? route.params.sessionId : null),
+  (paramId) => {
+    const sessionId = typeof paramId === 'string' ? paramId.trim() : ''
+    if (!sessionId || sessionId === chatStore.activeSessionId) {
+      return
+    }
+    void restoreSessionFromRoute(sessionId)
+  },
+)
 
 onBeforeUnmount(() => {
   window.removeEventListener('click', onGlobalClick)
@@ -4035,6 +4303,7 @@ const openCreateChatModal = async () => {
   newChatRagMode.value = 'classic'
   newChatAgenticMaxIterations.value = DEFAULT_AGENTIC_MAX_ITERATIONS
   newChatAgenticMinRelevantDocs.value = DEFAULT_AGENTIC_MIN_RELEVANT_DOCS
+  newChatAgenticContextUserTurns.value = DEFAULT_AGENTIC_CONTEXT_USER_TURNS
   showCreateModal.value = true
   await nextTick()
   createInputRef.value?.focus()
@@ -4050,6 +4319,7 @@ const handleCreate = async () => {
     if (newChatRagMode.value === 'agentic') {
       configuration.agentic_max_iterations = clampAgenticMaxIterations(newChatAgenticMaxIterations.value)
       configuration.agentic_min_relevant_docs = clampAgenticMinRelevantDocs(newChatAgenticMinRelevantDocs.value)
+      configuration.agentic_context_user_turns = clampAgenticContextUserTurns(newChatAgenticContextUserTurns.value)
     }
     await chatStore.createConversation(title, configuration)
     showCreateModal.value = false
@@ -4075,6 +4345,17 @@ function sessionTitleFromFirstUserMessage(text: string): string {
     return oneLine
   }
   return chars.slice(0, SESSION_TITLE_MAX_CHARS).join('') + '…'
+}
+
+function onComposerKeydown(e: KeyboardEvent) {
+  if (e.key !== 'Enter' || e.isComposing) {
+    return
+  }
+  if (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) {
+    return
+  }
+  e.preventDefault()
+  void handleSend()
 }
 
 const handleSend = async () => {
@@ -4197,6 +4478,17 @@ function onAgenticMinRelevantDocsCommit() {
   void updateConfig('agentic_min_relevant_docs', v)
 }
 
+function onAgenticContextUserTurnsCommit() {
+  if (!activeConfig.value) return
+  const v = clampAgenticContextUserTurns(chatAgenticContextUserTurns.value)
+  chatAgenticContextUserTurns.value = v
+  const prev = clampAgenticContextUserTurns(
+    activeConfig.value.agentic_context_user_turns ?? DEFAULT_AGENTIC_CONTEXT_USER_TURNS,
+  )
+  if (v === prev) return
+  void updateConfig('agentic_context_user_turns', v)
+}
+
 function onChatChunkTopKCommit() {
   if (!activeConfig.value) return
   const raw = chatChunkTopK.value
@@ -4213,6 +4505,28 @@ function onChatChunkTopKCommit() {
     return
   }
   void updateConfig('lightrag_chunk_top_k', next)
+}
+
+function onChatVectorTopKCommit() {
+  if (!activeConfig.value) return
+  const v = clampChatRetrievalTopK(chatVectorTopK.value)
+  chatVectorTopK.value = v
+  const prev = clampChatRetrievalTopK(activeConfig.value.vector_retrieval_top_k ?? DEFAULT_VECTOR_TOP_K)
+  if (v === prev) {
+    return
+  }
+  void updateConfig('vector_retrieval_top_k', v)
+}
+
+function onChatLightragTopKCommit() {
+  if (!activeConfig.value) return
+  const v = clampChatRetrievalTopK(chatLightragTopK.value)
+  chatLightragTopK.value = v
+  const prev = clampChatRetrievalTopK(activeConfig.value.lightrag_retrieval_top_k ?? DEFAULT_LIGHTRAG_RETRIEVAL_TOP_K)
+  if (v === prev) {
+    return
+  }
+  void updateConfig('lightrag_retrieval_top_k', v)
 }
 
 function onChatTopKCommit() {
@@ -6630,6 +6944,16 @@ function onChatTopKCommit() {
   flex-shrink: 0;
 }
 
+.chat-retrieval-topk-group {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.chat-retrieval-topk-group .chat-retrieval-topk-field {
+  margin-top: 0;
+}
+
 .chat-retrieval-topk-field {
   margin-top: 14px;
 }
@@ -6885,42 +7209,6 @@ function onChatTopKCommit() {
   outline-offset: 2px;
 }
 
-.msg-citation-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 1.25em;
-  height: 1.25em;
-  margin: 0 2px;
-  padding: 0 4px;
-  border-radius: 999px;
-  font-size: 0.68rem;
-  font-weight: 700;
-  line-height: 1;
-  vertical-align: super;
-  text-decoration: none;
-  background: rgba(100, 116, 139, 0.16);
-  color: var(--text-secondary);
-  border: 1px solid rgba(100, 116, 139, 0.35);
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.msg-citation-badge + .msg-citation-badge {
-  margin-left: 3px;
-}
-
-.msg-citation-badge:hover {
-  background: rgba(37, 99, 235, 0.12);
-  border-color: rgba(37, 99, 235, 0.35);
-  color: var(--brand-primary);
-}
-
-.msg-citation-badge:focus-visible {
-  outline: 2px solid var(--brand-primary);
-  outline-offset: 2px;
-}
-
 .msg-citations-block {
   margin-top: 12px;
   padding: 12px 14px;
@@ -6986,11 +7274,12 @@ function onChatTopKCommit() {
   justify-content: center;
   min-width: 22px;
   height: 22px;
-  border-radius: 6px;
+  border-radius: 999px;
   font-size: 0.75rem;
-  font-weight: 700;
-  background: rgba(20, 184, 166, 0.15);
-  color: #0d9488;
+  font-weight: 500;
+  background: var(--citation-badge-bg);
+  color: var(--citation-badge-text);
+  border: 1px solid var(--citation-badge-border);
 }
 
 .msg-citation-meta {
@@ -7022,6 +7311,19 @@ function onChatTopKCommit() {
   color: #7c3aed;
   background: rgba(168, 85, 247, 0.12);
   border: 1px solid rgba(168, 85, 247, 0.32);
+}
+
+.msg-citation-vector-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.5;
+  color: #0d9488;
+  background: rgba(20, 184, 166, 0.12);
+  border: 1px solid rgba(20, 184, 166, 0.28);
 }
 
 .citation-chunk-modal-overlay {

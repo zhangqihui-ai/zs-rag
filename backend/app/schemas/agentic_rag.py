@@ -19,6 +19,7 @@ class AgenticRAGQueryRequest(BaseModel):
     include_image_ocr: bool | None = None
     max_iterations: int | None = Field(default=None, ge=1, le=5)
     min_relevant_docs: int | None = Field(default=None, ge=1, le=10)
+    context_user_turns: int | None = Field(default=None, ge=1, le=10)
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     max_tokens: int | None = Field(default=None, ge=1)
     top_p: float | None = Field(default=None, ge=0.0, le=1.0)

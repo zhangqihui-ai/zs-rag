@@ -17,10 +17,19 @@ const markedConfigured = marked.setOptions({
 
 void markedConfigured
 
-/** 引文占位符（Markdown 解析后再替换为角标，避免拆坏表格/列表）。 */
+/** 圆圈数字 ①～⑳（0 为 ⓪），超出范围回退阿拉伯数字。 */
+const CIRCLED_NUMBER_BY_REF = '⓪①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳'
+
+export function formatCitationDisplayRef(refNum: number): string {
+  if (Number.isInteger(refNum) && refNum >= 0 && refNum < CIRCLED_NUMBER_BY_REF.length) {
+    return CIRCLED_NUMBER_BY_REF[refNum] ?? String(refNum)
+  }
+  return String(refNum)
+}
+
 const CITATION_PLACEHOLDER_RE = /\uE000(\d+)\uE001/g
 
-const CITATION_SOURCE_RE = /\[(\d+)\]|［(\d+)］/g
+const CITATION_SOURCE_RE = /\[(\d+)\]|［(\d+)］|[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]/g
 
 const ALLOWED_TAGS = new Set([
   'h1',
@@ -123,19 +132,27 @@ function sanitizeChatHtml(html: string): string {
   return wrapTables(root.innerHTML)
 }
 
-/** 将 [1] / ［1］ 替换为占位符，避免 marked 当链接解析或分段破坏表格。 */
+/** 将 [1] / ［1］ / ① 等替换为占位符，避免 marked 当链接解析或分段破坏表格。 */
 export function protectCitationRefs(text: string): string {
-  return text.replace(CITATION_SOURCE_RE, (_, ascii, fullwidth) => {
-    const num = ascii ?? fullwidth
-    return `\uE000${num}\uE001`
+  return text.replace(CITATION_SOURCE_RE, (match, ascii, fullwidth) => {
+    if (ascii ?? fullwidth) {
+      const num = ascii ?? fullwidth
+      return `\uE000${num}\uE001`
+    }
+    const refNum = CIRCLED_NUMBER_BY_REF.indexOf(match)
+    if (refNum > 0) {
+      return `\uE000${refNum}\uE001`
+    }
+    return match
   })
 }
 
 function citationBadgeHtml(refNum: number, title: string): string {
   const safeTitle = escapeHtmlAttr(title)
+  const label = formatCitationDisplayRef(refNum)
   return (
     `<sup class="msg-citation-badge" tabindex="0" role="button" ` +
-    `data-citation-ref="${refNum}" title="${safeTitle}（点击查看切片）">${refNum}</sup>`
+    `data-citation-ref="${refNum}" aria-label="${safeTitle}">${label}</sup>`
   )
 }
 

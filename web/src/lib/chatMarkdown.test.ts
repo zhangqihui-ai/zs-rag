@@ -42,6 +42,7 @@ describe('chatMarkdown', () => {
       citationTitleForRef: () => '文档A',
     })
     assert.match(html, /data-citation-ref="1"/)
+    assert.match(html, />①</)
     assert.match(html, /msg-citation-badge/)
     assert.match(html, /说明/)
     assert.match(html, /结束/)

@@ -1,6 +1,6 @@
 <template>
-  <div class="graph-viz-panel">
-    <div class="graph-viz-toolbar">
+  <div class="graph-viz-panel" :class="{ 'graph-viz-panel--compact': compact }">
+    <div v-if="!compact" class="graph-viz-toolbar">
       <label class="field graph-viz-search">
         <span class="field-label">实体搜索</span>
         <div class="input-wrap">
@@ -57,7 +57,7 @@
           <button class="btn btn-ghost btn-row-compact" type="button" title="放大" @click="zoomBy(1.2)">+</button>
           <button class="btn btn-ghost btn-row-compact" type="button" title="缩小" @click="zoomBy(0.8)">−</button>
           <button class="btn btn-ghost btn-row-compact" type="button" title="适应窗口" @click="fitView">适应</button>
-          <button class="btn btn-ghost btn-row-compact" type="button" title="重置布局" @click="loadSubgraph">重置</button>
+          <button class="btn btn-ghost btn-row-compact" type="button" title="重置布局" @click="resetLayout">重置</button>
         </div>
       </div>
 
@@ -90,6 +90,10 @@ const props = defineProps<{
   kbId: number
   /** 从路由或图检索跳转时预选的实体 ID */
   focusEntityId?: string | null
+  /** 直接渲染检索结果等内联子图，不请求后端 subgraph 接口 */
+  inlineSubgraph?: GraphSubgraphResponse | null
+  /** 紧凑模式：隐藏工具栏，用于图检索结果中的局部图谱 */
+  compact?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -234,7 +238,26 @@ function normalizeSearchLabel(raw: string): string {
   return label || '*'
 }
 
+async function renderInlineSubgraph(data: GraphSubgraphResponse) {
+  stats.value = { ...data.stats }
+  truncatedHint.value = ''
+  error.value = ''
+  await renderGraph(data)
+}
+
+function resetLayout() {
+  if (props.inlineSubgraph) {
+    void renderInlineSubgraph(props.inlineSubgraph)
+    return
+  }
+  void loadSubgraph()
+}
+
 async function loadSubgraph() {
+  if (props.inlineSubgraph) {
+    await renderInlineSubgraph(props.inlineSubgraph)
+    return
+  }
   if (!props.kbId || Number.isNaN(props.kbId)) {
     return
   }
@@ -336,14 +359,38 @@ function fitView() {
 watch(
   () => props.kbId,
   () => {
+    if (props.inlineSubgraph) {
+      void renderInlineSubgraph(props.inlineSubgraph)
+      return
+    }
     void loadSubgraph()
   },
   { immediate: true },
 )
 
 watch(
+  () => props.inlineSubgraph,
+  (data) => {
+    if (!data) {
+      if (props.compact) {
+        destroyGraph()
+      }
+      return
+    }
+    void renderInlineSubgraph(data)
+  },
+  { deep: true },
+)
+
+watch(
   () => props.focusEntityId,
   (value) => {
+    if (props.inlineSubgraph) {
+      if (value?.trim()) {
+        void selectNode(value.trim())
+      }
+      return
+    }
     if (value?.trim()) {
       searchLabel.value = value.trim()
       void loadSubgraph()
@@ -352,6 +399,9 @@ watch(
 )
 
 watch(nodeLimit, () => {
+  if (props.inlineSubgraph) {
+    return
+  }
   void loadSubgraph()
 })
 
@@ -437,10 +487,12 @@ defineExpose({
   display: flex;
   flex: 1;
   min-height: 0;
+  min-width: 0;
   border: 1px solid var(--border-color);
   border-radius: 16px;
   overflow: hidden;
   background: var(--bg-tertiary);
+  isolation: isolate;
 }
 
 .graph-viz-canvas-wrap {
@@ -499,5 +551,14 @@ defineExpose({
   display: inline-flex;
   flex-direction: column;
   gap: 4px;
+}
+
+.graph-viz-panel--compact {
+  gap: 0;
+}
+
+.graph-viz-panel--compact .graph-viz-main {
+  height: 420px;
+  min-height: 420px;
 }
 </style>

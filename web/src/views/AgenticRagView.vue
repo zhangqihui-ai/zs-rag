@@ -92,34 +92,33 @@
             </div>
 
             <div v-if="showTracePanel" class="agentic-trace">
-              <h5>决策轨迹</h5>
-              <div v-if="agenticStore.trace.length === 0" class="trace-empty">
-                {{ agenticStore.running ? '正在执行，等待轨迹…' : '尚未产生轨迹。' }}
-              </div>
-              <ol v-else class="trace-list">
-                <li v-for="(item, index) in agenticStore.trace" :key="`${item.step}-${index}`" class="trace-item">
-                  <div class="trace-dot"></div>
-                  <div class="trace-body">
-                    <div class="trace-title">
-                      <strong>{{ stepLabel(item.step) }}</strong>
-                      <span v-if="item.elapsed_ms != null">{{ item.elapsed_ms }} ms</span>
-                    </div>
-                    <p>{{ traceSummary(item) }}</p>
-                  </div>
-                </li>
-              </ol>
+              <AgentTracePanel
+                :trace="agenticStore.trace"
+                :running="agenticStore.running"
+                :default-expanded="true"
+                :resolve-kb-id="resolveAgenticTraceKbId"
+              />
             </div>
 
             <div v-if="agenticStore.error" class="status-box error">{{ agenticStore.error }}</div>
 
             <div v-if="agenticStore.answer" class="agentic-answer-card">
-              <div class="agentic-answer markdown-body chat-markdown-body" v-html="answerHtml" />
+              <AssistantMessageContent
+                :content="agenticStore.answer"
+                :streaming="agenticStore.running"
+                :show-citations="true"
+                :message="agenticAnswerMessage"
+                :citation-title-for-ref="agenticCitationTitle"
+                :resolve-citation-kb-id="resolveAgenticCitationKbId"
+              />
             </div>
 
             <div v-if="agenticStore.citations.length" class="agentic-citations">
               <h5>引用来源</h5>
               <div v-for="cite in agenticStore.citations" :key="cite.ref" class="citation-row">
-                <strong>[{{ cite.ref }}] {{ cite.document_name }}</strong>
+                <strong>{{ formatCitationDisplayRef(cite.ref) }} {{ cite.document_name }}</strong>
+                <span v-if="isGraphCitation(cite)" class="agentic-citation-graph-badge">图检索</span>
+                <span v-else-if="isVectorCitation(cite)" class="agentic-citation-vector-badge">向量检索</span>
                 <span v-if="cite.score != null">Score {{ formatScore(cite.score) }}</span>
               </div>
             </div>
@@ -130,7 +129,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 import { knowledgeBaseApi, type KnowledgeBase } from '../api/knowledge-base'
 import {
@@ -140,14 +139,19 @@ import {
   type DefaultModelOption,
   type ModelItem,
 } from '../api/model-management'
+import AssistantMessageContent from '../components/chat/AssistantMessageContent.vue'
+import AgentTracePanel from '../components/chat/AgentTracePanel.vue'
 import LlmModelPicker from '../components/knowledge-base/LlmModelPicker.vue'
 import KnowledgeBaseMultiSelect from '../components/knowledge-base/KnowledgeBaseMultiSelect.vue'
 import RetrievalConfigForm from '../components/knowledge-base/RetrievalConfigForm.vue'
 import { defaultRetrievalFormState, retrievalFormFromKnowledgeBase, type RetrievalFormState } from '../components/knowledge-base/retrieval-form'
-import { renderAssistantMessageHtml } from '../lib/chatMarkdown'
+import { formatCitationDisplayRef } from '../lib/chatMarkdown'
+import { isGraphCitation, isVectorCitation } from '../lib/citationSource'
 import { loadRetrievalKbPreference, saveRetrievalKbPreference } from '../lib/retrieval-kb-preference'
+import { useSpaceReadyLoader } from '../composables/useSpaceReady'
 import { useAgenticRagStore } from '../stores/agentic-rag'
 import { useAuthStore } from '../stores/auth'
+import type { ChatCitation, ChatMessage } from '../api/chat'
 
 const authStore = useAuthStore()
 const agenticStore = useAgenticRagStore()
@@ -185,16 +189,36 @@ const canSubmit = computed(
     !llmModelsLoading.value &&
     (llmModels.value.length > 0 || defaultLlmModel.value != null),
 )
-const answerHtml = computed(() =>
-  renderAssistantMessageHtml(agenticStore.answer, {
-    showCitations: true,
-    streaming: agenticStore.running,
-    citationTitleForRef: (refNum) => {
-      const cite = agenticStore.citations.find((row) => row.ref === refNum)
-      return cite ? cite.document_name : `引用 ${refNum}`
-    },
+
+const agenticAnswerMessage = computed(
+  (): ChatMessage => ({
+    id: 'agentic-preview',
+    session_id: 'agentic-preview',
+    role: 'assistant',
+    content: agenticStore.answer,
+    created_at: '',
+    citations: agenticStore.citations,
   }),
 )
+
+function agenticCitationTitle(refNum: number, message: ChatMessage): string {
+  const c = message.citations?.find((row) => row.ref === refNum)
+  return c ? c.document_name : `引用 ${refNum}`
+}
+
+function resolveAgenticCitationKbId(c: ChatCitation): number | null {
+  if (c.knowledge_base_id != null && Number.isFinite(c.knowledge_base_id)) {
+    return c.knowledge_base_id
+  }
+  return selectedKbIds.value.length === 1 ? selectedKbIds.value[0]! : null
+}
+
+function resolveAgenticTraceKbId(row: { knowledge_base_id?: number | null }): number | null {
+  if (row.knowledge_base_id != null && Number.isFinite(row.knowledge_base_id)) {
+    return row.knowledge_base_id
+  }
+  return selectedKbIds.value.length === 1 ? selectedKbIds.value[0]! : null
+}
 
 const showTracePanel = computed(
   () => agenticStore.running || agenticStore.trace.length > 0 || Boolean(agenticStore.answer),
@@ -267,47 +291,11 @@ function routeDecisionLabel(value: string) {
   return value === 'direct' ? '直接回答' : '知识库检索'
 }
 
-function stepLabel(step: string) {
-  const map: Record<string, string> = {
-    route: '路由判断',
-    route_refine: '路由二次判断',
-    retrieve: '知识检索',
-    grade: '相关性评估',
-    rewrite: '问题改写',
-    generate: '生成回答',
-  }
-  return map[step] || step
-}
-
-function traceSummary(item: Record<string, unknown>) {
-  if (item.step === 'route') {
-    const pass = item.route_pass != null ? `（第 ${item.route_pass} 轮）` : ''
-    return `决策：${routeDecisionLabel(String(item.decision || 'retrieve'))}${pass}。${String(item.reason || '')}`
-  }
-  if (item.step === 'route_refine') {
-    const preTotal = item.pre_retrieve_total ?? 0
-    return `预检索试探 ${preTotal} 条后二次路由：${routeDecisionLabel(String(item.decision || 'retrieve'))}。${String(item.reason || '')}`
-  }
-  if (item.step === 'retrieve') {
-    return `第 ${item.iteration || 1} 轮查询「${item.query || ''}」，召回 ${item.total || 0} 条。`
-  }
-  if (item.step === 'grade') {
-    return `相关片段 ${item.relevant_count || 0} / ${item.total || 0}。`
-  }
-  if (item.step === 'rewrite') {
-    return `改写为「${item.to || ''}」。`
-  }
-  if (item.step === 'generate') {
-    return `生成 ${item.answer_chars || 0} 字，引用 ${item.citation_count || 0} 条。`
-  }
-  return '已完成。'
-}
-
 function formatScore(value: number) {
   return Number.isFinite(value) ? value.toFixed(3) : '—'
 }
 
-onMounted(() => {
+useSpaceReadyLoader(() => {
   void Promise.all([loadKnowledgeBases(), loadLlmModels()])
 })
 
@@ -453,6 +441,27 @@ watch(
 
 .citation-row:first-of-type {
   border-top: 0;
+}
+
+.agentic-citation-graph-badge,
+.agentic-citation-vector-badge {
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.agentic-citation-graph-badge {
+  color: #7c3aed;
+  background: rgba(168, 85, 247, 0.12);
+  border: 1px solid rgba(168, 85, 247, 0.32);
+}
+
+.agentic-citation-vector-badge {
+  color: #0d9488;
+  background: rgba(20, 184, 166, 0.12);
+  border: 1px solid rgba(20, 184, 166, 0.28);
 }
 
 .trace-empty {

@@ -308,6 +308,8 @@ import { defaultModelApi, modelApi, type DefaultModelOption, type ModelItem } fr
 import AppIcon from '../components/AppIcon.vue'
 import EmptyState from '../components/EmptyState.vue'
 import Layout from '../components/Layout.vue'
+import { useSpaceReadyLoader } from '../composables/useSpaceReady'
+import { isLikelyHtmlPayload } from '../lib/isLikelyHtmlResponse'
 
 const statusLabelMap: Record<string, string> = {
   active: '运行中',
@@ -330,6 +332,7 @@ const router = useRouter()
 
 const knowledgeBases = ref<KnowledgeBase[]>([])
 let knowledgeBaseLoadSeq = 0
+let activeKnowledgeBaseLoad: AbortController | null = null
 const searchTerm = ref('')
 const currentPage = ref(1)
 const pageSize = ref(12)
@@ -365,7 +368,7 @@ watch([totalPages, currentPage], () => {
 
 const embeddingModels = ref<ModelItem[]>([])
 const embeddingDefault = ref<DefaultModelOption | null>(null)
-const loading = ref(true)
+const loading = ref(false)
 const error = ref('')
 
 const notice = ref('')
@@ -528,15 +531,26 @@ function displayKbName(kb: KnowledgeBase) {
 }
 
 const refreshKnowledgeBases = async () => {
+  activeKnowledgeBaseLoad?.abort()
+  const controller = new AbortController()
+  activeKnowledgeBaseLoad = controller
   const seq = ++knowledgeBaseLoadSeq
   loading.value = true
   error.value = ''
   try {
-    const [raw] = await Promise.all([knowledgeBaseApi.list(), loadEmbeddingContext()])
-    if (seq !== knowledgeBaseLoadSeq) {
+    const [raw] = await Promise.all([
+      knowledgeBaseApi.list({ signal: controller.signal }),
+      loadEmbeddingContext(controller.signal),
+    ])
+    if (controller.signal.aborted || seq !== knowledgeBaseLoadSeq) {
       return
     }
     const list = normalizeKnowledgeBaseList(raw)
+    if (isLikelyHtmlPayload(raw)) {
+      error.value = '接口返回异常（误加载了前端页面），请刷新重试'
+      knowledgeBases.value = []
+      return
+    }
     if (
       list.length === 0 &&
       raw != null &&
@@ -550,12 +564,13 @@ const refreshKnowledgeBases = async () => {
     }
     knowledgeBases.value = list
   } catch (value) {
-    if (seq !== knowledgeBaseLoadSeq) {
+    if (controller.signal.aborted || seq !== knowledgeBaseLoadSeq || axios.isCancel(value)) {
       return
     }
     error.value = getKnowledgeBaseErrorMessage(value, '加载知识库失败')
   } finally {
-    if (seq === knowledgeBaseLoadSeq) {
+    if (activeKnowledgeBaseLoad === controller) {
+      activeKnowledgeBaseLoad = null
       loading.value = false
     }
   }
@@ -569,10 +584,10 @@ const embeddingModelById = computed(() => {
   return map
 })
 
-async function loadEmbeddingContext() {
+async function loadEmbeddingContext(signal?: AbortSignal) {
   const [modelsResult, defaultsResult] = await Promise.allSettled([
-    modelApi.getModels({ model_type: 'embedding', is_enabled: true, view: 'flat' }),
-    defaultModelApi.getDefaults(),
+    modelApi.getModels({ model_type: 'embedding', is_enabled: true, view: 'flat', signal }),
+    defaultModelApi.getDefaults({ signal }),
   ])
   if (modelsResult.status === 'fulfilled' && Array.isArray(modelsResult.value)) {
     embeddingModels.value = modelsResult.value as ModelItem[]
@@ -821,10 +836,17 @@ const submitPurge = async () => {
 
 onMounted(async () => {
   window.addEventListener('click', closeMenu)
+})
+
+useSpaceReadyLoader(async () => {
   await refreshKnowledgeBases()
 })
 
 onBeforeUnmount(() => {
+  activeKnowledgeBaseLoad?.abort()
+  activeKnowledgeBaseLoad = null
+  knowledgeBaseLoadSeq += 1
+  loading.value = false
   window.removeEventListener('click', closeMenu)
   if (noticeTimer) {
     window.clearTimeout(noticeTimer)

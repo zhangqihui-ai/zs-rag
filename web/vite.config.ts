@@ -17,15 +17,17 @@ copyPdfWorker()
 
 const devProxyTarget = process.env.VITE_DEV_PROXY_TARGET ?? 'http://backend:8000'
 
-/** 浏览器地址栏/刷新（Accept: text/html）走 SPA；XHR/fetch（application/json 等）才转发后端 */
+/** 浏览器打开/刷新/克隆标签走 SPA；带 X-ZS-RAG-API 或非 GET 才转发后端 */
 function spaAwareProxy() {
   return {
     target: devProxyTarget,
     changeOrigin: true,
     bypass(req) {
-      const accept = req.headers.accept ?? ''
       const method = (req.method ?? 'GET').toUpperCase()
-      if (method === 'GET' && accept.includes('text/html')) {
+      const isApiClient = String(req.headers['x-zs-rag-api'] ?? '') === '1'
+      const accept = String(req.headers.accept ?? '').toLowerCase()
+      const wantsJson = accept.includes('application/json')
+      if (method === 'GET' && !isApiClient && !wantsJson) {
         return '/index.html'
       }
     },

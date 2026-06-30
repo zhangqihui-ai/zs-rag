@@ -1582,6 +1582,8 @@ def _persist_parse_chunks_to_db(
             max_concurrency=embedding_concurrency,
             on_batch_start=_embedding_batch_start,
             on_progress=_embedding_progress,
+            usage_db=db,
+            usage_source="embedding",
         )
         if _progress:
             _progress("embedding", current=total_embed, total=total_embed, message=f"向量生成进度 {total_embed}/{total_embed}…")
@@ -1684,6 +1686,7 @@ def _index_document_lightrag(
     parsed: ParsedDocument,
     emit: Callable[[str], None],
     emit_progress: Callable[..., None] | None = None,
+    progress_fn: Callable[..., None] | None = None,
     cancel_event: threading.Event | None = None,
     log_kind: Literal["parse", "reindex"],
     log_lines: list[dict[str, str]],
@@ -1702,12 +1705,13 @@ def _index_document_lightrag(
     char_count = parsed.char_count
 
     def _progress(phase: str, *, current: int | None = None, total: int | None = None, message: str = "") -> None:
+        if progress_fn is not None:
+            progress_fn(phase, current=current, total=total, message=message)
+            return
         check_cancelled(cancel_event)
         if emit_progress:
             emit_progress(phase=phase, current=current, total=total, message=message)
         if message:
-            if len(log_lines) < MAX_PARSE_LOG_LINES:
-                log_lines.append({"t": _utc_now_iso(), "text": message})
             emit(message)
 
     ensure_lightrag_embedding_dimension(db, knowledge_base)
@@ -1877,8 +1881,6 @@ def _resume_index_document_lightrag(
         if emit_progress:
             emit_progress(phase=phase, current=current, total=total, message=message)
         if message:
-            if len(log_lines) < MAX_PARSE_LOG_LINES:
-                log_lines.append({"t": _utc_now_iso(), "text": message})
             _emit(message)
 
     rows = db.execute(
@@ -2097,6 +2099,7 @@ def _index_document(
                 parsed=parsed,
                 emit=_emit,
                 emit_progress=emit_progress,
+                progress_fn=_progress,
                 cancel_event=cancel_event,
                 log_kind=log_kind,
                 log_lines=log_lines,

@@ -391,8 +391,8 @@ services:
       - ./web:/app
       # Prevent node_modules from being created in host
       - /app/node_modules
-    # 匿名卷 /app/node_modules 可能缺新依赖；缺 marked 时清空并重装
-    command: sh -c "if [ ! -f node_modules/marked/package.json ]; then echo '[frontend] installing deps...' && rm -rf node_modules/* && (npm ci || npm install); fi && npm run dev -- --host 0.0.0.0 --port 5173"
+    # 匿名卷 /app/node_modules 可能缺新依赖；lockfile 变更或缺关键包时重装
+    command: sh -c "need_install=0; for pkg in marked echarts; do if [ ! -f node_modules/$$pkg/package.json ]; then need_install=1; break; fi; done; if [ \"$$need_install\" = 1 ]; then echo '[frontend] installing deps...' && rm -rf node_modules/* && (npm ci || npm install); fi && npm run dev -- --host 0.0.0.0 --port 5173"
     depends_on:
       - backend
     networks:

@@ -1,7 +1,7 @@
 <template>
   <Layout>
     <div
-      class="page-shell knowledge-detail-view"
+      class="page-shell knowledge-detail-view knowledge-detail-view--kb-detail"
       :class="{
         'knowledge-detail-view--graph-tab': activeTab === 'graph',
         'knowledge-detail-view--documents-tab': activeTab === 'documents',
@@ -525,6 +525,21 @@
                   <span class="chip">{{ graphEntityConceptCount }} 概念</span>
                   <span class="chip">{{ graphRelationships.length }} 关系</span>
                   <span class="chip">{{ graphCitations.length }} 引用</span>
+                </div>
+
+                <div v-if="graphLocalSubgraph" class="graph-search-local-viz">
+                  <div class="graph-search-local-viz-head">
+                    <h4>本次检索 · 局部知识图谱</h4>
+                    <p>
+                      展示本次召回的 {{ graphLocalSubgraph.stats.node_shown }} 个实体与
+                      {{ graphLocalSubgraph.stats.edge_shown }} 条关系；点击节点查看详情，拖拽可调整布局。
+                    </p>
+                  </div>
+                  <GraphVisualizationPanel
+                    :kb-id="kbId"
+                    :inline-subgraph="graphLocalSubgraph"
+                    compact
+                  />
                 </div>
 
                 <div class="graph-result-tabs" role="tablist">
@@ -1365,6 +1380,7 @@ import Layout from '../components/Layout.vue'
 import { graphSearch, getGraphErrorMessage, type GraphSearchResponse, type LightRagQueryMode } from '../api/graph-knowledge-base'
 import { GRAPH_ENTITY_QUERY_KEY, GRAPH_TAB_QUERY_KEY } from '../lib/graphNavigation'
 import { colorForEntityType } from '../lib/graphEntityColors'
+import { buildSubgraphFromGraphSearch } from '../lib/graphSubgraphFromSearch'
 import { countDistinctEntityTypes, getEntityTypeMeta, LIGHTRAG_DEFAULT_ENTITY_TYPES, LIGHTRAG_ENTITY_TYPE_PRESETS, matchLightragEntityTypePreset, type LightragEntityTypePreset, type LightragEntityTypePresetKey } from '../lib/graphEntityTypeMeta'
 import { documentParserDisplay, documentUploadTypeDisplay, uploadExtension } from '../lib/parserDisplay'
 import { isGraphKnowledgeBase } from '../lib/kbType'
@@ -1705,6 +1721,16 @@ const graphChunks = computed(() =>
 )
 
 const graphCitations = computed(() => graphSearchResult.value?.citations ?? [])
+
+const graphLocalSubgraph = computed(() => {
+  if (!graphSearchResult.value) {
+    return null
+  }
+  return buildSubgraphFromGraphSearch(
+    graphSearchResult.value.entities,
+    graphSearchResult.value.relationships,
+  )
+})
 
 const graphResultTabs = computed(() => [
   { key: 'chunks' as const, label: '文档片段', count: graphChunks.value.length },
@@ -4577,10 +4603,16 @@ watch(openChunkingMenuForId, (value) => {
 }
 
 .knowledge-detail-layout {
-  --detail-sidebar-width: 168px;
+  --detail-sidebar-width: 172px;
+  --detail-nav-gap: 10px;
+  --detail-nav-pad-block: 16px;
+  --detail-nav-pad-inline: 12px;
+  --detail-nav-item-pad: 11px 12px;
+  --detail-nav-item-gap: 8px;
+  --detail-nav-font-size: 0.875rem;
   display: grid;
   grid-template-columns: var(--detail-sidebar-width) minmax(0, 1fr);
-  gap: 16px;
+  gap: 14px;
   align-items: stretch;
 }
 
@@ -4589,28 +4621,37 @@ watch(openChunkingMenuForId, (value) => {
   flex-direction: column;
   align-self: stretch;
   min-height: 100%;
+  min-width: 0;
+  width: var(--detail-sidebar-width, 168px);
+  flex-shrink: 0;
 }
 
 .detail-sidebar-nav {
   display: flex;
   flex: 1;
   flex-direction: column;
-  gap: 14px;
+  gap: var(--detail-nav-gap);
   min-height: 100%;
-  padding: 20px 12px;
+  height: 100%;
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--detail-nav-pad-block) var(--detail-nav-pad-inline);
 }
 
 .detail-nav-item {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--detail-nav-item-gap);
   width: 100%;
-  padding: 13px 14px;
+  max-width: 100%;
+  min-height: 44px;
+  box-sizing: border-box;
+  padding: var(--detail-nav-item-pad);
   border: 1px solid transparent;
   border-radius: 12px;
   background: transparent;
   color: var(--text-primary);
-  font-size: 0.9rem;
+  font-size: var(--detail-nav-font-size);
   font-weight: 600;
   line-height: 1.45;
   text-align: left;
@@ -4624,7 +4665,6 @@ watch(openChunkingMenuForId, (value) => {
 }
 
 .detail-nav-item.active {
-  font-weight: 700;
   background: color-mix(in srgb, var(--brand-primary) 6%, var(--bg-tertiary));
   border-color: var(--border-color);
 }
@@ -4644,6 +4684,7 @@ watch(openChunkingMenuForId, (value) => {
 }
 
 .detail-nav-label {
+  flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -4659,6 +4700,7 @@ watch(openChunkingMenuForId, (value) => {
 
 .detail-main {
   min-height: 100%;
+  min-width: 0;
 }
 
 .panel-skeleton {
@@ -5338,6 +5380,29 @@ watch(openChunkingMenuForId, (value) => {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.graph-search-local-viz {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  background: var(--bg-tertiary);
+}
+
+.graph-search-local-viz-head h4 {
+  margin: 0;
+  font-size: 0.95rem;
+  color: var(--text-primary);
+}
+
+.graph-search-local-viz-head p {
+  margin: 4px 0 0;
+  font-size: 0.82rem;
+  line-height: 1.55;
+  color: var(--text-secondary);
 }
 
 .graph-result-tabs {
@@ -6033,19 +6098,15 @@ watch(openChunkingMenuForId, (value) => {
 
 @media (max-width: 900px) {
   .knowledge-detail-layout {
-    --detail-sidebar-width: 140px;
-    gap: 12px;
-  }
-
-  .detail-sidebar-nav {
-    padding: 16px 10px;
+    --detail-sidebar-width: 148px;
+    --detail-nav-pad-block: 14px;
+    --detail-nav-pad-inline: 10px;
+    --detail-nav-item-pad: 10px 10px;
     gap: 12px;
   }
 
   .detail-nav-item {
-    padding: 12px 12px;
-    gap: 8px;
-    font-size: 0.875rem;
+    min-height: 42px;
   }
 
   .document-row {
@@ -6120,57 +6181,78 @@ watch(openChunkingMenuForId, (value) => {
   gap: 16px;
 }
 
-/* 知识图谱：与文件列表相同的一屏铺满布局，仅抽屉/画布内部滚动 */
+/* 知识库详情：子导航左缘与向量库详情对齐 */
+.knowledge-detail-view--kb-detail.page-shell {
+  margin-top: -12px;
+  margin-left: -8px;
+}
+
+/* 文件列表 / 知识图谱：一屏铺满 */
+.knowledge-detail-view--documents-tab.page-shell,
+.knowledge-detail-view--graph-tab.page-shell {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  gap: 0;
+}
+
+.knowledge-detail-view--documents-tab,
 .knowledge-detail-view--graph-tab {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
+  min-width: 0;
   overflow: hidden;
   margin-top: 0;
-  gap: 8px;
+  gap: 0;
 }
 
+.knowledge-detail-view--documents-tab .knowledge-detail-layout,
 .knowledge-detail-view--graph-tab .knowledge-detail-layout {
   flex: 1;
   min-height: 0;
-  gap: 12px;
+  min-width: 0;
+  height: 100%;
   align-items: stretch;
 }
 
-.knowledge-detail-view--graph-tab .detail-sidebar-nav {
-  padding: 12px 10px;
-  gap: 8px;
+.knowledge-detail-view--documents-tab .detail-sidebar,
+.knowledge-detail-view--graph-tab .detail-sidebar {
+  position: relative;
+  z-index: 2;
+  height: 100%;
 }
 
-.knowledge-detail-view--graph-tab .detail-nav-item {
-  padding: 10px 12px;
-}
-
+.knowledge-detail-view--documents-tab .detail-main,
 .knowledge-detail-view--graph-tab .detail-main {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
   min-height: 0;
   height: 100%;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  gap: 0;
 }
 
 .knowledge-detail-view--graph-tab .graph-viz-card {
   flex: 1;
   min-height: 0;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  gap: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   overflow: hidden;
-  padding: 10px 18px 10px;
+  padding: 18px 18px 10px;
 }
 
 .knowledge-detail-view--graph-tab .graph-viz-card .section-heading {
-  flex-shrink: 0;
+  flex: 0 0 auto;
   margin: 0;
   gap: 0;
   align-items: center;
+  overflow: visible;
 }
 
 .knowledge-detail-view--graph-tab .graph-viz-card .section-heading p {
@@ -6179,59 +6261,19 @@ watch(openChunkingMenuForId, (value) => {
 
 .knowledge-detail-view--graph-tab .graph-viz-card .section-heading h3 {
   font-size: 1.05rem;
+  line-height: 1.5;
 }
 
 .knowledge-detail-view--graph-tab .graph-viz-card :deep(.graph-viz-panel) {
-  min-height: 0;
-  height: 100%;
-  overflow: hidden;
-}
-
-/* 文件列表：一屏铺满，无页面级滚动条，15 行完整可见 */
-.knowledge-detail-view--documents-tab.page-shell {
   flex: 1;
   min-height: 0;
-  height: 100%;
+  height: auto;
   overflow: hidden;
-  margin-top: -20px;
-  margin-left: -16px;
-  gap: 0;
 }
 
-.knowledge-detail-view--documents-tab {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  margin-top: 0;
-  gap: 0;
-}
-
+/* 文件列表：表格区滚动与分页 */
 .knowledge-detail-view--documents-tab .knowledge-detail-layout {
-  flex: 1;
-  min-height: 0;
-  height: 100%;
-  gap: 12px;
-  align-items: stretch;
   grid-template-rows: minmax(0, 1fr);
-}
-
-.knowledge-detail-view--documents-tab .detail-sidebar-nav {
-  padding: 12px 10px;
-  gap: 8px;
-}
-
-.knowledge-detail-view--documents-tab .detail-nav-item {
-  padding: 10px 12px;
-}
-
-.knowledge-detail-view--documents-tab .detail-main {
-  min-height: 0;
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
 }
 
 .knowledge-detail-view--documents-tab .documents-card {

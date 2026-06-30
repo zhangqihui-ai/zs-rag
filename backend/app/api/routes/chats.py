@@ -1,16 +1,15 @@
 """对话（chat）与其下会话（session）的 REST；会话子资源使用固定前缀 `/sessions/` 以免与 `{chat_id}` 混淆。"""
 
-import asyncio
-import json
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.db.session import SessionLocal, get_db
+from app.core.async_sse import _sse_headers, iter_sse_from_sync_iterator
 from app.core.enterprise_space_context import CurrentSpace, CurrentUser, RequireMembership
 from app.core.platform_audit_helper import audit_action
+from app.db.session import get_db
 from app.schemas.chat import (
     ChatConfigurationUpdate,
     ChatConfigurationResponse,
@@ -31,8 +30,6 @@ from app.services import chat_service
 from app.models.chat import ChatConversation
 
 router = APIRouter(tags=["chats"])
-
-_SSE_ITER_DONE = object()
 
 
 def _assert_conversation_owned_embed(
@@ -192,6 +189,7 @@ def get_session_messages(
 
 @router.post("/sessions/{session_id}/stream")
 async def session_stream_sse(
+    request: Request,
     session_id: str,
     payload: ChatStreamRequest,
     current_space: CurrentSpace,
@@ -204,34 +202,19 @@ async def session_stream_sse(
     user_id = current_user.id
     enterprise_space_id = current_space.id
 
-    async def event_gen():
-        stream_db = SessionLocal()
-        try:
-            iterator = chat_service.iter_chat_stream_events(
-                stream_db,
-                session_id=session_id,
-                user_id=user_id,
-                enterprise_space_id=enterprise_space_id,
-                user_content=payload.content,
-            )
-            for event in iterator:
-                line = json.dumps(event, ensure_ascii=False)
-                yield f"data: {line}\n\n".encode("utf-8")
-                await asyncio.sleep(0)
-        except Exception as e:
-            err = json.dumps({"type": "error", "message": str(e)}, ensure_ascii=False)
-            yield f"data: {err}\n\n".encode("utf-8")
-        finally:
-            stream_db.close()
+    def build_sync_iter(stream_db: Session):
+        return chat_service.iter_chat_stream_events(
+            stream_db,
+            session_id=session_id,
+            user_id=user_id,
+            enterprise_space_id=enterprise_space_id,
+            user_content=payload.content,
+        )
 
     return StreamingResponse(
-        event_gen(),
+        iter_sse_from_sync_iterator(request, build_sync_iter),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers=_sse_headers(),
     )
 
 
@@ -256,6 +239,7 @@ def session_complete_blocking(
 
 @router.post("/{chat_id}/stream")
 async def chat_conversation_stream_sse(
+    request: Request,
     chat_id: ChatId,
     payload: ChatStreamRequest,
     current_space: CurrentSpace,
@@ -275,34 +259,19 @@ async def chat_conversation_stream_sse(
     user_id = current_user.id
     enterprise_space_id = current_space.id
 
-    async def event_gen():
-        stream_db = SessionLocal()
-        try:
-            iterator = chat_service.iter_chat_stream_events(
-                stream_db,
-                session_id=bound_session_id,
-                user_id=user_id,
-                enterprise_space_id=enterprise_space_id,
-                user_content=payload.content,
-            )
-            for event in iterator:
-                line = json.dumps(event, ensure_ascii=False)
-                yield f"data: {line}\n\n".encode("utf-8")
-                await asyncio.sleep(0)
-        except Exception as e:
-            err = json.dumps({"type": "error", "message": str(e)}, ensure_ascii=False)
-            yield f"data: {err}\n\n".encode("utf-8")
-        finally:
-            stream_db.close()
+    def build_sync_iter(stream_db: Session):
+        return chat_service.iter_chat_stream_events(
+            stream_db,
+            session_id=bound_session_id,
+            user_id=user_id,
+            enterprise_space_id=enterprise_space_id,
+            user_content=payload.content,
+        )
 
     return StreamingResponse(
-        event_gen(),
+        iter_sse_from_sync_iterator(request, build_sync_iter),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers=_sse_headers(),
     )
 
 

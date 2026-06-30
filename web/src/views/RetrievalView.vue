@@ -98,7 +98,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 import {
   getKnowledgeBaseErrorMessage,
@@ -114,6 +114,7 @@ import RetrievalSearchResultList from '../components/knowledge-base/RetrievalSea
 import KnowledgeBaseMultiSelect from '../components/knowledge-base/KnowledgeBaseMultiSelect.vue'
 import { defaultRetrievalFormState, retrievalFormFromKnowledgeBase, type RetrievalFormState } from '../components/knowledge-base/retrieval-form'
 import { loadRetrievalKbPreference, saveRetrievalKbPreference } from '../lib/retrieval-kb-preference'
+import { useSpaceReadyLoader } from '../composables/useSpaceReady'
 import { useAuthStore } from '../stores/auth'
 
 const retrievalModeLabelMap: Record<RetrievalMode, string> = {
@@ -228,7 +229,7 @@ async function submitSearch() {
   }
 }
 
-onMounted(() => {
+useSpaceReadyLoader(() => {
   void loadKnowledgeBases()
 })
 

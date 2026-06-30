@@ -3,6 +3,7 @@
  * Each event is one line: `data: <json>\n\n` where json matches legacy WebSocket payloads.
  */
 
+import { buildApiRequestHeaders } from './apiRequestHeaders'
 import { resolveApiBaseUrl } from './apiBaseUrl'
 import { resolveEnterpriseSpaceSlug } from './http'
 
@@ -12,15 +13,13 @@ export async function streamChatCompletion(
   onEvent: (data: unknown) => void,
   options?: { signal?: AbortSignal },
 ): Promise<void> {
-  const token = localStorage.getItem('auth_token') || ''
   const enterpriseSpace = resolveEnterpriseSpaceSlug()
   const res = await fetch(`${resolveApiBaseUrl()}/api/v1/chats/sessions/${sessionId}/stream`, {
     method: 'POST',
-    headers: {
+    headers: buildApiRequestHeaders({
       'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       'X-Enterprise-Space': enterpriseSpace,
-    },
+    }),
     body: JSON.stringify({ content }),
     signal: options?.signal,
   })

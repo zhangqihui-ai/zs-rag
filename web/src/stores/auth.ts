@@ -6,6 +6,12 @@ import type { EnterpriseSpaceWithRole } from '../api/enterprise-space'
 
 export type MembershipRole = 'space_admin' | 'member'
 
+let authInitPromise: Promise<void> | null = null
+
+export function resetAuthInitPromise() {
+  authInitPromise = null
+}
+
 export interface User {
   id: number
   username: string
@@ -77,11 +83,27 @@ export const useAuthStore = defineStore('auth', {
   },
 
   actions: {
-    async init() {
+    async ensureInitialized() {
+      if (this.initialized) {
+        return
+      }
       if (!this.token) {
         this.initialized = true
         return
       }
+      if (!authInitPromise) {
+        authInitPromise = this._initializeAuthenticatedSession().finally(() => {
+          authInitPromise = null
+        })
+      }
+      await authInitPromise
+    },
+
+    async init() {
+      await this.ensureInitialized()
+    },
+
+    async _initializeAuthenticatedSession() {
       try {
         await Promise.all([this.fetchUserInfo(), this.fetchEnterpriseSpaces()])
       } catch (error) {
@@ -100,8 +122,8 @@ export const useAuthStore = defineStore('auth', {
         this.token = data.access_token
         localStorage.setItem('auth_token', data.access_token)
         this.initialized = false
-        await Promise.all([this.fetchUserInfo(), this.fetchEnterpriseSpaces()])
-        this.initialized = true
+        resetAuthInitPromise()
+        await this.ensureInitialized()
         return data
       } catch (error) {
         this.error = getApiErrorMessage(error, '登录失败')

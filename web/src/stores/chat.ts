@@ -65,6 +65,15 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  /** 按 session_id 打开会话（用于 /chat/:sessionId 刷新恢复）。 */
+  const openSessionById = async (sessionId: string) => {
+    const sessionRes = await chatApi.getSession(sessionId)
+    const session = sessionRes.data
+    activeConversationId.value = session.chat_id
+    await refreshSessionsInConversation()
+    await selectSession(sessionId)
+  }
+
   const selectConversation = async (conversationId: string) => {
     activeConversationId.value = conversationId
     await refreshSessionsInConversation()
@@ -267,6 +276,7 @@ export const useChatStore = defineStore('chat', () => {
     refreshSessionsInConversation,
     selectConversation,
     selectSession,
+    openSessionById,
     leaveConversation,
     createConversation,
     createSessionInActiveConversation,

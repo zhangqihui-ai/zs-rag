@@ -574,6 +574,8 @@ def _build_embedding_func(db: Session, knowledge_base: KnowledgeBase, *, dimensi
                     list(texts),
                     batch_size=embed_batch_size,
                     on_cache_stats=lambda hit, _total: _bump_lightrag_embedding_cache_hits(kb_id, hit),
+                    usage_db=thread_db,
+                    usage_source="embedding",
                 )
 
         vectors = await asyncio.to_thread(_run)
@@ -1386,6 +1388,7 @@ async def _wait_lightrag_document_processed(
     last_heartbeat = 0.0
     last_enqueue_heartbeat = 0.0
     last_pending_notice = 0.0
+    heartbeat_interval_sec = 10.0
     active_pipeline_doc: str | None = None
     wait_started = time.monotonic()
     wait_timeout_sec = float(_lightrag_int_setting("lightrag_insert_wait_timeout_sec", 7200))
@@ -1609,31 +1612,48 @@ async def _wait_lightrag_document_processed(
                 else:
                     on_progress("LightRAG 已入队，等待 pipeline 处理本文档…")
                 last_pending_notice = now
-        elif status == "processing" and reported_chunks_total and now - last_heartbeat >= 15:
-            if last_chunk_idx <= 0:
-                # embedding 阶段：LightRAG 不增量写 text_chunks KV，用累计向量化条数作进度。
-                embedded_count = min(
-                    get_lightrag_embedding_progress(knowledge_base.id),
-                    reported_chunks_total,
+        elif (
+            reported_chunks_total
+            and status not in (None, "processed", "failed")
+            and now - last_heartbeat >= heartbeat_interval_sec
+        ):
+            elapsed_sec = int(now - wait_started)
+            embedded_count = min(
+                get_lightrag_embedding_progress(knowledge_base.id),
+                reported_chunks_total,
+            )
+            cache_hits = min(
+                get_lightrag_embedding_cache_hits(knowledge_base.id),
+                embedded_count,
+            )
+            embedding_done = embedded_count >= reported_chunks_total
+
+            if last_chunk_idx > 0 or fresh_cache_done > 0:
+                heartbeat_msg = (
+                    f"LightRAG 实体抽取进行中… 约 {display_idx}/{reported_chunks_total} 段"
+                    f"（已等待 {elapsed_sec}s）"
                 )
-                cache_hits = min(
-                    get_lightrag_embedding_cache_hits(knowledge_base.id),
-                    embedded_count,
-                )
+                heartbeat_current: int | None = display_idx
+            elif not embedding_done:
                 if cache_hits > 0:
                     heartbeat_msg = (
                         f"LightRAG 向量 embedding 进行中… 已向量化 {embedded_count}/"
-                        f"{reported_chunks_total} 段（其中命中缓存 {cache_hits} 段，未重算）"
+                        f"{reported_chunks_total} 段（其中命中缓存 {cache_hits} 段，未重算；"
+                        f"已等待 {elapsed_sec}s）"
                     )
                 else:
                     heartbeat_msg = (
                         f"LightRAG 向量 embedding 进行中… 已向量化 {embedded_count}/"
-                        f"{reported_chunks_total} 段（宽表 Excel 单段较大，此阶段较慢请耐心等待）"
+                        f"{reported_chunks_total} 段（此阶段可能较慢；已等待 {elapsed_sec}s）"
                     )
                 heartbeat_current = embedded_count
             else:
-                heartbeat_msg = f"LightRAG 实体抽取进行中… 约 {display_idx}/{reported_chunks_total} 段"
-                heartbeat_current = display_idx
+                heartbeat_msg = (
+                    f"LightRAG 向量 embedding 已完成（{reported_chunks_total}/{reported_chunks_total} 段），"
+                    f"LLM 实体/关系抽取进行中（已等待 {elapsed_sec}s，首段 LLM 可能较慢）…"
+                )
+                heartbeat_current = None
+
             _emit_lightrag_wait_progress(
                 on_progress,
                 on_structured_progress,

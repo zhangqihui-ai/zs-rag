@@ -1,9 +1,8 @@
 import axios from 'axios'
 
+import { ZS_RAG_API_HEADER, ZS_RAG_API_VALUE } from './apiRequestHeaders'
 import { useAuthStore } from '../stores/auth'
 import { resolveApiBaseUrl } from './apiBaseUrl'
-
-const baseURL = resolveApiBaseUrl()
 
 /** 普通 API 请求（默认 30s） */
 const defaultTimeoutMs = Number(import.meta.env.VITE_HTTP_TIMEOUT_MS) || 30_000
@@ -25,7 +24,6 @@ export const searchRequestTimeoutMs =
   Number(import.meta.env.VITE_SEARCH_REQUEST_TIMEOUT_MS) || 120_000
 
 export const http = axios.create({
-  baseURL,
   timeout: defaultTimeoutMs,
 })
 
@@ -37,6 +35,8 @@ export function resolveEnterpriseSpaceSlug(): string {
 
 // 请求拦截器 - 添加认证 Token 和企业空间上下文
 http.interceptors.request.use((config) => {
+  config.baseURL = resolveApiBaseUrl()
+
   // 从 localStorage 获取 token
   const token = localStorage.getItem('auth_token')
   if (token) {
@@ -47,6 +47,13 @@ http.interceptors.request.use((config) => {
   if (!config.headers['X-Enterprise-Space']) {
     config.headers['X-Enterprise-Space'] = enterpriseSpace
   }
+
+  // 避免 nginx 将 API 误判为浏览器导航并返回 index.html
+  config.headers.Accept = 'application/json'
+  config.headers[ZS_RAG_API_HEADER] = ZS_RAG_API_VALUE
+  // 避免浏览器把页面导航缓存的 index.html 误用于同 URL 的 API 请求
+  config.headers['Cache-Control'] = 'no-cache'
+  config.headers['Pragma'] = 'no-cache'
 
   return config
 })

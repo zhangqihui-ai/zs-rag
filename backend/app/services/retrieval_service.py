@@ -4,6 +4,7 @@ import logging
 import math
 import re
 import time
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
@@ -14,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.embedding_gateway import generate_query_embedding
 from app.core.errors import AppError
+from app.services.usage_metrics_service import record_usage_event
 from app.core.milvus_client import search_vectors
 from app.core.knowledge_retrieval_defaults import (
     DEFAULT_AUTO_IMAGE_OCR_ON_UI_QUERY,
@@ -738,6 +740,237 @@ def _apply_chunk_role_filters(
     if include_image_ocr:
         out.sort(key=lambda row: float(row.get("score") or 0), reverse=True)
     return out
+
+
+def _result_identity_key(item: dict[str, Any]) -> str:
+    kb_id = item.get("knowledge_base_id")
+    chunk_id = item.get("chunk_id")
+    if chunk_id is not None:
+        return f"chunk:{kb_id}:{chunk_id}"
+    doc_id = item.get("document_id")
+    chunk_index = item.get("chunk_index")
+    content = str(item.get("content") or "")[:80]
+    return f"fallback:{kb_id}:{doc_id}:{chunk_index}:{content}"
+
+
+def _apply_merge_scores(rows: list[dict[str, Any]]) -> None:
+    """按知识库内 min-max 归一化，写入 merge_score。"""
+    by_kb: dict[int, list[dict[str, Any]]] = {}
+    for row in rows:
+        raw_kb = row.get("knowledge_base_id")
+        if raw_kb is None:
+            continue
+        kid = int(raw_kb)
+        by_kb.setdefault(kid, []).append(row)
+    for kb_rows in by_kb.values():
+        scores = [float(item.get("score") or 0.0) for item in kb_rows]
+        min_s = min(scores) if scores else 0.0
+        max_s = max(scores) if scores else 0.0
+        for item in kb_rows:
+            raw = float(item.get("score") or 0.0)
+            if max_s > min_s:
+                item["merge_score"] = (raw - min_s) / (max_s - min_s)
+            else:
+                item["merge_score"] = 1.0
+
+
+def _row_kb_type(row: dict[str, Any]) -> str:
+    meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    source = str(meta.get("source") or row.get("source") or "")
+    return "lightrag" if source == "lightrag" else "classic"
+
+
+def _summarize_path_candidates(
+    rows: list[dict[str, Any]],
+    *,
+    limit: int | None = None,
+    preview_chars: int = 120,
+) -> list[dict[str, Any]]:
+    cap = len(rows) if limit is None else min(len(rows), max(int(limit), 0))
+    summaries: list[dict[str, Any]] = []
+    for index, row in enumerate(rows[:cap], start=1):
+        content = str(row.get("content") or "").strip()
+        preview = content if len(content) <= preview_chars else content[: preview_chars - 1] + "…"
+        summaries.append(
+            {
+                "index": index,
+                "document_name": str(row.get("document_name") or "文献"),
+                "score": round(float(row.get("score") or 0.0), 4),
+                "merge_score": round(float(row.get("merge_score") or row.get("score") or 0.0), 4),
+                "preview": preview,
+            }
+        )
+    return summaries
+
+
+def _merge_multi_kb_results_fair(
+    merged_rows: list[dict[str, Any]],
+    *,
+    kb_ids: list[int],
+    limit: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """多库公平合并：分库归一化 + 每库/每类型保底 + merge_score 补齐 + 去重。"""
+    if not merged_rows:
+        return [], {
+            "strategy": "auto_fair",
+            "merge_top_k": limit,
+            "pre_merge_total": 0,
+            "post_merge_total": 0,
+            "dedupe_dropped": 0,
+            "type_breakdown": {"classic": 0, "lightrag": 0},
+            "merge_phases": [],
+        }
+
+    rows = [dict(item) for item in merged_rows]
+    _apply_merge_scores(rows)
+    pre_merge_total = len(rows)
+    sorted_rows = sorted(rows, key=lambda x: float(x.get("merge_score") or 0.0), reverse=True)
+    merge_phases: list[dict[str, Any]] = []
+
+    if len(kb_ids) <= 1:
+        before = len(sorted_rows)
+        deduped = _dedupe_search_results(sorted_rows, limit=limit)
+        type_breakdown = {"classic": 0, "lightrag": 0}
+        for item in deduped:
+            kb_type = _row_kb_type(item)
+            type_breakdown[kb_type] = type_breakdown.get(kb_type, 0) + 1
+        return deduped, {
+            "strategy": "auto_fair",
+            "merge_top_k": limit,
+            "pre_merge_total": pre_merge_total,
+            "post_merge_total": len(deduped),
+            "dedupe_dropped": max(0, min(before, limit) - len(deduped)),
+            "type_breakdown": type_breakdown,
+            "merge_phases": [{"phase": "dedupe", "count": len(deduped)}],
+        }
+
+    by_kb: dict[int, list[dict[str, Any]]] = {int(kid): [] for kid in kb_ids}
+    for row in sorted_rows:
+        raw_kb = row.get("knowledge_base_id")
+        if raw_kb is None:
+            continue
+        kid = int(raw_kb)
+        if kid in by_kb:
+            by_kb[kid].append(row)
+
+    selected: list[dict[str, Any]] = []
+    used_keys: set[str] = set()
+    type_counts: dict[str, int] = {"classic": 0, "lightrag": 0}
+
+    def try_add(row: dict[str, Any]) -> bool:
+        if len(selected) >= limit:
+            return False
+        key = _result_identity_key(row)
+        if key in used_keys:
+            return False
+        used_keys.add(key)
+        selected.append(row)
+        kb_type = _row_kb_type(row)
+        type_counts[kb_type] = type_counts.get(kb_type, 0) + 1
+        return True
+
+    active_kb_ids = [kid for kid in kb_ids if by_kb.get(int(kid))]
+    reserve_count = 0
+    for kid in active_kb_ids:
+        kb_rows = by_kb.get(int(kid), [])
+        if kb_rows and try_add(kb_rows[0]):
+            reserve_count += 1
+    if reserve_count:
+        merge_phases.append({"phase": "reserve_per_kb", "count": reserve_count})
+
+    types_present = { _row_kb_type(row) for row in rows }
+    type_floor = max(1, int(limit * 0.3)) if len(types_present) >= 2 else 0
+    if type_floor > 0:
+        type_reserve = 0
+        for row in sorted_rows:
+            kb_type = _row_kb_type(row)
+            if type_counts.get(kb_type, 0) >= type_floor:
+                continue
+            if try_add(row):
+                type_reserve += 1
+        if type_reserve:
+            merge_phases.append({"phase": "type_floor", "count": type_reserve, "floor": type_floor})
+
+    fill_before = len(selected)
+    for row in sorted_rows:
+        if len(selected) >= limit:
+            break
+        try_add(row)
+    fill_added = len(selected) - fill_before
+    if fill_added:
+        merge_phases.append({"phase": "fill_by_merge_score", "count": fill_added})
+
+    selected.sort(key=lambda x: float(x.get("merge_score") or 0.0), reverse=True)
+    before_dedupe = len(selected)
+    deduped = _dedupe_search_results(selected, limit=limit)
+    dedupe_dropped = max(0, before_dedupe - len(deduped))
+    if dedupe_dropped:
+        merge_phases.append({"phase": "dedupe", "dropped": dedupe_dropped, "count": len(deduped)})
+
+    type_breakdown = {"classic": 0, "lightrag": 0}
+    for item in deduped:
+        kb_type = _row_kb_type(item)
+        type_breakdown[kb_type] = type_breakdown.get(kb_type, 0) + 1
+
+    return deduped, {
+        "strategy": "auto_fair",
+        "merge_top_k": limit,
+        "pre_merge_total": pre_merge_total,
+        "post_merge_total": len(deduped),
+        "dedupe_dropped": dedupe_dropped,
+        "type_breakdown": type_breakdown,
+        "merge_phases": merge_phases,
+    }
+
+
+def _merge_multi_kb_results(
+    merged_rows: list[dict[str, Any]],
+    *,
+    kb_ids: list[int],
+    limit: int,
+) -> list[dict[str, Any]]:
+    """多库检索合并：每个库先保留至少 1 条（若有命中），再按分数补齐至 limit。"""
+    if not merged_rows:
+        return []
+    sorted_rows = sorted(merged_rows, key=lambda x: float(x.get("score") or 0.0), reverse=True)
+    if len(kb_ids) <= 1:
+        return _dedupe_search_results(sorted_rows, limit=limit)
+
+    by_kb: dict[int, list[dict[str, Any]]] = {int(kid): [] for kid in kb_ids}
+    for row in sorted_rows:
+        raw_kb = row.get("knowledge_base_id")
+        if raw_kb is None:
+            continue
+        kid = int(raw_kb)
+        if kid in by_kb:
+            by_kb[kid].append(row)
+
+    selected: list[dict[str, Any]] = []
+    used_keys: set[str] = set()
+
+    def try_add(row: dict[str, Any]) -> bool:
+        if len(selected) >= limit:
+            return False
+        key = _result_identity_key(row)
+        if key in used_keys:
+            return False
+        used_keys.add(key)
+        selected.append(row)
+        return True
+
+    active_kb_ids = [kid for kid in kb_ids if by_kb.get(int(kid))]
+    for kid in active_kb_ids:
+        rows = by_kb.get(int(kid), [])
+        if rows:
+            try_add(rows[0])
+
+    for row in sorted_rows:
+        if len(selected) >= limit:
+            break
+        try_add(row)
+
+    selected.sort(key=lambda x: float(x.get("score") or 0.0), reverse=True)
+    return _dedupe_search_results(selected, limit=limit)
 
 
 def _dedupe_search_results(results: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
@@ -1534,7 +1767,70 @@ def _serialize_lightrag_search_results(
     chunk_items = [item for item in chunks if isinstance(item, dict)]
     score_by_chunk = _lightrag_chunk_score_map(chunk_items)
 
+    cite_by_chunk_id: dict[str, dict[str, Any]] = {}
+    for cite in citations:
+        if not isinstance(cite, dict):
+            continue
+        chunk_id_str = str(cite.get("chunk_id") or "").strip()
+        if chunk_id_str:
+            cite_by_chunk_id[chunk_id_str] = cite
+
     rows: list[dict[str, Any]] = []
+
+    def _append_chunk_row(index: int, chunk: dict[str, Any]) -> None:
+        content = str(chunk.get("content") or "").strip()
+        if not content:
+            return
+        chunk_id_str = str(chunk.get("chunk_id") or "").strip()
+        cite = cite_by_chunk_id.get(chunk_id_str) if chunk_id_str else None
+        file_path = str(chunk.get("file_path") or "").split("|||")[0].strip()
+        document_name = str(
+            (cite or {}).get("document_name")
+            or (file_path.rsplit("/", 1)[-1] if file_path else "")
+            or "文献"
+        )
+        raw_document_id = (cite or {}).get("document_id")
+        document_id = int(raw_document_id) if raw_document_id is not None else 0
+        score = score_by_chunk.get(chunk_id_str, max(0.5, 1.0 - index * 0.05))
+        rows.append(
+            {
+                "chunk_id": document_id if document_id > 0 else -(index + 1),
+                "chunk_uid": f"lightrag:{knowledge_base.id}:{chunk_id_str or index + 1}",
+                "document_id": document_id,
+                "document_name": document_name,
+                "chunk_index": index,
+                "content": content,
+                "content_preview": _content_preview(content),
+                "char_count": len(content),
+                "start_offset": None,
+                "end_offset": None,
+                "heading_path": None,
+                "enrichment_keywords": [],
+                "enrichment_questions": [],
+                "score": float(score),
+                "vector_score": None,
+                "keyword_score": None,
+                "metadata": {"source": "lightrag", "lightrag_chunk_id": chunk_id_str or None},
+                "citation": {
+                    "document_name": document_name,
+                    "page_no": None,
+                    "chunk_index": index,
+                    "heading_path": None,
+                    "location_label": None,
+                    "block": None,
+                },
+                "knowledge_base_id": knowledge_base.id,
+                "knowledge_base_name": knowledge_base.name,
+            }
+        )
+
+    if chunk_items:
+        for index, chunk in enumerate(chunk_items):
+            _append_chunk_row(index, chunk)
+            if len(rows) >= limit:
+                break
+        return rows
+
     for index, cite in enumerate(citations):
         if not isinstance(cite, dict):
             continue
@@ -1547,7 +1843,6 @@ def _serialize_lightrag_search_results(
         chunk_id_str = str(cite.get("chunk_id") or "").strip()
         ref = int(cite.get("ref") or (index + 1))
         score = score_by_chunk.get(chunk_id_str, max(0.5, 1.0 - index * 0.05))
-
         rows.append(
             {
                 "chunk_id": document_id if document_id > 0 else -ref,
@@ -1581,51 +1876,6 @@ def _serialize_lightrag_search_results(
         )
         if len(rows) >= limit:
             break
-
-    if rows or not chunk_items:
-        return rows
-
-    for index, chunk in enumerate(chunk_items):
-        content = str(chunk.get("content") or "").strip()
-        if not content:
-            continue
-        file_path = str(chunk.get("file_path") or "").split("|||")[0].strip()
-        chunk_id_str = str(chunk.get("chunk_id") or "").strip()
-        document_name = file_path.rsplit("/", 1)[-1] if file_path else "文献"
-        score = score_by_chunk.get(chunk_id_str, max(0.5, 1.0 - index * 0.05))
-        rows.append(
-            {
-                "chunk_id": -(index + 1),
-                "chunk_uid": f"lightrag:{knowledge_base.id}:{chunk_id_str or index + 1}",
-                "document_id": 0,
-                "document_name": document_name,
-                "chunk_index": index,
-                "content": content,
-                "content_preview": _content_preview(content),
-                "char_count": len(content),
-                "start_offset": None,
-                "end_offset": None,
-                "heading_path": None,
-                "enrichment_keywords": [],
-                "enrichment_questions": [],
-                "score": float(score),
-                "vector_score": None,
-                "keyword_score": None,
-                "metadata": {"source": "lightrag", "lightrag_chunk_id": chunk_id_str or None},
-                "citation": {
-                    "document_name": document_name,
-                    "page_no": None,
-                    "chunk_index": index,
-                    "heading_path": None,
-                    "location_label": None,
-                    "block": None,
-                },
-                "knowledge_base_id": knowledge_base.id,
-                "knowledge_base_name": knowledge_base.name,
-            }
-        )
-        if len(rows) >= limit:
-            break
     return rows
 
 
@@ -1635,12 +1885,22 @@ def search_knowledge_bases_multi(
     space_id: int,
     knowledge_base_ids: list[int],
     payload: KnowledgeSearchRequest,
+    vector_top_k: int | None = None,
+    lightrag_top_k: int | None = None,
+    merge_top_k: int | None = None,
+    lightrag_query_mode: str | None = None,
+    lightrag_chunk_top_k: int | None = None,
 ) -> dict[str, Any]:
     """
-    在多个知识库上执行检索，按 score 全局合并排序后截取 top_k。
-    经典库走向量/全文/混合；图知识库走 LightRAG。单库失败时跳过并记录日志。
+    在多个知识库上执行检索：经典库与图库按各自 Top K 召回，再公平合并至 merge_top_k。
+    单库失败时跳过并记录日志。
     """
     from app.core.kb_type import is_lightrag_kb
+    from app.core.knowledge_retrieval_defaults import (
+        DEFAULT_LIGHTRAG_RETRIEVAL_TOP_K,
+        DEFAULT_MERGE_TOP_K,
+        DEFAULT_VECTOR_RETRIEVAL_TOP_K,
+    )
     from app.services.lightrag_engine import get_default_query_mode, query_graph_kb
 
     ordered_unique: list[int] = []
@@ -1653,39 +1913,73 @@ def search_knowledge_bases_multi(
 
     first_kb = get_knowledge_base_or_error(db, space_id=space_id, kb_id=kb_ids[0])
     mode_str = str(payload.mode or first_kb.default_retrieval_mode)
-    final_top = payload.top_k or first_kb.default_top_k
-    final_top = min(max(int(final_top), 1), 50)
-    inner_top = min(50, final_top * max(2, len(kb_ids)))
+    resolved_merge_top = merge_top_k if merge_top_k is not None else (payload.top_k or first_kb.default_top_k)
+    resolved_merge_top = min(max(int(resolved_merge_top or DEFAULT_MERGE_TOP_K), 1), 50)
+    resolved_vector_top = min(max(int(vector_top_k or DEFAULT_VECTOR_RETRIEVAL_TOP_K), 1), 50)
+    resolved_lightrag_top = min(max(int(lightrag_top_k or DEFAULT_LIGHTRAG_RETRIEVAL_TOP_K), 1), 50)
 
     merged_rows: list[dict[str, Any]] = []
+    path_results: list[dict[str, Any]] = []
     for kb_id in kb_ids:
         kb = get_knowledge_base_or_error(db, space_id=space_id, kb_id=kb_id)
 
         if is_lightrag_kb(kb):
+            path_top = resolved_lightrag_top
+            kb_type = "lightrag"
             try:
+                graph_mode = lightrag_query_mode or get_default_query_mode(kb)
+                if graph_mode not in ("naive", "local", "global", "hybrid", "mix"):
+                    graph_mode = get_default_query_mode(kb)
                 graph_data = query_graph_kb(
                     db,
                     knowledge_base=kb,
                     query=payload.query,
-                    mode=get_default_query_mode(kb),
-                    top_k=inner_top,
+                    mode=graph_mode,  # type: ignore[arg-type]
+                    top_k=path_top,
+                    chunk_top_k=lightrag_chunk_top_k,
                     include_references=True,
                 )
-                merged_rows.extend(
-                    _serialize_lightrag_search_results(
-                        knowledge_base=kb,
-                        graph_data=graph_data,
-                        limit=inner_top,
-                    )
+                path_rows = _serialize_lightrag_search_results(
+                    knowledge_base=kb,
+                    graph_data=graph_data,
+                    limit=path_top,
+                )
+                merged_rows.extend(path_rows)
+                _apply_merge_scores(path_rows)
+                path_results.append(
+                    {
+                        "knowledge_base_id": kb.id,
+                        "knowledge_base_name": kb.name,
+                        "kb_type": kb_type,
+                        "mode": graph_mode,
+                        "path_top_k": path_top,
+                        "recalled_count": len(path_rows),
+                        "candidates": _summarize_path_candidates(path_rows, limit=len(path_rows)),
+                        "error": None,
+                    }
                 )
             except AppError as exc:
                 logger.warning("多库检索跳过图知识库 kb_id=%s：%s", kb_id, exc)
+                path_results.append(
+                    {
+                        "knowledge_base_id": kb.id,
+                        "knowledge_base_name": kb.name,
+                        "kb_type": kb_type,
+                        "mode": lightrag_query_mode or get_default_query_mode(kb),
+                        "path_top_k": path_top,
+                        "recalled_count": 0,
+                        "candidates": [],
+                        "error": str(exc.message if hasattr(exc, "message") else exc),
+                    }
+                )
             continue
 
+        path_top = resolved_vector_top
+        kb_type = "classic"
         inner = KnowledgeSearchRequest(
             query=payload.query,
             mode=payload.mode,
-            top_k=inner_top,
+            top_k=path_top,
             score_threshold=payload.score_threshold,
             vector_weight=payload.vector_weight,
             document_ids=payload.document_ids,
@@ -1695,16 +1989,63 @@ def search_knowledge_bases_multi(
             one = search_knowledge_base(db, space_id=space_id, kb_id=kb_id, payload=inner)
         except AppError as exc:
             logger.warning("多库检索跳过知识库 kb_id=%s：%s", kb_id, exc)
+            path_results.append(
+                {
+                    "knowledge_base_id": kb.id,
+                    "knowledge_base_name": kb.name,
+                    "kb_type": kb_type,
+                    "mode": str(payload.mode or kb.default_retrieval_mode),
+                    "path_top_k": path_top,
+                    "recalled_count": 0,
+                    "candidates": [],
+                    "error": str(exc.message if hasattr(exc, "message") else exc),
+                }
+            )
             continue
         mode_str = str(one.get("mode") or mode_str)
+        path_rows: list[dict[str, Any]] = []
         for item in one["results"]:
             row = dict(item)
             row["knowledge_base_id"] = kb.id
             row["knowledge_base_name"] = kb.name
+            path_rows.append(row)
             merged_rows.append(row)
+        _apply_merge_scores(path_rows)
+        path_results.append(
+            {
+                "knowledge_base_id": kb.id,
+                "knowledge_base_name": kb.name,
+                "kb_type": kb_type,
+                "mode": mode_str,
+                "path_top_k": path_top,
+                "recalled_count": len(path_rows),
+                "candidates": _summarize_path_candidates(path_rows, limit=len(path_rows)),
+                "error": None,
+            }
+        )
 
-    merged_rows.sort(key=lambda x: float(x.get("score") or 0.0), reverse=True)
-    merged_rows = _dedupe_search_results(merged_rows, limit=final_top)
+    merged_rows, merge_meta = _merge_multi_kb_results_fair(
+        merged_rows,
+        kb_ids=kb_ids,
+        limit=resolved_merge_top,
+    )
+    merge_meta["vector_top_k"] = resolved_vector_top
+    merge_meta["lightrag_top_k"] = resolved_lightrag_top
+
+    kb_result_counts: dict[int, int] = defaultdict(int)
+    for row in merged_rows:
+        kb_id = row.get("knowledge_base_id")
+        if kb_id is not None:
+            kb_result_counts[int(kb_id)] += 1
+    for kb_id in kb_ids:
+        record_usage_event(
+            db,
+            enterprise_space_id=space_id,
+            event_type="retrieval_call",
+            source="retrieval",
+            knowledge_base_id=kb_id,
+            result_count=kb_result_counts.get(kb_id, 0),
+        )
 
     return {
         "query": payload.query,
@@ -1712,4 +2053,6 @@ def search_knowledge_bases_multi(
         "knowledge_base_ids": kb_ids,
         "total": len(merged_rows),
         "results": merged_rows,
+        "merge_meta": merge_meta,
+        "path_results": path_results,
     }

@@ -12,7 +12,8 @@ from app.core.user_permissions import (
 )
 from app.db.session import get_db
 from app.models.enterprise_space import EnterpriseSpace, Membership, User
-from app.schemas.dashboard import DashboardOverviewResponse
+from app.schemas.dashboard import DashboardChatTopResponse, DashboardOverviewResponse, DashboardUsageResponse
+from app.services.usage_metrics_service import get_usage_timeseries
 from app.schemas.enterprise_space import (
     EnterpriseSpaceCreate,
     EnterpriseSpaceResponse,
@@ -24,7 +25,7 @@ from app.schemas.enterprise_space import (
     UserResponse,
 )
 
-from app.services.dashboard_service import get_space_dashboard_overview
+from app.services.dashboard_service import get_space_dashboard_overview, get_top_chat_conversations
 
 router = APIRouter(prefix="/enterprise-spaces", tags=["enterprise-space-management"])
 
@@ -92,6 +93,51 @@ def get_dashboard_overview(
 ) -> DashboardOverviewResponse:
     """当前企业空间仪表盘概览（知识库、检索语料、对话、模型、成员）。"""
     return get_space_dashboard_overview(db, space=current_space)
+
+
+@router.get("/dashboard/usage", response_model=DashboardUsageResponse)
+def get_dashboard_usage(
+    current_space: CurrentSpace,
+    _: RequireMembership,
+    db: Any = Depends(_get_db),
+    range: str = "24h",
+    metric: str = "model_calls",
+) -> DashboardUsageResponse:
+    """当前企业空间用量时间序列（模型调用 / Token / 对话 API）。"""
+    allowed_ranges = {"24h", "7d", "30d"}
+    allowed_metrics = {"model_calls", "tokens", "chat_api"}
+    range_key = range if range in allowed_ranges else "24h"
+    metric_key = metric if metric in allowed_metrics else "model_calls"
+    payload = get_usage_timeseries(
+        db,
+        space_id=current_space.id,
+        range_key=range_key,  # type: ignore[arg-type]
+        metric=metric_key,  # type: ignore[arg-type]
+    )
+    return DashboardUsageResponse(
+        space_id=current_space.id,
+        space_name=current_space.name,
+        **payload,
+    )
+
+
+@router.get("/dashboard/chat-top", response_model=DashboardChatTopResponse)
+def get_dashboard_chat_top(
+    current_space: CurrentSpace,
+    _: RequireMembership,
+    db: Any = Depends(_get_db),
+    range: str = "24h",
+) -> DashboardChatTopResponse:
+    """当前企业空间最常用对话助手 Top3（会话数 / 消息数）。"""
+    allowed_ranges = {"24h", "7d", "30d"}
+    range_key = range if range in allowed_ranges else "24h"
+    items = get_top_chat_conversations(db, space_id=current_space.id, range_key=range_key, limit=3)
+    return DashboardChatTopResponse(
+        space_id=current_space.id,
+        space_name=current_space.name,
+        range=range_key,
+        items=items,
+    )
 
 
 @router.post("", response_model=EnterpriseSpaceResponse, status_code=status.HTTP_201_CREATED)

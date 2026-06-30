@@ -2,6 +2,76 @@ import { http } from '../lib/http'
 
 export type RagMode = 'classic' | 'agentic'
 
+export interface AgentTraceCandidateSummary {
+  index: number
+  document_name: string
+  knowledge_base_name?: string
+  knowledge_base_id?: number | null
+  document_id?: number | null
+  chunk_id?: number | string | null
+  source?: string
+  page_no?: number | null
+  chunk_index?: number | null
+  score?: number
+  merge_score?: number
+  preview?: string
+  content?: string
+}
+
+export interface AgentTracePathCandidateSummary {
+  index: number
+  document_name: string
+  score?: number
+  merge_score?: number
+  preview?: string
+}
+
+export interface AgentTracePathResult {
+  knowledge_base_id?: number
+  knowledge_base_name?: string
+  kb_type?: 'classic' | 'lightrag' | string
+  mode?: string
+  path_top_k?: number
+  recalled_count?: number
+  candidates?: AgentTracePathCandidateSummary[]
+  error?: string | null
+}
+
+export interface AgentTraceMergeMeta {
+  strategy?: string
+  vector_top_k?: number
+  lightrag_top_k?: number
+  merge_top_k?: number
+  pre_merge_total?: number
+  post_merge_total?: number
+  dedupe_dropped?: number
+  type_breakdown?: { classic?: number; lightrag?: number }
+  merge_phases?: Array<{ phase?: string; count?: number; floor?: number; dropped?: number }>
+}
+
+export interface AgentTraceKbBreakdown {
+  knowledge_base_name: string
+  count: number
+}
+
+export interface AgentTraceGradeSummary {
+  index: number
+  document_name: string
+  knowledge_base_name?: string
+  knowledge_base_id?: number | null
+  document_id?: number | null
+  chunk_id?: number | string | null
+  source?: string
+  page_no?: number | null
+  chunk_index?: number | null
+  retrieval_score?: number
+  relevant: boolean
+  grade_score?: number
+  reason?: string
+  preview?: string
+  content?: string
+}
+
 export interface AgentTraceEvent {
   step: string
   elapsed_ms?: number | null
@@ -19,6 +89,20 @@ export interface AgentTraceEvent {
   route_pass?: number | null
   pre_retrieve_total?: number | null
   kb_context_chars?: number | null
+  top_k?: number | null
+  merge_top_k?: number | null
+  vector_top_k?: number | null
+  lightrag_top_k?: number | null
+  lightrag_query_mode?: string | null
+  lightrag_chunk_top_k?: number | null
+  kb_breakdown?: AgentTraceKbBreakdown[] | null
+  path_results?: AgentTracePathResult[] | null
+  merge_meta?: AgentTraceMergeMeta | null
+  merge_phases?: AgentTraceMergeMeta['merge_phases']
+  pre_retrieve_merge?: { from_main_retrieve?: number; from_pre_retrieve?: number; merged_total?: number } | null
+  candidates?: AgentTraceCandidateSummary[] | null
+  grades?: AgentTraceGradeSummary[] | null
+  evaluated_question?: string | null
 }
 
 /** 对话（1 个 chat 下多个 session） */
@@ -35,6 +119,8 @@ export interface ChatConversation {
   knowledge_base_ids?: number[]
   show_citations?: boolean
   retrieval_top_k?: number
+  vector_retrieval_top_k?: number
+  lightrag_retrieval_top_k?: number
   lightrag_query_mode?: 'naive' | 'local' | 'global' | 'hybrid' | 'mix'
   lightrag_chunk_top_k?: number | null
   temperature?: number
@@ -56,6 +142,7 @@ export interface ChatConversation {
   rag_mode?: RagMode
   agentic_max_iterations?: number
   agentic_min_relevant_docs?: number
+  agentic_context_user_turns?: number
 }
 
 export interface ChatSession {
@@ -78,6 +165,8 @@ export interface ChatConfiguration {
   show_citations?: boolean
   /** 与知识检索多库一致：合并后 Top K；各库内先放大候选再全局排序 */
   retrieval_top_k?: number
+  vector_retrieval_top_k?: number
+  lightrag_retrieval_top_k?: number
   lightrag_query_mode?: 'naive' | 'local' | 'global' | 'hybrid' | 'mix'
   lightrag_chunk_top_k?: number | null
   temperature: number
@@ -99,6 +188,7 @@ export interface ChatConfiguration {
   rag_mode?: RagMode
   agentic_max_iterations?: number
   agentic_min_relevant_docs?: number
+  agentic_context_user_turns?: number
 }
 
 /** 助手消息保存的知识库引文（与正文中的 [1]、[2] 角标对应） */
@@ -112,7 +202,9 @@ export interface ChatCitation {
   chunk_index?: number
   score?: number
   /** 检索来源：graph=图谱检索(LightRAG)，vector=向量/经典检索 */
-  source?: 'graph' | 'vector' | string
+  source?: 'graph' | 'vector' | 'lightrag' | string
+  metadata?: { source?: string } | null
+  knowledge_base_name?: string
   /** 图谱库引用随附的切片正文（其 chunk_id 为 LightRAG 内部 ID，无法 getChunk） */
   content?: string | null
 }

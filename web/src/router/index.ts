@@ -120,6 +120,15 @@ const router = createRouter({
       },
     },
     {
+      path: '/chat/:sessionId',
+      name: 'chat-session',
+      component: ChatView,
+      meta: {
+        title: '聊天助手',
+        description: '面向企业智能对话的 RAG 工作台。',
+      },
+    },
+    {
       path: '/chat',
       name: 'chat',
       component: ChatView,
@@ -172,7 +181,7 @@ router.beforeEach(async (to, _from, next) => {
   const isPublic = Boolean(to.meta.public)
 
   if (token && !authStore.initialized) {
-    await authStore.init()
+    await authStore.ensureInitialized()
   }
 
   if (!token && !isLoginPage && !isPublic) {

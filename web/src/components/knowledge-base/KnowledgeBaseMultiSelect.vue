@@ -51,6 +51,19 @@
             @keydown.escape.stop="closeWithoutSave"
           />
         </div>
+        <div class="kb-select-type-tabs" role="tablist" aria-label="知识库类型筛选">
+          <button
+            v-for="item in typeFilterOptions"
+            :key="item.value"
+            type="button"
+            role="tab"
+            :aria-selected="typeFilter === item.value"
+            :class="['kb-select-type-tab', { active: typeFilter === item.value }]"
+            @click="typeFilter = item.value"
+          >
+            {{ item.label }}
+          </button>
+        </div>
         <div class="kb-select-list scrollbar-pill">
           <label
             v-for="kb in filteredKbs"
@@ -64,6 +77,9 @@
             }}</span>
             <span class="kb-row-text">
               <span class="kb-row-name">{{ kb.name }}</span>
+              <span :class="['kb-row-type', isGraphKnowledgeBase(kb) ? 'kb-row-type--graph' : 'kb-row-type--vector']">
+                {{ isGraphKnowledgeBase(kb) ? '图数据库' : '向量数据库' }}
+              </span>
               <span class="kb-row-embed" :title="embeddingLabelTitleForKb(kb)">{{ embeddingLabelForKb(kb) }}</span>
             </span>
           </label>
@@ -82,6 +98,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import type { KnowledgeBase } from '../../api/knowledge-base'
+import { isGraphKnowledgeBase } from '../../lib/kbType'
 import { defaultModelApi, modelApi, type DefaultModelOption, type ModelItem } from '../../api/model-management'
 import AppIcon from '../AppIcon.vue'
 
@@ -114,6 +131,14 @@ const panelStyle = ref<Record<string, string>>({})
 /** 下拉内勾选仅改草稿，点「保存」再写回 modelValue */
 const draftIds = ref<number[]>([])
 const searchQuery = ref('')
+type KbTypeFilter = 'all' | 'vector' | 'graph'
+const typeFilter = ref<KbTypeFilter>('all')
+
+const typeFilterOptions: { value: KbTypeFilter; label: string }[] = [
+  { value: 'all', label: '全部' },
+  { value: 'vector', label: '向量数据库' },
+  { value: 'graph', label: '图数据库' },
+]
 
 function updatePanelPosition() {
   const trigger = rootEl.value
@@ -124,8 +149,10 @@ function updatePanelPosition() {
   const gap = 6
   const spaceBelow = window.innerHeight - rect.bottom - 12
   const spaceAbove = rect.top - 12
-  const openBelow = spaceBelow >= 240 || spaceBelow >= spaceAbove
-  const maxHeight = Math.max(180, Math.min(360, openBelow ? spaceBelow : spaceAbove))
+  const panelMaxHeight = 520
+  const panelMinHeight = 280
+  const openBelow = spaceBelow >= 320 || spaceBelow >= spaceAbove
+  const maxHeight = Math.max(panelMinHeight, Math.min(panelMaxHeight, openBelow ? spaceBelow : spaceAbove))
   const style: Record<string, string> = {
     position: 'fixed',
     left: `${Math.round(rect.left)}px`,
@@ -199,7 +226,12 @@ function embeddingLabelTitleForKb(kb: KnowledgeBase): string | undefined {
 
 const filteredKbs = computed(() => {
   const q = searchQuery.value.trim().toLowerCase()
-  const list = props.knowledgeBases.filter((kb) => kb.status === 'active')
+  let list = props.knowledgeBases.filter((kb) => kb.status === 'active')
+  if (typeFilter.value === 'vector') {
+    list = list.filter((kb) => !isGraphKnowledgeBase(kb))
+  } else if (typeFilter.value === 'graph') {
+    list = list.filter((kb) => isGraphKnowledgeBase(kb))
+  }
   if (!q) {
     return list
   }
@@ -270,11 +302,13 @@ function saveAndClose() {
   emit('update:modelValue', [...draftIds.value])
   open.value = false
   searchQuery.value = ''
+  typeFilter.value = 'all'
 }
 
 function closeWithoutSave() {
   open.value = false
   searchQuery.value = ''
+  typeFilter.value = 'all'
 }
 
 function toggleOpen() {
@@ -312,6 +346,7 @@ watch(open, (v) => {
     window.removeEventListener('resize', onReposition)
     window.removeEventListener('scroll', onReposition, true)
     searchQuery.value = ''
+    typeFilter.value = 'all'
   }
 })
 
@@ -471,7 +506,7 @@ onMounted(async () => {
   position: fixed;
   display: flex;
   flex-direction: column;
-  max-height: min(360px, 52vh);
+  max-height: min(520px, 65vh);
   border-radius: 16px;
   border: 1px solid var(--border-color);
   background: var(--bg-primary);
@@ -499,6 +534,33 @@ onMounted(async () => {
   min-height: 38px;
   padding: 0 10px;
   border-radius: 10px;
+}
+
+.kb-select-type-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+}
+
+.kb-select-type-tab {
+  border: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 0.74rem;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.kb-select-type-tab.active {
+  background: rgba(59, 130, 246, 0.12);
+  border-color: rgba(59, 130, 246, 0.35);
+  color: #2563eb;
+  font-weight: 600;
 }
 
 .kb-select-list {
@@ -559,6 +621,24 @@ onMounted(async () => {
   font-weight: 600;
   color: var(--text-primary);
   word-break: break-word;
+}
+
+.kb-row-type {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 600;
+}
+
+.kb-row-type--vector {
+  background: rgba(59, 130, 246, 0.1);
+  color: #2563eb;
+}
+
+.kb-row-type--graph {
+  background: rgba(239, 68, 68, 0.1);
+  color: #dc2626;
 }
 
 .kb-row-embed {

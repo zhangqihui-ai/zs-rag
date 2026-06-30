@@ -41,7 +41,7 @@ def build_state_from_conversation(
     user_content: str,
     chat_history: list[dict[str, str]] | None = None,
 ) -> tuple[AgenticRAGState, Any]:
-    from app.services.chat_service import _llm_sampling_kwargs, _resolve_chat_llm
+    from app.services.chat_service import _clamp_agentic_context_user_turns, _llm_sampling_kwargs, _resolve_chat_llm
 
     provider_cfg, api_model_name = _resolve_chat_llm(db, conv=conv, enterprise_space_id=enterprise_space_id)
     provider = get_provider(provider_cfg)
@@ -66,12 +66,19 @@ def build_state_from_conversation(
         "iterations": 0,
         "max_iterations": _clamp_agentic_iterations(getattr(conv, "agentic_max_iterations", None)),
         "min_relevant_docs": _clamp_agentic_min_relevant(getattr(conv, "agentic_min_relevant_docs", None)),
+        "context_user_turns": _clamp_agentic_context_user_turns(
+            getattr(conv, "agentic_context_user_turns", None)
+        ),
         "top_k": int(getattr(conv, "retrieval_top_k", None) or 8),
+        "vector_top_k": int(getattr(conv, "vector_retrieval_top_k", None) or 8),
+        "lightrag_top_k": int(getattr(conv, "lightrag_retrieval_top_k", None) or 8),
         "retrieval_mode": None,
         "score_threshold": None,
         "vector_weight": None,
         "fusion_method": None,
         "include_image_ocr": None,
+        "lightrag_query_mode": str(getattr(conv, "lightrag_query_mode", None) or "mix"),
+        "lightrag_chunk_top_k": getattr(conv, "lightrag_chunk_top_k", None),
         "llm_provider": provider,
         "llm_model_name": api_model_name,
         "temperature": sampling.get("temperature"),

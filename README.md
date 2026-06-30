@@ -75,6 +75,76 @@ cp .env.template .env
 docker compose -f docker-compose.prod.yml up -d --build
 ```
 
+#### 停启全部服务
+
+`celery-worker`、`mineru-cpu`、`opendataloader-hybrid` 等可选组件使用了 Compose **profile**。直接执行 `docker compose stop` 只会停止默认服务（约 9 个容器），profile 服务仍会保持运行。
+
+先定义与当前部署一致的 compose 命令（可按实际启用的 override 文件增减）：
+
+```bash
+# 开发环境（含 MinerU offline + ODL Hybrid，与常见全量部署一致）
+COMPOSE="docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.mineru-offline.yml \
+  -f docker-compose.odl-hybrid.yml"
+
+# 启用的可选 profile（按需增减；未启用 MinerU / Hybrid / Celery 时去掉对应项）
+PROFILES="--profile celery --profile mineru --profile odl-hybrid"
+```
+
+**停止全部服务**（保留容器，可用 `start` 快速恢复）：
+
+```bash
+$COMPOSE $PROFILES stop
+```
+
+**停止并移除全部容器**：
+
+```bash
+$COMPOSE $PROFILES down
+```
+
+**启动全部服务**：
+
+```bash
+$COMPOSE $PROFILES up -d
+```
+
+**仅启动核心服务**（不含 Celery / MinerU / Hybrid）：
+
+```bash
+docker compose up -d
+```
+
+**确认是否已全部停止**：
+
+```bash
+docker compose ps -a
+# 或
+docker ps --filter "name=zs-rag-"
+```
+
+若仍有残留容器，可强制停止：
+
+```bash
+docker stop $(docker ps -q --filter "name=zs-rag-") 2>/dev/null || true
+```
+
+生产环境（含 registry 覆盖时，按 `.env` 中实际启用的 profile 调整）：
+
+```bash
+COMPOSE_PROD="docker compose \
+  -f docker-compose.prod.yml \
+  -f docker-compose.prod.registry.yml"
+PROFILES_PROD="--profile celery --profile mineru --profile odl-hybrid"
+
+# 停止
+$COMPOSE_PROD $PROFILES_PROD stop
+
+# 启动
+$COMPOSE_PROD $PROFILES_PROD up -d --no-build
+```
+
 #### 访问服务
 
 - **前端**: http://localhost:80

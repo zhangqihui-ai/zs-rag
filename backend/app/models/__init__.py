@@ -12,6 +12,7 @@ from app.models.model_management import AIModel, AIModelDefault, AIModelProvider
 from app.models.chat import ChatConversation, ChatSession, ChatMessage
 from app.models.chat_embed_api_key import ChatEmbedApiKey
 from app.models.platform_audit import PlatformAuditEvent
+from app.models.platform_usage import PlatformUsageEvent
 from app.models.rag_evaluation import (
     RagBenchmark,
     RagBenchmarkItem,
@@ -39,6 +40,7 @@ __all__ = [
     "ChatMessage",
     "ChatEmbedApiKey",
     "PlatformAuditEvent",
+    "PlatformUsageEvent",
     "RagBenchmark",
     "RagBenchmarkItem",
     "RagEvaluationRun",

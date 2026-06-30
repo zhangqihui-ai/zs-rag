@@ -105,7 +105,9 @@ export function buildChatApiAccessGroups(): ChatApiGroupDef[] {
     "max_tokens": 2000,
     "top_p": 1.0,
     "show_citations": true,
-    "retrieval_top_k": 5
+    "retrieval_top_k": 5,
+    "vector_retrieval_top_k": 8,
+    "lightrag_retrieval_top_k": 8
   }
 }`,
         },
@@ -206,7 +208,9 @@ export function buildChatApiAccessGroups(): ChatApiGroupDef[] {
   "max_tokens": 2000,
   "top_p": 1.0,
   "show_citations": true,
-  "retrieval_top_k": 5
+  "retrieval_top_k": 5,
+  "vector_retrieval_top_k": 8,
+  "lightrag_retrieval_top_k": 8
 }`,
         },
       ],

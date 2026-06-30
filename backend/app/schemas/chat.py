@@ -3,7 +3,12 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.core.knowledge_retrieval_defaults import DEFAULT_TOP_K
+from app.core.knowledge_retrieval_defaults import (
+    DEFAULT_LIGHTRAG_RETRIEVAL_TOP_K,
+    DEFAULT_MERGE_TOP_K,
+    DEFAULT_TOP_K,
+    DEFAULT_VECTOR_RETRIEVAL_TOP_K,
+)
 
 DEFAULT_OPENING_GREETING = "你好，我是你的智能助手，有什么需要帮助的吗？"
 
@@ -81,13 +86,22 @@ class ChatConfigurationBase(BaseModel):
         description="是否在问答中展示引文角标与来源列表（知识库检索开启时生效）。",
     )
     retrieval_top_k: int = Field(
-        default=DEFAULT_TOP_K,
+        default=DEFAULT_MERGE_TOP_K,
         ge=1,
         le=50,
-        description=(
-            "与知识库 default_top_k / 检索测试 Top K 一致："
-            "单库时即该库召回条数；多库时为合并排序后注入上下文的上限。"
-        ),
+        description="多路检索合并排序、去重后写入上下文的上限（合并最终 Top K）。",
+    )
+    vector_retrieval_top_k: int = Field(
+        default=DEFAULT_VECTOR_RETRIEVAL_TOP_K,
+        ge=1,
+        le=50,
+        description="经典/向量知识库单路召回 Top K。",
+    )
+    lightrag_retrieval_top_k: int = Field(
+        default=DEFAULT_LIGHTRAG_RETRIEVAL_TOP_K,
+        ge=1,
+        le=50,
+        description="图知识库 LightRAG top_k（实体/关系/片段预算）。",
     )
     lightrag_query_mode: str = Field(
         default="mix",
@@ -178,6 +192,12 @@ class ChatConfigurationBase(BaseModel):
         le=10,
         description="Agentic 模式判定检索足够的最少相关片段数。",
     )
+    agentic_context_user_turns: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="Agentic 检索/改写时纳入的 prior 用户问题条数。",
+    )
 
 
 class ChatConfigurationUpdate(ChatConfigurationBase):
@@ -249,6 +269,7 @@ class ChatConversationResponse(BaseModel):
     rag_mode: str = "classic"
     agentic_max_iterations: int = 2
     agentic_min_relevant_docs: int = 1
+    agentic_context_user_turns: int = 3
 
     class Config:
         from_attributes = True

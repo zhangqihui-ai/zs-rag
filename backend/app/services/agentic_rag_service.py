@@ -90,6 +90,7 @@ def _initial_state(
     provider = get_provider(provider_cfg)
     max_iterations = payload.max_iterations or settings.agentic_rag_max_iterations
     min_relevant_docs = payload.min_relevant_docs or settings.agentic_rag_min_relevant_docs
+    context_user_turns = payload.context_user_turns if payload.context_user_turns is not None else 3
     kb_ids = list(payload.knowledge_base_ids)
     kb_context = build_kb_route_context(
         db,
@@ -109,6 +110,7 @@ def _initial_state(
         "iterations": 0,
         "max_iterations": max(1, min(5, int(max_iterations))),
         "min_relevant_docs": max(1, min(10, int(min_relevant_docs))),
+        "context_user_turns": max(1, min(10, int(context_user_turns))),
         "top_k": int(payload.top_k),
         "retrieval_mode": payload.mode,
         "score_threshold": payload.score_threshold,

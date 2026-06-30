@@ -39,6 +39,8 @@ class ChatConversation(Base):
     knowledge_base_ids: Mapped[list[int]] = mapped_column(JSON, default=list, nullable=False)
     show_citations: Mapped[bool] = mapped_column(default=True, nullable=False)
     retrieval_top_k: Mapped[int] = mapped_column(Integer, default=8, nullable=False)
+    vector_retrieval_top_k: Mapped[int] = mapped_column(Integer, default=8, nullable=False)
+    lightrag_retrieval_top_k: Mapped[int] = mapped_column(Integer, default=8, nullable=False)
     lightrag_query_mode: Mapped[str] = mapped_column(String(20), default="mix", nullable=False)
     lightrag_chunk_top_k: Mapped[int | None] = mapped_column(Integer, nullable=True)
     temperature: Mapped[float] = mapped_column(Float, default=0.7, nullable=False)
@@ -62,6 +64,7 @@ class ChatConversation(Base):
     rag_mode: Mapped[str] = mapped_column(String(20), default="classic", nullable=False)
     agentic_max_iterations: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
     agentic_min_relevant_docs: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    agentic_context_user_turns: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
 
     sessions: Mapped[list["ChatSession"]] = relationship(
         "ChatSession",

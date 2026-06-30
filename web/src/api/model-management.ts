@@ -211,8 +211,12 @@ export const modelApi = {
     is_enabled?: boolean
     keyword?: string
     view?: 'grouped' | 'flat'
+    signal?: AbortSignal
   }) {
-    return unwrap<ModelItem[] | ProviderModelsGroup[]>(http.get('/api/v1/ai-models/models', { params }))
+    const { signal, ...query } = params ?? {}
+    return unwrap<ModelItem[] | ProviderModelsGroup[]>(
+      http.get('/api/v1/ai-models/models', { params: query, signal }),
+    )
   },
   getModelDetail(modelId: number) {
     return unwrap<ModelItem>(http.get(`/api/v1/ai-models/models/${modelId}`))
@@ -223,8 +227,8 @@ export const modelApi = {
 }
 
 export const defaultModelApi = {
-  getDefaults() {
-    return unwrap<DefaultsData>(http.get('/api/v1/ai-models/defaults'))
+  getDefaults(options?: { signal?: AbortSignal }) {
+    return unwrap<DefaultsData>(http.get('/api/v1/ai-models/defaults', { signal: options?.signal }))
   },
   saveDefaults(payload: Record<ModelType, number | null>) {
     return unwrap<boolean>(http.put('/api/v1/ai-models/defaults', payload))

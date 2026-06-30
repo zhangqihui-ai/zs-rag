@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.api.routes.chats import ChatId
+from app.core.async_sse import _sse_headers, iter_sse_from_sync_iterator
 from app.core.enterprise_space_context import CurrentSpace, CurrentUser, RequireMembership
 from app.core.errors import AppError
 from app.core.openai_compat import (
@@ -18,16 +18,18 @@ from app.core.openai_compat import (
     resolve_response_model_name,
     resolve_session_id_from_body,
 )
-from app.db.session import SessionLocal, get_db
+from app.db.session import get_db
 from app.models.chat import ChatConversation
 from app.schemas.chat import ChatCompletionsRequest
 from app.services import chat_service
+from app.services.usage_metrics_service import record_usage_event
 
 router = APIRouter(tags=["chat-completions"])
 openai_router = APIRouter(tags=["openai-chat-completions"])
 
 async def _execute_chat_completion(
     *,
+    request: Request,
     payload: ChatCompletionsRequest,
     chat_id: str,
     current_space: CurrentSpace,
@@ -60,43 +62,50 @@ async def _execute_chat_completion(
 
     if payload.stream:
 
-        async def event_gen():
-            stream_db = SessionLocal()
-            try:
-                iterator = chat_service.iter_openai_completion_events(
-                    stream_db,
-                    session_id=session_id,
-                    chat_id=chat_id,
-                    user_id=user_id,
-                    enterprise_space_id=enterprise_space_id,
-                    user_content_to_persist=user_text,
-                    llm_messages=llm_messages,
-                    turn_citations=turn_citations,
-                    response_model=response_model,
-                    forced_assistant_content=empty_reply,
-                )
-                for event in iterator:
-                    line = json.dumps(event, ensure_ascii=False)
-                    yield f"data: {line}\n\n".encode("utf-8")
-                    await asyncio.sleep(0)
-                yield b"data: [DONE]\n\n"
-            except AppError as e:
-                err = {"error": {"message": e.message, "type": "invalid_request_error", "code": e.code}}
-                yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n".encode("utf-8")
-            except Exception as e:
-                err = {"error": {"message": str(e), "type": "internal_error"}}
-                yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n".encode("utf-8")
-            finally:
-                stream_db.close()
+        def build_sync_iter(stream_db: Session):
+            return chat_service.iter_openai_completion_events(
+                stream_db,
+                session_id=session_id,
+                chat_id=chat_id,
+                user_id=user_id,
+                enterprise_space_id=enterprise_space_id,
+                user_content_to_persist=user_text,
+                llm_messages=llm_messages,
+                turn_citations=turn_citations,
+                response_model=response_model,
+                forced_assistant_content=empty_reply,
+            )
+
+        def after_stream(stream_db: Session) -> None:
+            record_usage_event(
+                stream_db,
+                enterprise_space_id=enterprise_space_id,
+                event_type="chat_api",
+                source="openai_compat",
+                user_id=user_id,
+            )
+
+        def openai_error_event(exc: Exception) -> dict[str, object]:
+            if isinstance(exc, AppError):
+                return {
+                    "error": {
+                        "message": exc.message,
+                        "type": "invalid_request_error",
+                        "code": exc.code,
+                    }
+                }
+            return {"error": {"message": str(exc), "type": "internal_error"}}
 
         return StreamingResponse(
-            event_gen(),
+            iter_sse_from_sync_iterator(
+                request,
+                build_sync_iter,
+                after_stream=after_stream,
+                trailing_chunks=[b"data: [DONE]\n\n"],
+                error_event_builder=openai_error_event,
+            ),
             media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
+            headers=_sse_headers(),
         )
 
     try:
@@ -117,6 +126,14 @@ async def _execute_chat_completion(
     except Exception as e:
         raise AppError(status_code=500, code="COMPLETION_FAILED", message=str(e)) from e
 
+    record_usage_event(
+        db,
+        enterprise_space_id=current_space.id,
+        event_type="chat_api",
+        source="openai_compat",
+        user_id=current_user.id,
+    )
+
     body = build_chat_completion_response(
         completion_id=str(result["completion_id"]),
         created=int(result["created"]),
@@ -131,6 +148,7 @@ async def _execute_chat_completion(
 
 @router.post("/completions")
 async def chat_completions_legacy(
+    request: Request,
     payload: ChatCompletionsRequest,
     current_space: CurrentSpace,
     current_user: CurrentUser,
@@ -145,6 +163,7 @@ async def chat_completions_legacy(
     if not (payload.chat_id or "").strip():
         raise AppError(status_code=400, code="CHAT_ID_REQUIRED", message="chat_id is required in request body")
     return await _execute_chat_completion(
+        request=request,
         payload=payload,
         chat_id=str(payload.chat_id).strip(),
         current_space=current_space,
@@ -155,6 +174,7 @@ async def chat_completions_legacy(
 
 @openai_router.post("/{chat_id}/chat/completions")
 async def openai_chat_completions(
+    request: Request,
     chat_id: ChatId,
     payload: ChatCompletionsRequest,
     current_space: CurrentSpace,
@@ -169,6 +189,7 @@ async def openai_chat_completions(
     扩展：`session_id` 或 `extra_body.session_id` 用于多轮会话。
     """
     return await _execute_chat_completion(
+        request=request,
         payload=payload,
         chat_id=chat_id,
         current_space=current_space,

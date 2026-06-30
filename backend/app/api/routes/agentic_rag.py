@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import asyncio
-import json
-
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from app.core.async_sse import _sse_headers, iter_sse_from_sync_iterator
 from app.core.enterprise_space_context import CurrentSpace, RequireMembership
-from app.db.session import SessionLocal, get_db
+from app.db.session import get_db
 from app.schemas.agentic_rag import AgenticRAGCompleteResponse, AgenticRAGQueryRequest
 from app.services import agentic_rag_service
 
@@ -17,6 +15,7 @@ router = APIRouter(tags=["agentic-rag"])
 
 @router.post("/query")
 async def query_agentic_rag_sse(
+    request: Request,
     payload: AgenticRAGQueryRequest,
     current_space: CurrentSpace,
     _: RequireMembership,
@@ -25,31 +24,17 @@ async def query_agentic_rag_sse(
 
     enterprise_space_id = current_space.id
 
-    async def event_gen():
-        stream_db = SessionLocal()
-        try:
-            for event in agentic_rag_service.iter_agentic_rag_events(
-                stream_db,
-                enterprise_space_id=enterprise_space_id,
-                payload=payload,
-            ):
-                line = json.dumps(event, ensure_ascii=False)
-                yield f"data: {line}\n\n".encode("utf-8")
-                await asyncio.sleep(0)
-        except Exception as exc:
-            err = json.dumps({"type": "error", "message": str(exc)}, ensure_ascii=False)
-            yield f"data: {err}\n\n".encode("utf-8")
-        finally:
-            stream_db.close()
+    def build_sync_iter(stream_db: Session):
+        return agentic_rag_service.iter_agentic_rag_events(
+            stream_db,
+            enterprise_space_id=enterprise_space_id,
+            payload=payload,
+        )
 
     return StreamingResponse(
-        event_gen(),
+        iter_sse_from_sync_iterator(request, build_sync_iter),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
+        headers=_sse_headers(),
     )
 
 

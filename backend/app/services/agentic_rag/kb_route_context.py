@@ -12,6 +12,20 @@ _KB_TYPE_LABEL = {
     "lightrag": "图知识库",
 }
 
+_GENERATE_KB_BINDING_INSTRUCTION = (
+    "当前对话已绑定以下知识库（本轮可能未检索文档内容）。"
+    "若用户询问绑定了哪些知识库、知识范围或检索能力，请依据下列信息如实回答，"
+    "不要声称未绑定或未选择任何知识库。"
+)
+
+
+def format_kb_binding_for_generate(kb_context: str) -> str:
+    """Format bound-KB metadata for the final answer LLM when retrieval was skipped."""
+    text = (kb_context or "").strip()
+    if not text:
+        return ""
+    return f"{_GENERATE_KB_BINDING_INSTRUCTION}\n\n已绑定知识库：\n{text}"
+
 
 def build_kb_route_context(
     db: Session,
